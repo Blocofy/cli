@@ -27,7 +27,7 @@ function themeFixture() {
   return dir;
 }
 
-test("readLocalTemplates: yalnız THEME_DIRS, .liquid strip, asset uzantısı korunur", () => {
+test("readLocalTemplates: only THEME_DIRS, .liquid stripped, asset extension kept", () => {
   const dir = themeFixture();
   const t = readLocalTemplates(dir);
   assert.deepEqual(Object.keys(t).sort(), ["asset/logo.svg", "asset/theme.css", "section/Hero"]);
@@ -36,9 +36,9 @@ test("readLocalTemplates: yalnız THEME_DIRS, .liquid strip, asset uzantısı ko
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("injectLivereload: </body>'den önce EventSource enjekte eder", () => {
+test("injectLivereload: inserts EventSource before </body>", () => {
   assert.match(injectLivereload("<body>x</body>"), /EventSource[\s\S]*<\/body>/);
-  assert.match(injectLivereload("nobody"), /EventSource/); // </body> yoksa sona ekler
+  assert.match(injectLivereload("nobody"), /EventSource/); // appends when no </body>
 });
 
 test("contentTypeFor", () => {
@@ -47,8 +47,8 @@ test("contentTypeFor", () => {
   assert.equal(contentTypeFor("/x.bin"), "application/octet-stream");
 });
 
-test("dev server: sayfayı /api/dev/render'a proxy'ler + livereload; asset diskten; SSE", async () => {
-  // Sahte platform render endpoint'i.
+test("dev server: proxies page to /api/dev/render + livereload; asset from disk; SSE", async () => {
+  // Fake platform render endpoint.
   let seen = null;
   const fake = createServer((req, res) => {
     let body = "";
@@ -75,31 +75,31 @@ test("dev server: sayfayı /api/dev/render'a proxy'ler + livereload; asset diskt
     rmSync(dir, { recursive: true, force: true });
   });
 
-  // Sayfa isteği → render proxy + token + templates gönderilir, livereload eklenir.
-  const pageRes = await fetch(`${baseUrl}/hakkimizda`);
+  // Page request → render proxied with token + templates, livereload injected.
+  const pageRes = await fetch(`${baseUrl}/about`);
   const pageHtml = await pageRes.text();
   assert.equal(pageRes.status, 200);
-  assert.match(pageHtml, /page:\/hakkimizda/);
+  assert.match(pageHtml, /page:\/about/);
   assert.match(pageHtml, /EventSource/);
   assert.equal(seen.auth, "Bearer bcf_test");
   assert.equal(seen.body.templates["section/Hero"], "HERO");
 
-  // /asset/* → diskten servis.
+  // /asset/* → served from disk.
   const assetRes = await fetch(`${baseUrl}/asset/logo.svg`);
   assert.equal(assetRes.headers.get("content-type"), "image/svg+xml");
   assert.equal(await assetRes.text(), "<svg/>");
 
-  // SSE livereload kanalı event-stream döner.
+  // SSE livereload channel returns an event-stream.
   const ac = new AbortController();
   const sseRes = await fetch(`${baseUrl}${LIVERELOAD_PATH}`, { signal: ac.signal });
   assert.equal(sseRes.headers.get("content-type"), "text/event-stream");
   ac.abort();
 });
 
-test("dev server: platform hata dönerse 4xx + hata sayfası (livereload'lı)", async () => {
+test("dev server: platform error → 4xx + error page (with livereload)", async () => {
   const fake = createServer((req, res) => {
     res.writeHead(401, { "content-type": "application/json" });
-    res.end(JSON.stringify({ error: "Token tanınmadı." }));
+    res.end(JSON.stringify({ error: "Unknown token." }));
   });
   fake.listen(0);
   await once(fake, "listening");
@@ -122,6 +122,6 @@ test("dev server: platform hata dönerse 4xx + hata sayfası (livereload'lı)", 
   const res = await fetch(`http://localhost:${dev.server.address().port}/`);
   assert.equal(res.status, 401);
   const html = await res.text();
-  assert.match(html, /Token tanınmadı/);
+  assert.match(html, /Unknown token/);
   assert.match(html, /EventSource/);
 });

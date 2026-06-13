@@ -9,14 +9,14 @@ import { after, test } from "node:test";
 import { localPathFor } from "../lib/local-theme.mjs";
 import { pullTheme, pushTheme } from "../lib/theme-sync.mjs";
 
-test("localPathFor: liquid kind'lara .liquid ekler, asset ham", () => {
+test("localPathFor: adds .liquid for Liquid kinds, leaves assets raw", () => {
   assert.equal(localPathFor("section/Hero"), "section/Hero.liquid");
   assert.equal(localPathFor("layout/theme"), "layout/theme.liquid");
   assert.equal(localPathFor("asset/theme.css"), "asset/theme.css");
-  assert.equal(localPathFor("section/Hero.liquid"), "section/Hero.liquid"); // çift uzantı yok
+  assert.equal(localPathFor("section/Hero.liquid"), "section/Hero.liquid"); // no double extension
 });
 
-test("pullTheme: GET /api/dev/theme → diske .liquid re-map'li yazar", async () => {
+test("pullTheme: GET /api/dev/theme → writes to disk with .liquid re-added", async () => {
   const fake = createServer((req, res) => {
     assert.equal(req.method, "GET");
     assert.equal(req.headers.authorization, "Bearer bcf_t");
@@ -42,7 +42,7 @@ test("pullTheme: GET /api/dev/theme → diske .liquid re-map'li yazar", async ()
   assert.equal(readFileSync(join(dir, "asset", "theme.css"), "utf8"), ".x{}");
 });
 
-test("pushTheme: readLocalTemplates → POST {files} (stripped key); sonucu döner", async () => {
+test("pushTheme: readLocalTemplates → POST {files} (stripped keys); returns result", async () => {
   let received = null;
   const fake = createServer((req, res) => {
     let body = "";
@@ -71,5 +71,5 @@ test("pushTheme: readLocalTemplates → POST {files} (stripped key); sonucu dön
     token: "bcf_t",
   });
   assert.deepEqual(result, { ok: true, created: 1, updated: 0, skippedDeletes: 2 });
-  assert.equal(received.files["section/Hero"], "H"); // .liquid strip'li key gönderildi
+  assert.equal(received.files["section/Hero"], "H"); // stripped key sent
 });

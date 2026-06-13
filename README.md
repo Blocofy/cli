@@ -1,48 +1,65 @@
 # @blocofy/cli
 
-Blocofy tema geliştirme CLI — Shopify CLI modeli: local tema + **canlı veri** ile anında
-önizleme, sonra yayına alma. CLI **build almaz**; asset'leri kendi araçlarınla
-(npm/Vite/Tailwind) üretirsin, platform Liquid + statik asset olarak sunar.
+Develop your [Blocofy](https://blocofy.com) theme locally against **live data**, see an
+instant preview, and publish. The CLI does **not** build assets — generate them with your
+own tools (npm/Vite/Tailwind); the platform serves plain Liquid + static assets.
 
 ```bash
-npx @blocofy/cli login          # site URL + dev token (admin → Ayarlar → Tema CLI token'ları)
-cd path/to/tema
-npx @blocofy/cli theme dev       # http://localhost:3030 — local tema + canlı veri, livereload
+npx @blocofy/cli login          # site URL + dev token (admin panel: Settings → Theme CLI tokens)
+cd path/to/theme
+npx @blocofy/cli theme dev       # http://localhost:3030 — local theme + live data, livereload
 ```
 
-## Komutlar
+## Commands
 
 ```bash
 blocofy login [--url <url>] [--token <bcf_…>]
-                          # Platform URL + dev token kaydet (~/.blocofy/credentials.json, 0600).
-blocofy theme dev [dir]   # Local dev sunucusu: düzenle → tarayıcı otomatik yenilenir.
-                          # --port <n> (varsayılan 3030)
-blocofy theme pull [dir]  # Canlı temayı diske indir.
-blocofy theme push [dir]  # Local temayı canlı siteye yaz (create/update; silme yok).
+                          # Save your platform URL + dev token (~/.blocofy/credentials.json, 0600).
+blocofy theme dev [dir]   # Local dev server: edit a file and the browser reloads automatically.
+                          # --port <n> (default 3030)
+blocofy theme pull [dir]  # Download the live theme to disk.
+blocofy theme push [dir]  # Write the local theme to the live site (create/update; no delete).
 blocofy --version
 blocofy --help
 ```
 
-## Nasıl çalışır
+## How it works
 
-`theme dev` kendi http sunucusunu açar; her sayfa isteğinde local tema dosyalarını okuyup
-platformun dev-render endpoint'ine (`/api/dev/render`) gönderir. Platform site'ın **canlı
-verisiyle** render edip HTML döner — yani CLI render motorunu içermez, üretimle birebir aynı
-çıktı görürsün. `fs.watch` ile dosya değişince tarayıcı SSE üzerinden yenilenir.
+`theme dev` starts a local HTTP server. For each page request it reads your local theme
+files and sends them to the platform's dev-render endpoint (`/api/dev/render`). The platform
+renders them with the site's **live data** and returns HTML — so the CLI ships no rendering
+engine and you see exactly the production output. A file watcher reloads the browser over
+Server-Sent Events when you save.
 
-Kimlik bilgisi: `~/.blocofy/credentials.json` ya da `BLOCOFY_URL` + `BLOCOFY_TOKEN` ortam
-değişkenleri (CI/agent için).
+Credentials come from `~/.blocofy/credentials.json` (written by `blocofy login`) or the
+`BLOCOFY_URL` + `BLOCOFY_TOKEN` environment variables (for CI/automation).
 
-## Geliştirme
+## Theme structure
 
-Zero-dependency (yalnız Node yerleşikleri). Test:
+A theme is a directory of files grouped by top-level folder:
+
+| Folder | Contents |
+| --- | --- |
+| `layout/` | Page shell (`theme.liquid`) |
+| `section/` | Page sections (`Hero.liquid`, `FeaturedCards.liquid`, …) |
+| `block/` | Repeatable pieces used inside sections |
+| `partial/` | Shared snippets (header/footer, …) |
+| `asset/` | CSS and static files (`theme.css`) |
+| `pages/<slug>.json` | Page content (`/` → `pages/index.json`) |
+| `config/settings.json` | Theme settings + color schemes |
+
+Liquid templates use the `.liquid` extension; files under `asset/` are served as-is.
+
+## Development
+
+Zero runtime dependencies (Node built-ins only). Run the tests with:
 
 ```bash
 node --test
 ```
 
-Node ≥ 18 gerekir.
+Requires Node ≥ 18.
 
-## Lisans
+## License
 
 [MIT](./LICENSE)

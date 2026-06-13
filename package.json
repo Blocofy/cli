@@ -1,7 +1,7 @@
 {
   "name": "@blocofy/cli",
   "version": "0.1.0",
-  "description": "Blocofy tema geliştirme CLI — local dev, pull, push (Shopify CLI modeli).",
+  "description": "Develop your Blocofy theme locally against live data with instant preview — login, theme dev, pull, push.",
   "type": "module",
   "license": "MIT",
   "author": "Blocofy",
@@ -18,7 +18,7 @@
     "theme",
     "cli",
     "liquid",
-    "shopify-cli"
+    "theme-development"
   ],
   "bin": {
     "blocofy": "./bin/blocofy.mjs"
