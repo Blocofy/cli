@@ -1,0 +1,39 @@
+{
+  "name": "@blocofy/cli",
+  "version": "0.1.0",
+  "description": "Blocofy tema geliştirme CLI — local dev, pull, push (Shopify CLI modeli).",
+  "type": "module",
+  "license": "MIT",
+  "author": "Blocofy",
+  "homepage": "https://github.com/Blocofy/cli#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Blocofy/cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Blocofy/cli/issues"
+  },
+  "keywords": [
+    "blocofy",
+    "theme",
+    "cli",
+    "liquid",
+    "shopify-cli"
+  ],
+  "bin": {
+    "blocofy": "./bin/blocofy.mjs"
+  },
+  "files": [
+    "bin",
+    "lib"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

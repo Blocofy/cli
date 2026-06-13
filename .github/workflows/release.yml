@@ -1,0 +1,32 @@
+name: Release
+
+# @blocofy/cli'yi npm'e yayınla — `v*` tag'i push'lanınca.
+# Gerekli (bir kez): repo secret NPM_TOKEN (npmjs.com @blocofy automation token).
+# Tag yoksa hiç çalışmaz.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+
+      # Zero-dep — kurulum yok; testler node:test ile.
+      - name: Test
+        run: node --test
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
