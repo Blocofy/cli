@@ -73,3 +73,34 @@ test("pushTheme: readLocalTemplates → POST {files} (stripped keys); returns re
   assert.deepEqual(result, { ok: true, created: 1, updated: 0, skippedDeletes: 2 });
   assert.equal(received.files["section/Hero"], "H"); // stripped key sent
 });
+
+test("pushTheme --draft: sends body.draft true; returns draft result", async () => {
+  let received = null;
+  const fake = createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      received = JSON.parse(body);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, draft: true, instanceId: 77, created: 2, updated: 0, skippedDeletes: 0 }));
+    });
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  const dir = mkdtempSync(join(tmpdir(), "blocofy-draft-"));
+  mkdirSync(join(dir, "section"), { recursive: true });
+  writeFileSync(join(dir, "section", "Hero.liquid"), "H");
+  after(() => {
+    fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const result = await pushTheme({
+    dir,
+    url: `http://localhost:${fake.address().port}`,
+    token: "bcf_t",
+    draft: true,
+  });
+  assert.equal(received.draft, true);
+  assert.equal(result.instanceId, 77);
+});

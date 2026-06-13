@@ -16,7 +16,7 @@ import { credentialsPath, loadCredentials, saveCredentials } from "../lib/creden
 import { startDevServer } from "../lib/dev-server.mjs";
 import { pullTheme, pushTheme } from "../lib/theme-sync.mjs";
 
-const VERSION = "0.1.1";
+const VERSION = "0.1.2";
 const args = process.argv.slice(2);
 
 /** Parse `--key value` and `--flag` (boolean) arguments. */
@@ -49,6 +49,7 @@ Usage:
                             --port <n> (default 3030)
   blocofy theme pull [dir]  Download the live theme to disk. dir defaults to cwd.
   blocofy theme push [dir]  Write the local theme to the live site (create/update; no delete).
+                            --draft  write to a draft theme instead (preview & publish from the admin panel)
   blocofy --version
   blocofy --help
 
@@ -105,6 +106,7 @@ async function themePull(rest) {
 }
 
 async function themePush(rest) {
+  const flags = parseFlags(rest);
   const positional = rest.filter((a) => !a.startsWith("--"));
   const dir = resolve(positional[0] ?? process.cwd());
   if (!existsSync(dir)) {
@@ -112,11 +114,17 @@ async function themePush(rest) {
     process.exit(1);
   }
   const creds = requireCreds();
-  const result = await pushTheme({ dir, url: creds.url, token: creds.token });
-  const extra = result.skippedDeletes
-    ? `, ${result.skippedDeletes} remote file(s) absent locally (not deleted)`
-    : "";
-  console.log(`Push: ${result.created} created, ${result.updated} updated${extra}.`);
+  const draft = Boolean(flags.draft);
+  const result = await pushTheme({ dir, url: creds.url, token: creds.token, draft });
+  if (result.draft) {
+    console.log(`Pushed to draft theme #${result.instanceId} (${result.created} created, ${result.updated} updated).`);
+    console.log(`Preview & publish it in the admin panel: Theme → Theme library → "Open in editor".`);
+  } else {
+    const extra = result.skippedDeletes
+      ? `, ${result.skippedDeletes} remote file(s) absent locally (not deleted)`
+      : "";
+    console.log(`Push: ${result.created} created, ${result.updated} updated${extra}.`);
+  }
 }
 
 function themeDev(rest) {
