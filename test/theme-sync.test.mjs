@@ -7,7 +7,35 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 
 import { localPathFor } from "../lib/local-theme.mjs";
-import { pullTheme, pushTheme } from "../lib/theme-sync.mjs";
+import { fetchDevSession, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
+
+test("fetchDevSession: GET /api/dev/session → session JSON (Bearer)", async () => {
+  const fake = createServer((req, res) => {
+    assert.equal(req.method, "GET");
+    assert.equal(req.headers.authorization, "Bearer bcf_t");
+    assert.ok(req.url.endsWith("/api/dev/session"));
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        draftInstanceId: 77,
+        previewUrl: "https://testsite.myblocofy.com/?preview=TOK",
+        editorUrl: "https://app.blocofy.com/editor/5?instance=77",
+        site: { id: 14, slug: "testsite" },
+      }),
+    );
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  after(() => fake.close());
+
+  const s = await fetchDevSession({
+    url: `http://localhost:${fake.address().port}`,
+    token: "bcf_t",
+  });
+  assert.equal(s.draftInstanceId, 77);
+  assert.equal(s.previewUrl, "https://testsite.myblocofy.com/?preview=TOK");
+  assert.equal(s.editorUrl, "https://app.blocofy.com/editor/5?instance=77");
+});
 
 test("localPathFor: adds .liquid for Liquid kinds, leaves assets raw", () => {
   assert.equal(localPathFor("section/Hero"), "section/Hero.liquid");

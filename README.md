@@ -15,8 +15,9 @@ npx @blocofy/cli theme dev       # http://localhost:3030 — local theme + live 
 ```bash
 blocofy login [--url <url>] [--token <bcf_…>]
                           # Save your platform URL + dev token (~/.blocofy/credentials.json, 0600).
-blocofy theme dev [dir]   # Local dev server: edit a file and the browser reloads automatically.
-                          # --port <n> (default 3030)
+blocofy theme dev [dir]   # Local dev server. Prints 3 views — local preview, a live-domain
+                          # preview link, and the theme editor — all auto-reloading on save.
+                          # --port <n> (default 3030), --no-sync (local preview only)
 blocofy theme pull [dir]  # Download the live theme to disk.
 blocofy theme push [dir]  # Write the local theme to the live site (create/update; no delete).
 blocofy --version
@@ -28,8 +29,13 @@ blocofy --help
 `theme dev` starts a local HTTP server. For each page request it reads your local theme
 files and sends them to the platform's dev-render endpoint (`/api/dev/render`). The platform
 renders them with the site's **live data** and returns HTML — so the CLI ships no rendering
-engine and you see exactly the production output. A file watcher reloads the browser over
-Server-Sent Events when you save.
+engine and you see exactly the production output.
+
+It also continuously syncs your local files to a **draft theme** so you can view the same work
+three ways — the local preview, a shareable live-domain preview link, and the admin theme
+editor — without affecting your published theme. Save a file and **every open view reloads**
+(the platform-rendered pages connect back to the local dev server's reload channel). Publish
+the draft from the theme editor when you're ready.
 
 Credentials come from `~/.blocofy/credentials.json` (written by `blocofy login`) or the
 `BLOCOFY_URL` + `BLOCOFY_TOKEN` environment variables (for CI/automation).

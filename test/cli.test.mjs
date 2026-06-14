@@ -93,7 +93,51 @@ test("dev server: proxies page to /api/dev/render + livereload; asset from disk;
   const ac = new AbortController();
   const sseRes = await fetch(`${baseUrl}${LIVERELOAD_PATH}`, { signal: ac.signal });
   assert.equal(sseRes.headers.get("content-type"), "text/event-stream");
+  // Cross-origin iframe'ler subscribe edebilsin.
+  assert.equal(sseRes.headers.get("access-control-allow-origin"), "*");
   ac.abort();
+});
+
+test("dev server syncDraft: startup pushes local theme to a draft (/api/dev/theme {draft})", async () => {
+  let themePost = null;
+  const fake = createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      if (req.url.endsWith("/api/dev/theme")) {
+        themePost = JSON.parse(body || "{}");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({ ok: true, draft: true, instanceId: 77, created: 1, updated: 0, skippedDeletes: 0 }),
+        );
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ html: "<body>x</body>" }));
+    });
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  const dir = themeFixture();
+  const dev = startDevServer({
+    dir,
+    url: `http://localhost:${fake.address().port}`,
+    token: "bcf_t",
+    port: 0,
+    syncDraft: true,
+  });
+  await once(dev.server, "listening");
+  after(() => {
+    dev.close();
+    fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // İlk push fire-and-forget → birkaç tick bekle.
+  for (let i = 0; i < 20 && !themePost; i++) await new Promise((r) => setTimeout(r, 25));
+  assert.ok(themePost, "startup should push to /api/dev/theme");
+  assert.equal(themePost.draft, true);
+  assert.equal(themePost.files["section/Hero"], "HERO");
 });
 
 test("dev server: platform error → 4xx + error page (with livereload)", async () => {

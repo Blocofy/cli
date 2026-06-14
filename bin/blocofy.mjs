@@ -14,9 +14,9 @@ import { createInterface } from "node:readline/promises";
 
 import { credentialsPath, loadCredentials, saveCredentials } from "../lib/credentials.mjs";
 import { startDevServer } from "../lib/dev-server.mjs";
-import { pullTheme, pushTheme } from "../lib/theme-sync.mjs";
+import { fetchDevSession, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
 
-const VERSION = "0.1.2";
+const VERSION = "0.1.3";
 const args = process.argv.slice(2);
 
 /** Parse `--key value` and `--flag` (boolean) arguments. */
@@ -127,7 +127,7 @@ async function themePush(rest) {
   }
 }
 
-function themeDev(rest) {
+async function themeDev(rest) {
   const flags = parseFlags(rest);
   const positional = rest.filter((a) => !a.startsWith("--"));
   const themeDir = resolve(positional[0] ?? process.cwd());
@@ -140,12 +140,27 @@ function themeDev(rest) {
   const creds = requireCreds();
   const port = Number(flags.port) || 3030;
 
-  console.log(`blocofy theme dev`);
-  console.log(`  theme dir : ${themeDir}`);
-  console.log(`  platform  : ${creds.url}`);
-  console.log(`  token     : ${creds.token.slice(0, 8)}… (${creds.source})`);
-  console.log(`  preview   : http://localhost:${port}`);
-  console.log(`  → edit a theme file and save = the browser reloads automatically (livereload)`);
+  // Dev session: live-domain preview + theme editor URLs (+ a draft to sync into).
+  // Graceful: if the platform can't provide one, fall back to local-only preview.
+  let session = null;
+  if (!flags["no-sync"]) {
+    try {
+      session = await fetchDevSession({ url: creds.url, token: creds.token });
+    } catch (error) {
+      console.warn(
+        `Warning: dev session unavailable (${error?.message ?? error}). ` +
+          `Local preview only — live-domain/editor views + draft sync disabled.`,
+      );
+    }
+  }
+
+  console.log(`\nblocofy theme dev — ${creds.url} (token ${creds.token.slice(0, 8)}…)\n`);
+  console.log(`  Local:    http://localhost:${port}`);
+  if (session) {
+    console.log(`  Preview:  ${session.previewUrl}&hr=${port}`);
+    console.log(`  Editor:   ${session.editorUrl}&hr=${port}`);
+  }
+  console.log(`\n  Edit a theme file and save — every open view reloads automatically.\n`);
 
   if (flags.dry) {
     console.log("(--dry: server not started)");
@@ -157,6 +172,7 @@ function themeDev(rest) {
     url: creds.url,
     token: creds.token,
     port,
+    syncDraft: Boolean(session),
     onError: (err) => {
       if (err && err.code === "EADDRINUSE") {
         console.error(`Port ${port} is in use. Try a different port: blocofy theme dev --port <n>`);
@@ -186,7 +202,10 @@ if (first === "--version" || first === "-v") {
     process.exit(1);
   });
 } else if (first === "theme" && rest[0] === "dev") {
-  themeDev(rest.slice(1));
+  themeDev(rest.slice(1)).catch((error) => {
+    console.error(error?.message ?? error);
+    process.exit(1);
+  });
 } else if (first === "theme" && rest[0] === "pull") {
   themePull(rest.slice(1)).catch((error) => {
     console.error(error?.message ?? error);
