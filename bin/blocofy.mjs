@@ -19,7 +19,7 @@ import { fetchDevSession, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
 
-const VERSION = "0.1.5";
+const VERSION = "0.1.6";
 const args = process.argv.slice(2);
 
 /** Parse `--key value` and `--flag` (boolean) arguments. */
