@@ -15,8 +15,10 @@ import { createInterface } from "node:readline/promises";
 import { credentialsPath, loadCredentials, saveCredentials } from "../lib/credentials.mjs";
 import { startDevServer } from "../lib/dev-server.mjs";
 import { fetchDevSession, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
+import { hyperlink, openUrl } from "../lib/term.mjs";
+import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
 
-const VERSION = "0.1.3";
+const VERSION = "0.1.4";
 const args = process.argv.slice(2);
 
 /** Parse `--key value` and `--flag` (boolean) arguments. */
@@ -40,51 +42,97 @@ function parseFlags(rest) {
 function printHelp() {
   console.log(`blocofy — Blocofy theme development CLI (v${VERSION})
 
-Usage:
+Develop your theme locally against live data, preview it three ways, and publish.
+
+Usage
   blocofy login [--url <url>] [--token <bcf_…>]
-                            Save your platform URL + dev token (~/.blocofy/credentials.json).
-                            Get a token from your admin panel: Settings → Theme CLI tokens.
-  blocofy theme dev [dir]   Local dev server — local theme + live data with instant preview.
-                            Edit a file and the browser reloads automatically. dir defaults to cwd.
-                            --port <n> (default 3030)
-  blocofy theme pull [dir]  Download the live theme to disk. dir defaults to cwd.
-  blocofy theme push [dir]  Write the local theme to the live site (create/update; no delete).
-                            --draft  write to a draft theme instead (preview & publish from the admin panel)
+      Save your platform URL + dev token to ~/.blocofy/credentials.json.
+      Get a token from the admin panel → Settings → Theme CLI tokens.
+
+  blocofy theme dev [dir] [--port <n>] [--no-sync]
+      Start a dev server and print 3 auto-reloading views — Local, live-domain
+      Preview, and the theme Editor. Press l / p / e to open each, q to quit.
+      Edit a file and save → every open view reloads. (dir defaults to cwd)
+        --port <n>   local port (default 3030)
+        --no-sync    local preview only (skip draft sync + remote views)
+
+  blocofy theme pull [dir]
+      Download the live theme to disk. (dir defaults to cwd)
+
+  blocofy theme push [dir] [--draft]
+      Write the local theme to the site (create/update; no delete).
+        --draft      write to a draft theme — preview & publish it from the admin panel
+
   blocofy --version
   blocofy --help
 
-The CLI does not build assets — generate them with your own tools (npm/Vite/Tailwind);
-the platform serves plain Liquid + static assets.`);
+Examples
+  blocofy login --url https://store.myblocofy.com --token bcf_xxxxxxxx
+  blocofy theme pull && blocofy theme dev
+  blocofy theme push --draft
+
+Auth: ~/.blocofy/credentials.json (from \`login\`), or BLOCOFY_URL + BLOCOFY_TOKEN env vars.
+The CLI does not build assets — bring your own (npm/Vite/Tailwind); the platform serves
+plain Liquid + static assets.`);
+}
+
+/** Geçerli yanıt alana kadar sor (max `tries`), HER yanıtı anında doğrula. */
+async function promptValid(rl, question, normalize, valid, hint, tries = 3) {
+  for (let i = 0; i < tries; i++) {
+    const answer = normalize(await rl.question(question));
+    if (valid(answer)) return answer;
+    console.error(`  ✗ ${hint}`);
+  }
+  console.error("Too many invalid attempts.");
+  process.exit(1);
 }
 
 async function login(rest) {
   const flags = parseFlags(rest);
-  let url = typeof flags.url === "string" ? flags.url : "";
-  let token = typeof flags.token === "string" ? flags.token : "";
+  let url = typeof flags.url === "string" ? normalizeUrl(flags.url) : "";
+  let token = typeof flags.token === "string" ? flags.token.trim() : "";
+
+  // Flag ile verildiyse anında doğrula (prompt'a düşmeden).
+  if (url && !isValidUrl(url)) {
+    console.error("Invalid --url — must be a valid http(s):// URL.");
+    process.exit(1);
+  }
+  if (token && !isValidToken(token)) {
+    console.error("Invalid --token — must start with bcf_.");
+    process.exit(1);
+  }
 
   if (!url || !token) {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     try {
-      if (!url) url = (await rl.question("Platform/site URL (e.g. https://store.myblocofy.com): ")).trim();
-      if (!token) token = (await rl.question("Dev token (bcf_…): ")).trim();
+      // URL'i token'dan ÖNCE iste ve ANINDA doğrula (şema yoksa https:// eklenir);
+      // geçersizse aynı anda tekrar sorar — token'a geçip sonra hata vermez.
+      if (!url) {
+        url = await promptValid(
+          rl,
+          "Platform/site URL (e.g. https://store.myblocofy.com): ",
+          normalizeUrl,
+          isValidUrl,
+          "Enter a valid URL, e.g. https://store.myblocofy.com",
+        );
+      }
+      if (!token) {
+        token = await promptValid(
+          rl,
+          "Dev token (bcf_…): ",
+          (s) => s.trim(),
+          isValidToken,
+          "Token must start with bcf_ — get one from the admin panel: Settings → Theme CLI tokens.",
+        );
+      }
     } finally {
       rl.close();
     }
   }
 
-  url = url.replace(/\/+$/, "");
-  if (!/^https?:\/\//.test(url)) {
-    console.error("Invalid URL — must start with http(s)://");
-    process.exit(1);
-  }
-  if (!token.startsWith("bcf_")) {
-    console.error("Invalid token — must start with bcf_ (admin panel: Settings → Theme CLI tokens).");
-    process.exit(1);
-  }
-
   saveCredentials({ url, token });
-  console.log(`Saved credentials: ${credentialsPath()}`);
-  console.log(`Now run, in your theme directory: blocofy theme dev`);
+  console.log(`✓ Saved credentials → ${credentialsPath()}`);
+  console.log(`Next: cd into your theme directory, then run  blocofy theme dev`);
 }
 
 /** Resolve credentials (URL + token) or exit with guidance. */
@@ -154,13 +202,19 @@ async function themeDev(rest) {
     }
   }
 
+  const localUrl = `http://localhost:${port}`;
+  const previewUrl = session ? `${session.previewUrl}&hr=${port}` : null;
+  const editorUrl = session ? `${session.editorUrl}&hr=${port}` : null;
+
   console.log(`\nblocofy theme dev — ${creds.url} (token ${creds.token.slice(0, 8)}…)\n`);
-  console.log(`  Local:    http://localhost:${port}`);
-  if (session) {
-    console.log(`  Preview:  ${session.previewUrl}&hr=${port}`);
-    console.log(`  Editor:   ${session.editorUrl}&hr=${port}`);
-  }
-  console.log(`\n  Edit a theme file and save — every open view reloads automatically.\n`);
+  console.log(`  (l) Local      ${hyperlink(localUrl)}`);
+  if (previewUrl) console.log(`  (p) Preview    ${hyperlink(previewUrl)}`);
+  if (editorUrl) console.log(`  (e) Editor     ${hyperlink(editorUrl)}`);
+  const keys = ["l local", previewUrl && "p preview", editorUrl && "e editor", "q quit"]
+    .filter(Boolean)
+    .join("   ");
+  console.log(`\n  Press:  ${keys}`);
+  console.log(`  Edit a theme file and save — every open view reloads automatically.\n`);
 
   if (flags.dry) {
     console.log("(--dry: server not started)");
@@ -183,11 +237,37 @@ async function themeDev(rest) {
     },
   });
   const shutdown = () => {
+    if (process.stdin.isTTY) {
+      try {
+        process.stdin.setRawMode(false);
+      } catch {
+        /* yoksay */
+      }
+    }
     handle.close();
     process.exit(0);
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+
+  // Klavye kısayolları (TTY): l/p/e ilgili görünümü tarayıcıda açar, q/Ctrl-C çıkar.
+  // Raw mode'da SIGINT gelmez → Ctrl-C'yi () elle yakala.
+  if (process.stdin.isTTY) {
+    try {
+      process.stdin.setRawMode(true);
+    } catch {
+      return; // raw mode yoksa kısayolsuz devam (sunucu çalışmaya devam eder)
+    }
+    process.stdin.resume();
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (key) => {
+      const k = key.toLowerCase();
+      if (key === "" || k === "q") shutdown();
+      else if (k === "l") openUrl(localUrl);
+      else if (k === "p" && previewUrl) openUrl(previewUrl);
+      else if (k === "e" && editorUrl) openUrl(editorUrl);
+    });
+  }
 }
 
 const [first, ...rest] = args;
