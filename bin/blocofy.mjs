@@ -14,6 +14,7 @@ import { createInterface } from "node:readline/promises";
 
 import { credentialsPath, loadCredentials, saveCredentials } from "../lib/credentials.mjs";
 import { startDevServer } from "../lib/dev-server.mjs";
+import { readLocalTemplates } from "../lib/local-theme.mjs";
 import { fetchDevSession, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
@@ -216,6 +217,20 @@ async function themeDev(rest) {
   console.log(`\n  Press:  ${keys}`);
   console.log(`  Edit a theme file and save — every open view reloads automatically.\n`);
 
+  // Tanılama: kaç tema dosyası izleniyor? Boşsa hot-reload mümkün değil — yanlış
+  // dizinde ya da `theme pull` yapılmamış demektir; sebebini açıkça söyle.
+  const localFiles = readLocalTemplates(themeDir);
+  const fileCount = Object.keys(localFiles).length;
+  if (fileCount === 0) {
+    console.warn(
+      `  ⚠ No theme files found under ${themeDir}\n` +
+        `    Expected top-level folders: layout/ section/ partial/ asset/ block/ template/\n` +
+        `    Run this from your theme root, or fetch it first:  blocofy theme pull\n`,
+    );
+  } else {
+    console.log(`  Watching ${themeDir} — ${fileCount} theme files\n`);
+  }
+
   if (flags.dry) {
     console.log("(--dry: server not started)");
     return;
@@ -227,6 +242,18 @@ async function themeDev(rest) {
     token: creds.token,
     port,
     syncDraft: Boolean(session),
+    // Her kaydetmede ne olduğunu bas — "reloaded" = watch tetiklendi; "0 views"
+    // = hiçbir tarayıcı sekmesi bağlı değil (yanlış görünüme bakıyorsun); sync
+    // hatası = draft güncellenemedi (preview/editör eski kalır, local yine yenilenir).
+    onReload: ({ file, synced, clients, error }) => {
+      const what = file || "change";
+      if (error) {
+        console.error(`  ↻ ${what} — draft sync failed: ${error} (local view still reloaded)`);
+        return;
+      }
+      const views = clients ? `${clients} view${clients === 1 ? "" : "s"}` : "no views connected";
+      console.log(`  ↻ ${what} → ${synced ? "synced + " : ""}reloaded (${views})`);
+    },
     onError: (err) => {
       if (err && err.code === "EADDRINUSE") {
         console.error(`Port ${port} is in use. Try a different port: blocofy theme dev --port <n>`);
