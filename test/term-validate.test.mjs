@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { githubNote } from "../lib/messages.mjs";
 import { hyperlink, openCommand } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
 
@@ -34,4 +35,26 @@ test("isValidUrl / isValidToken", () => {
   assert.equal(isValidToken("bcf_abcdefghij"), true);
   assert.equal(isValidToken("nope"), false);
   assert.equal(isValidToken("bcf_x"), false);
+});
+
+test("githubNote: connected → repo@branch + git pull hint", () => {
+  const note = githubNote({ githubConnected: true, githubRepo: "acme/theme", githubBranch: "main" });
+  assert.ok(note.includes("acme/theme@main"));
+  assert.ok(note.includes("git pull"));
+});
+
+test("githubNote: not connected → server-side + connect hint", () => {
+  const note = githubNote({ githubConnected: false });
+  assert.ok(note.includes("stay server-side"));
+  assert.ok(note.includes("Connect a GitHub repo"));
+});
+
+test("githubNote: old platform (undefined) → server-side, no connect hint", () => {
+  const note = githubNote({ previewUrl: "x" });
+  assert.ok(note.includes("stay server-side"));
+  assert.ok(!note.includes("Connect a GitHub repo"));
+});
+
+test("githubNote: no session → null", () => {
+  assert.equal(githubNote(null), null);
 });

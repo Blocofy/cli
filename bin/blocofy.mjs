@@ -15,11 +15,12 @@ import { createInterface } from "node:readline/promises";
 import { credentialsPath, loadCredentials, saveCredentials } from "../lib/credentials.mjs";
 import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
+import { githubNote } from "../lib/messages.mjs";
 import { fetchDevSession, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
 
-const VERSION = "0.1.6";
+const VERSION = "0.1.7";
 const args = process.argv.slice(2);
 
 /** Parse `--key value` and `--flag` (boolean) arguments. */
@@ -216,6 +217,13 @@ async function themeDev(rest) {
     .join("   ");
   console.log(`\n  Press:  ${keys}`);
   console.log(`  Edit a theme file and save — every open view reloads automatically.\n`);
+
+  // Düzlem uyarısı: CLI yalnız tema KODUNU taşır; editörde yapılan içerik/ayar
+  // bulutta yaşar (githubNote → lib/messages.mjs, oturum durumuna göre uyarlanır).
+  const note = githubNote(session);
+  if (note) {
+    console.log(`  ℹ ${note}\n`);
+  }
 
   // Tanılama: kaç tema dosyası izleniyor? Boşsa hot-reload mümkün değil — yanlış
   // dizinde ya da `theme pull` yapılmamış demektir; sebebini açıkça söyle.
