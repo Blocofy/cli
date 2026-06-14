@@ -20,7 +20,7 @@ import { fetchDevSession, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
 
-const VERSION = "0.1.7";
+const VERSION = "0.1.8";
 const args = process.argv.slice(2);
 
 /** Parse `--key value` and `--flag` (boolean) arguments. */
@@ -58,8 +58,9 @@ Usage
         --port <n>   local port (default 3030)
         --no-sync    local preview only (skip draft sync + remote views)
 
-  blocofy theme pull [dir]
+  blocofy theme pull [dir] [--draft]
       Download the live theme to disk. (dir defaults to cwd)
+        --draft      pull the draft theme (what 'theme dev' syncs into) instead of live
 
   blocofy theme push [dir] [--draft]
       Write the local theme to the site (create/update; no delete).
@@ -148,11 +149,13 @@ function requireCreds() {
 }
 
 async function themePull(rest) {
+  const flags = parseFlags(rest);
   const positional = rest.filter((a) => !a.startsWith("--"));
   const dir = resolve(positional[0] ?? process.cwd());
   const creds = requireCreds();
-  const { count } = await pullTheme({ dir, url: creds.url, token: creds.token });
-  console.log(`Downloaded ${count} theme files → ${dir}`);
+  const draft = Boolean(flags.draft);
+  const { count } = await pullTheme({ dir, url: creds.url, token: creds.token, draft });
+  console.log(`Downloaded ${count} ${draft ? "draft" : "live"} theme files → ${dir}`);
 }
 
 async function themePush(rest) {
