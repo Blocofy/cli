@@ -12,6 +12,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 
+import { pushContent } from "../lib/content-sync.mjs";
 import { credentialsPath, loadCredentials, saveCredentials } from "../lib/credentials.mjs";
 import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
@@ -20,7 +21,7 @@ import { fetchDevSession, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
 
-const VERSION = "0.1.9";
+const VERSION = "0.1.10";
 const args = process.argv.slice(2);
 
 /** Parse `--key value` and `--flag` (boolean) arguments. */
@@ -65,6 +66,13 @@ Usage
   blocofy theme push [dir] [--draft]
       Write the local theme to the site (create/update; no delete).
         --draft      write to a draft theme — preview & publish it from the admin panel
+
+  blocofy pages push [dir]
+      Push local pages/*.json to the site. Updates EXISTING pages only —
+      never creates or deletes a page. Unchanged pages are skipped.
+
+  blocofy settings push [dir]
+      Push local config/settings.json (theme tokens/settings + color schemes).
 
   blocofy --version
   blocofy --help
@@ -177,6 +185,28 @@ async function themePush(rest) {
       ? `, ${result.skippedDeletes} remote file(s) absent locally (not deleted)`
       : "";
     console.log(`Push: ${result.created} created, ${result.updated} updated${extra}.`);
+  }
+}
+
+async function contentPush(scope, rest) {
+  const positional = rest.filter((a) => !a.startsWith("--"));
+  const dir = resolve(positional[0] ?? process.cwd());
+  if (!existsSync(dir)) {
+    console.error(`Directory not found: ${dir}`);
+    process.exit(1);
+  }
+  const creds = requireCreds();
+  const result = await pushContent({ dir, url: creds.url, token: creds.token, scope });
+  if (scope === "settings") {
+    console.log(
+      `Settings push: ${result.settingsUpdated ? "theme settings updated" : "theme settings unchanged"}, ` +
+        `${result.schemesUpserted} color scheme(s) upserted (${result.fileCount} file).`,
+    );
+  } else {
+    console.log(
+      `Pages push: ${result.pagesUpdated} updated, ${result.pagesSkipped} skipped ` +
+        `(only existing pages are updated — none created or deleted).`,
+    );
   }
 }
 
@@ -341,6 +371,16 @@ if (first === "--version" || first === "-v") {
   });
 } else if (first === "theme" && rest[0] === "push") {
   themePush(rest.slice(1)).catch((error) => {
+    console.error(error?.message ?? error);
+    process.exit(1);
+  });
+} else if (first === "pages" && rest[0] === "push") {
+  contentPush("pages", rest.slice(1)).catch((error) => {
+    console.error(error?.message ?? error);
+    process.exit(1);
+  });
+} else if (first === "settings" && rest[0] === "push") {
+  contentPush("settings", rest.slice(1)).catch((error) => {
     console.error(error?.message ?? error);
     process.exit(1);
   });
