@@ -15,7 +15,7 @@ import { createInterface } from "node:readline/promises";
 import { credentialsPath, loadCredentials, saveCredentials } from "../lib/credentials.mjs";
 import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
-import { githubNote } from "../lib/messages.mjs";
+import { githubNote, statusLine, syncScopeNote } from "../lib/messages.mjs";
 import { fetchDevSession, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
@@ -215,11 +215,21 @@ async function themeDev(rest) {
   console.log(`  (l) Local      ${hyperlink(localUrl)}`);
   if (previewUrl) console.log(`  (p) Preview    ${hyperlink(previewUrl)}`);
   if (editorUrl) console.log(`  (e) Editor     ${hyperlink(editorUrl)}`);
+
+  // Kalıcı durum satırı (#119 CLI bulgu #3): yerel hangi taslağa gidiyor + canlı tema.
+  const status = statusLine(session);
+  if (status) console.log(`\n  ${status}`);
+
   const keys = ["l local", previewUrl && "p preview", editorUrl && "e editor", "q quit"]
     .filter(Boolean)
     .join("   ");
   console.log(`\n  Press:  ${keys}`);
   console.log(`  Edit a theme file and save — every open view reloads automatically.\n`);
+
+  // Senkron kapsamı (#119 CLI bulgu #2): hangi dizinler taşınıyor / taşınmıyor —
+  // "config/pages senkronlanıyor sandım" karışıklığını açıkça önler.
+  for (const line of syncScopeNote()) console.log(`  ${line}`);
+  console.log("");
 
   // Düzlem uyarısı: CLI yalnız tema KODUNU taşır; editörde yapılan içerik/ayar
   // bulutta yaşar (githubNote → lib/messages.mjs, oturum durumuna göre uyarlanır).
