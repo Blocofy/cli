@@ -12,7 +12,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 
-import { pushContent } from "../lib/content-sync.mjs";
+import { pullContent, pushContent } from "../lib/content-sync.mjs";
 import { credentialsPath, loadCredentials, saveCredentials } from "../lib/credentials.mjs";
 import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
@@ -21,7 +21,7 @@ import { fetchDevSession, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
 
-const VERSION = "0.1.10";
+const VERSION = "0.1.11";
 const args = process.argv.slice(2);
 
 /** Parse `--key value` and `--flag` (boolean) arguments. */
@@ -67,12 +67,13 @@ Usage
       Write the local theme to the site (create/update; no delete).
         --draft      write to a draft theme — preview & publish it from the admin panel
 
-  blocofy pages push [dir]
-      Push local pages/*.json to the site. Updates EXISTING pages only —
-      never creates or deletes a page. Unchanged pages are skipped.
+  blocofy pages pull [dir] / pages push [dir]
+      pull: download published pages → pages/<slug>.json.
+      push: write pages/*.json to the site. Updates EXISTING pages only —
+            never creates or deletes a page; unchanged pages are skipped.
 
-  blocofy settings push [dir]
-      Push local config/settings.json (theme tokens/settings + color schemes).
+  blocofy settings pull [dir] / settings push [dir]
+      Download / upload config/settings.json (theme tokens/settings + color schemes).
 
   blocofy --version
   blocofy --help
@@ -208,6 +209,14 @@ async function contentPush(scope, rest) {
         `(only existing pages are updated — none created or deleted).`,
     );
   }
+}
+
+async function contentPull(scope, rest) {
+  const positional = rest.filter((a) => !a.startsWith("--"));
+  const dir = resolve(positional[0] ?? process.cwd());
+  const creds = requireCreds();
+  const { count } = await pullContent({ dir, url: creds.url, token: creds.token, scope });
+  console.log(`Downloaded ${count} ${scope === "settings" ? "settings" : "page"} file(s) → ${dir}`);
 }
 
 async function themeDev(rest) {
@@ -374,8 +383,18 @@ if (first === "--version" || first === "-v") {
     console.error(error?.message ?? error);
     process.exit(1);
   });
+} else if (first === "pages" && rest[0] === "pull") {
+  contentPull("pages", rest.slice(1)).catch((error) => {
+    console.error(error?.message ?? error);
+    process.exit(1);
+  });
 } else if (first === "pages" && rest[0] === "push") {
   contentPush("pages", rest.slice(1)).catch((error) => {
+    console.error(error?.message ?? error);
+    process.exit(1);
+  });
+} else if (first === "settings" && rest[0] === "pull") {
+  contentPull("settings", rest.slice(1)).catch((error) => {
     console.error(error?.message ?? error);
     process.exit(1);
   });
