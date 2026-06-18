@@ -7,7 +7,66 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 
 import { localPathFor } from "../lib/local-theme.mjs";
-import { fetchDevSession, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
+import { fetchDevSession, fetchSiteStatus, publishInstance, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
+
+test("publishInstance: POST /api/dev/publish {instanceId} → result (Bearer)", async () => {
+  let seen = null;
+  const fake = createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      seen = { method: req.method, auth: req.headers.authorization, url: req.url, body: JSON.parse(body || "{}") };
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, published: 20, cloned: true }));
+    });
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  after(() => fake.close());
+
+  const r = await publishInstance({ url: `http://localhost:${fake.address().port}`, token: "bcf_t", instanceId: 20 });
+  assert.equal(r.published, 20);
+  assert.equal(r.cloned, true);
+  assert.equal(seen.method, "POST");
+  assert.ok(seen.url.endsWith("/api/dev/publish"));
+  assert.equal(seen.auth, "Bearer bcf_t");
+  assert.equal(seen.body.instanceId, 20);
+});
+
+test("publishInstance: sunucu 409 → throw (error metni)", async () => {
+  const fake = createServer((req, res) => {
+    res.writeHead(409, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "Yayınlanacak temada sayfa yok." }));
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  after(() => fake.close());
+  await assert.rejects(
+    publishInstance({ url: `http://localhost:${fake.address().port}`, token: "bcf_t", instanceId: 20 }),
+    /sayfa yok/,
+  );
+});
+
+test("fetchSiteStatus: GET /api/dev/site → health JSON", async () => {
+  const fake = createServer((req, res) => {
+    assert.equal(req.method, "GET");
+    assert.ok(req.url.endsWith("/api/dev/site"));
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        site: { id: 14, slug: "testsite" }, health: "ok", pages_on_live: 12,
+        live_theme_instance: { id: 19, name: "Canlı", template_count: 5 }, drafts: [],
+      }),
+    );
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  after(() => fake.close());
+  const s = await fetchSiteStatus({ url: `http://localhost:${fake.address().port}`, token: "bcf_t" });
+  assert.equal(s.health, "ok");
+  assert.equal(s.pages_on_live, 12);
+  assert.equal(s.live_theme_instance.id, 19);
+});
 
 test("fetchDevSession: GET /api/dev/session → session JSON (Bearer)", async () => {
   const fake = createServer((req, res) => {

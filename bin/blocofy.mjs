@@ -17,12 +17,12 @@ import { credentialsPath, loadCredentials, saveCredentials } from "../lib/creden
 import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
 import { githubNote, statusLine, syncScopeNote } from "../lib/messages.mjs";
-import { fetchDevSession, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
+import { fetchDevSession, fetchSiteStatus, publishInstance, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
 import { isAffirmative, livePushDecision } from "../lib/confirm.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
 
-const VERSION = "0.1.12";
+const VERSION = "0.1.13";
 const args = process.argv.slice(2);
 
 /** Parse `--key value` and `--flag` (boolean) arguments. */
@@ -72,6 +72,16 @@ Usage
                      admin panel (recommended; never touches the live site)
         --yes        confirm the live push without prompting (for CI / agents)
 
+  blocofy theme publish [--instance <id>]
+      Publish a draft theme to the LIVE site. With no flag, publishes the draft that
+      'theme dev' / 'theme push --draft' writes into. The server refuses to publish a
+      theme that has no pages (it would 404) — so publishing is always safe.
+        --instance <id>   publish a specific theme instance
+
+  blocofy status
+      Show the live theme, page distribution per instance, drafts, and a health flag
+      (ok / live_instance_empty / pages_split). Run before/after publishing.
+
   blocofy pages pull [dir] / pages push [dir]
       pull: download published pages → pages/<slug>.json.
       push: write pages/*.json to the site. Updates EXISTING pages only —
@@ -86,7 +96,8 @@ Usage
 Examples
   blocofy login --url https://store.myblocofy.com --token bcf_xxxxxxxx
   blocofy theme pull && blocofy theme dev
-  blocofy theme push --draft
+  blocofy theme push --draft && blocofy theme publish
+  blocofy status
 
 Auth: ~/.blocofy/credentials.json (from \`login\`), or BLOCOFY_URL + BLOCOFY_TOKEN env vars.
 The CLI does not build assets — bring your own (npm/Vite/Tailwind); the platform serves
@@ -390,6 +401,45 @@ async function themeDev(rest) {
   }
 }
 
+async function themePublish(rest) {
+  const flags = parseFlags(rest);
+  const creds = requireCreds();
+  let instanceId = Number(flags.instance);
+  if (!Number.isInteger(instanceId) || instanceId <= 0) {
+    // Belirtilmediyse: `theme dev` / `theme push --draft`'ın yazdığı taslağı yayınla.
+    const session = await fetchDevSession({ url: creds.url, token: creds.token });
+    instanceId = session.draftInstanceId;
+  }
+  const result = await publishInstance({ url: creds.url, token: creds.token, instanceId });
+  console.log(
+    `✓ Theme #${result.published} is now LIVE${result.cloned ? " (pages cloned from the previous live theme)" : ""}.`,
+  );
+}
+
+async function status() {
+  const creds = requireCreds();
+  const s = await fetchSiteStatus({ url: creds.url, token: creds.token });
+  const live = s.live_theme_instance;
+  console.log(`\nSite: ${s.site.slug} (id ${s.site.id})`);
+  console.log(
+    live
+      ? `Live theme: #${live.id}${live.name ? ` ${live.name}` : ""} — ${live.template_count} files, ${s.pages_on_live} pages`
+      : `Live theme: none`,
+  );
+  console.log(`Health: ${s.health}`);
+  if (s.health === "live_instance_empty") {
+    console.error(
+      `  ⚠ The live theme has no pages — the site will 404. Publish a theme with content:  blocofy theme publish`,
+    );
+  } else if (s.health === "pages_split") {
+    console.warn(`  ⚠ ${s.orphaned_pages} page(s) live on a non-live instance (orphan).`);
+  }
+  if (Array.isArray(s.drafts) && s.drafts.length > 0) {
+    console.log(`Drafts: ${s.drafts.map((d) => `#${d.id}${d.name ? ` ${d.name}` : ""}`).join(", ")}`);
+  }
+  console.log("");
+}
+
 const [first, ...rest] = args;
 
 if (first === "--version" || first === "-v") {
@@ -413,6 +463,16 @@ if (first === "--version" || first === "-v") {
   });
 } else if (first === "theme" && rest[0] === "push") {
   themePush(rest.slice(1)).catch((error) => {
+    console.error(error?.message ?? error);
+    process.exit(1);
+  });
+} else if (first === "theme" && rest[0] === "publish") {
+  themePublish(rest.slice(1)).catch((error) => {
+    console.error(error?.message ?? error);
+    process.exit(1);
+  });
+} else if (first === "status") {
+  status().catch((error) => {
     console.error(error?.message ?? error);
     process.exit(1);
   });
