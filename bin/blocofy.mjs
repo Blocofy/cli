@@ -18,10 +18,11 @@ import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
 import { githubNote, statusLine, syncScopeNote } from "../lib/messages.mjs";
 import { fetchDevSession, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
+import { isAffirmative, livePushDecision } from "../lib/confirm.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
 
-const VERSION = "0.1.11";
+const VERSION = "0.1.12";
 const args = process.argv.slice(2);
 
 /** Parse `--key value` and `--flag` (boolean) arguments. */
@@ -55,7 +56,8 @@ Usage
   blocofy theme dev [dir] [--port <n>] [--no-sync]
       Start a dev server and print 3 auto-reloading views — Local, live-domain
       Preview, and the theme Editor. Press l / p / e to open each, q to quit.
-      Edit a file and save → every open view reloads. (dir defaults to cwd)
+      Edit a file and save → every open view reloads. Saves sync to a DRAFT theme
+      only (never the live site). (dir defaults to cwd)
         --port <n>   local port (default 3030)
         --no-sync    local preview only (skip draft sync + remote views)
 
@@ -63,9 +65,12 @@ Usage
       Download the live theme to disk. (dir defaults to cwd)
         --draft      pull the draft theme (what 'theme dev' syncs into) instead of live
 
-  blocofy theme push [dir] [--draft]
-      Write the local theme to the site (create/update; no delete).
-        --draft      write to a draft theme — preview & publish it from the admin panel
+  blocofy theme push [dir] [--draft] [--yes]
+      Write the local theme to the LIVE site IMMEDIATELY (create/update; no delete,
+      no preview). Asks for confirmation first; non-interactive shells must pass --yes.
+        --draft      write to a draft theme instead — preview & publish it from the
+                     admin panel (recommended; never touches the live site)
+        --yes        confirm the live push without prompting (for CI / agents)
 
   blocofy pages pull [dir] / pages push [dir]
       pull: download published pages → pages/<slug>.json.
@@ -177,6 +182,34 @@ async function themePush(rest) {
   }
   const creds = requireCreds();
   const draft = Boolean(flags.draft);
+
+  // Canlı push (flag'siz) ANINDA canlı temayı değiştirir (önizleme yok). Agent/CI
+  // kazara canlıya basmasın diye açık onay şart (#431 L2).
+  const decision = livePushDecision({
+    draft,
+    yes: Boolean(flags.yes),
+    confirm: Boolean(flags.confirm),
+    isTTY: Boolean(process.stdin.isTTY),
+  });
+  if (decision.mustAbort) {
+    console.error(`⚠ 'theme push' writes to the LIVE theme of ${creds.url} immediately (no preview).`);
+    console.error(`  Non-interactive shell: pass --yes to confirm, or use --draft for a safe draft.`);
+    process.exit(1);
+  }
+  if (decision.needsPrompt) {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    let answer;
+    try {
+      answer = await rl.question(`⚠ Push to the LIVE theme of ${creds.url}? Immediate, no preview. [y/N] `);
+    } finally {
+      rl.close();
+    }
+    if (!isAffirmative(answer)) {
+      console.error("Aborted. Use `--draft` to push to a draft, or `--yes` to confirm the live push.");
+      process.exit(1);
+    }
+  }
+
   const result = await pushTheme({ dir, url: creds.url, token: creds.token, draft });
   if (result.draft) {
     console.log(`Pushed to draft theme #${result.instanceId} (${result.created} created, ${result.updated} updated).`);
