@@ -14,12 +14,18 @@ import { createInterface } from "node:readline/promises";
 
 import { credentialsPath, loadCredentials, saveCredentials } from "../lib/credentials.mjs";
 import { startDevServer } from "../lib/dev-server.mjs";
-import { fetchDevSession, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
+import { fetchDevSession, fetchWhoami, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
 
 const VERSION = "0.1.4";
 const args = process.argv.slice(2);
+
+/** Human label for a resolved site: "Name (slug)" or just the slug. */
+function siteLabel(site) {
+  if (!site) return "";
+  return site.name ? `${site.name} (${site.slug})` : site.slug;
+}
 
 /** Parse `--key value` and `--flag` (boolean) arguments. */
 function parseFlags(rest) {
@@ -59,9 +65,10 @@ Usage
   blocofy theme pull [dir]
       Download the live theme to disk. (dir defaults to cwd)
 
-  blocofy theme push [dir] [--draft]
-      Write the local theme to the site (create/update; no delete).
-        --draft      write to a draft theme — preview & publish it from the admin panel
+  blocofy theme push [dir] [--live]
+      Write the local theme to a DRAFT theme (create/update; no delete) — preview
+      & publish it from the admin panel. Your live site is untouched by default.
+        --live       write straight to the LIVE theme (skips the draft + publish step)
 
   blocofy --version
   blocofy --help
@@ -69,7 +76,8 @@ Usage
 Examples
   blocofy login --url https://store.myblocofy.com --token bcf_xxxxxxxx
   blocofy theme pull && blocofy theme dev
-  blocofy theme push --draft
+  blocofy theme push          # → draft theme (publish from the admin panel)
+  blocofy theme push --live   # → straight to the live site
 
 Auth: ~/.blocofy/credentials.json (from \`login\`), or BLOCOFY_URL + BLOCOFY_TOKEN env vars.
 The CLI does not build assets — bring your own (npm/Vite/Tailwind); the platform serves
@@ -132,6 +140,16 @@ async function login(rest) {
 
   saveCredentials({ url, token });
   console.log(`✓ Saved credentials → ${credentialsPath()}`);
+
+  // Token'ın GERÇEK site'ını göster — site sunucuda TOKEN'dan çözülür, URL kozmetik.
+  // Yanlış tenant'ın token'ıyla login olduysan ("klarosa URL + ksc token") burada
+  // hemen görürsün. whoami yoksa/erişilemezse sessiz geç (push yine de hedefi yazar).
+  try {
+    const who = await fetchWhoami({ url, token });
+    if (who?.site) console.log(`  Site: ${siteLabel(who.site)} — your theme commands target this tenant.`);
+  } catch {
+    /* best-effort */
+  }
   console.log(`Next: cd into your theme directory, then run  blocofy theme dev`);
 }
 
@@ -162,8 +180,24 @@ async function themePush(rest) {
     process.exit(1);
   }
   const creds = requireCreds();
-  const draft = Boolean(flags.draft);
-  const result = await pushTheme({ dir, url: creds.url, token: creds.token, draft });
+  // Güvenli varsayılan: push TASLAĞA yazar; canlıya yazmak için explicit --live
+  // (Shopify modeli). Agent "göstermek" için push'larsa canlıyı EZMEZ.
+  const live = Boolean(flags.live);
+
+  // Hedef tenant'ı yaz — site TOKEN'dan çözülür (URL kozmetik) → yanlış-tenant'a
+  // yazımı görünür kılar. whoami yoksa/erişilemezse sessiz geç.
+  try {
+    const who = await fetchWhoami({ url: creds.url, token: creds.token });
+    if (who?.site) {
+      console.log(
+        `→ ${live ? "Publishing to the LIVE theme" : "Pushing to a draft"} of ${siteLabel(who.site)}`,
+      );
+    }
+  } catch {
+    /* best-effort */
+  }
+
+  const result = await pushTheme({ dir, url: creds.url, token: creds.token, draft: !live });
   if (result.draft) {
     console.log(`Pushed to draft theme #${result.instanceId} (${result.created} created, ${result.updated} updated).`);
     console.log(`Preview & publish it in the admin panel: Theme → Theme library → "Open in editor".`);
@@ -171,7 +205,7 @@ async function themePush(rest) {
     const extra = result.skippedDeletes
       ? `, ${result.skippedDeletes} remote file(s) absent locally (not deleted)`
       : "";
-    console.log(`Push: ${result.created} created, ${result.updated} updated${extra}.`);
+    console.log(`Push: ${result.created} created, ${result.updated} updated${extra} (LIVE theme).`);
   }
 }
 
@@ -206,7 +240,9 @@ async function themeDev(rest) {
   const previewUrl = session ? `${session.previewUrl}&hr=${port}` : null;
   const editorUrl = session ? `${session.editorUrl}&hr=${port}` : null;
 
-  console.log(`\nblocofy theme dev — ${creds.url} (token ${creds.token.slice(0, 8)}…)\n`);
+  // Çözülen site'ı göster (session TOKEN'dan çözüyor) → hangi tenant'ı düzenlediğin belli olsun.
+  const siteLine = session?.site ? `${siteLabel(session.site)} · ` : "";
+  console.log(`\nblocofy theme dev — ${siteLine}${creds.url} (token ${creds.token.slice(0, 8)}…)\n`);
   console.log(`  (l) Local      ${hyperlink(localUrl)}`);
   if (previewUrl) console.log(`  (p) Preview    ${hyperlink(previewUrl)}`);
   if (editorUrl) console.log(`  (e) Editor     ${hyperlink(editorUrl)}`);
