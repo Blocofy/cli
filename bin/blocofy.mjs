@@ -17,13 +17,19 @@ import { credentialsPath, loadCredentials, saveCredentials } from "../lib/creden
 import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
 import { githubNote, statusLine, syncScopeNote } from "../lib/messages.mjs";
-import { fetchDevSession, fetchSiteStatus, publishInstance, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
+import { fetchDevSession, fetchSiteStatus, fetchWhoami, publishInstance, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
 import { isAffirmative, livePushDecision } from "../lib/confirm.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
 
-const VERSION = "0.1.13";
+const VERSION = "0.1.14";
 const args = process.argv.slice(2);
+
+/** Human label for a resolved site: "Name (slug)" or just the slug. */
+function siteLabel(site) {
+  if (!site) return "";
+  return site.name ? `${site.name} (${site.slug})` : site.slug;
+}
 
 /** Parse `--key value` and `--flag` (boolean) arguments. */
 function parseFlags(rest) {
@@ -160,6 +166,16 @@ async function login(rest) {
 
   saveCredentials({ url, token });
   console.log(`✓ Saved credentials → ${credentialsPath()}`);
+
+  // Token'ın GERÇEK site'ını göster — site sunucuda TOKEN'dan çözülür, URL kozmetik.
+  // Yanlış tenant'ın token'ıyla login olduysan ("klarosa URL + ksc token") hemen
+  // görürsün. whoami yoksa/erişilemezse sessiz geç.
+  try {
+    const who = await fetchWhoami({ url, token });
+    if (who?.site) console.log(`  Site: ${siteLabel(who.site)} — your theme commands target this tenant.`);
+  } catch {
+    /* best-effort */
+  }
   console.log(`Next: cd into your theme directory, then run  blocofy theme dev`);
 }
 
@@ -194,6 +210,20 @@ async function themePush(rest) {
   const creds = requireCreds();
   const draft = Boolean(flags.draft);
 
+  // Hedef tenant'ı çöz ve GÖSTER — site sunucuda TOKEN'dan çözülür (URL kozmetik),
+  // yanlış-tenant'a yazımı görünür kılar ("klarosa sandım, ksc'ye yazdım"). whoami
+  // yoksa/erişilemezse sessiz geç; etiketi confirmation mesajlarında da kullan.
+  let site = null;
+  try {
+    site = (await fetchWhoami({ url: creds.url, token: creds.token })).site;
+  } catch {
+    /* best-effort */
+  }
+  const target = site ? siteLabel(site) : creds.url;
+  if (site) {
+    console.log(`→ ${draft ? "Pushing to a draft" : "Pushing to the LIVE theme"} of ${target}`);
+  }
+
   // Canlı push (flag'siz) ANINDA canlı temayı değiştirir (önizleme yok). Agent/CI
   // kazara canlıya basmasın diye açık onay şart (#431 L2).
   const decision = livePushDecision({
@@ -203,7 +233,7 @@ async function themePush(rest) {
     isTTY: Boolean(process.stdin.isTTY),
   });
   if (decision.mustAbort) {
-    console.error(`⚠ 'theme push' writes to the LIVE theme of ${creds.url} immediately (no preview).`);
+    console.error(`⚠ 'theme push' writes to the LIVE theme of ${target} immediately (no preview).`);
     console.error(`  Non-interactive shell: pass --yes to confirm, or use --draft for a safe draft.`);
     process.exit(1);
   }
@@ -211,7 +241,7 @@ async function themePush(rest) {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     let answer;
     try {
-      answer = await rl.question(`⚠ Push to the LIVE theme of ${creds.url}? Immediate, no preview. [y/N] `);
+      answer = await rl.question(`⚠ Push to the LIVE theme of ${target}? Immediate, no preview. [y/N] `);
     } finally {
       rl.close();
     }
@@ -294,7 +324,9 @@ async function themeDev(rest) {
   const previewUrl = session ? `${session.previewUrl}&hr=${port}` : null;
   const editorUrl = session ? `${session.editorUrl}&hr=${port}` : null;
 
-  console.log(`\nblocofy theme dev — ${creds.url} (token ${creds.token.slice(0, 8)}…)\n`);
+  // Çözülen site'ı göster (session TOKEN'dan çözer) → hangi tenant'ı düzenlediğin belli olsun.
+  const siteLine = session?.site ? `${siteLabel(session.site)} · ` : "";
+  console.log(`\nblocofy theme dev — ${siteLine}${creds.url} (token ${creds.token.slice(0, 8)}…)\n`);
   console.log(`  (l) Local      ${hyperlink(localUrl)}`);
   if (previewUrl) console.log(`  (p) Preview    ${hyperlink(previewUrl)}`);
   if (editorUrl) console.log(`  (e) Editor     ${hyperlink(editorUrl)}`);
