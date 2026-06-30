@@ -50,13 +50,13 @@ Usage
         --port <n>   local port (default 3030)
         --no-sync    local preview only (skip draft sync + remote views)
 
-  blocofy theme pull [dir] [--draft]
+  blocofy theme pull [dir] [--draft] [--instance <handle>]
       Download the live theme to disk. (dir defaults to cwd)
         --draft      pull the draft theme (what 'theme dev' syncs into) instead of live
         --instance <handle>  pull a specific theme by its handle (from the admin
                              panel theme card, or \`blocofy status\`)
 
-  blocofy theme push [dir] [--draft] [--yes]
+  blocofy theme push [dir] [--draft] [--yes] [--instance <handle>]
       Write the local theme to the LIVE site IMMEDIATELY (create/update; no delete,
       no preview). Asks for confirmation first; non-interactive shells must pass --yes.
         --draft      write to a draft theme instead — preview & publish it from the
