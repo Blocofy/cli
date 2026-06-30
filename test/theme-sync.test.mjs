@@ -161,6 +161,49 @@ test("pushTheme: readLocalTemplates → POST {files} (stripped keys); returns re
   assert.equal(received.files["section/Hero"], "H"); // stripped key sent
 });
 
+test("pullTheme --instance → GET ?instance=<handle>", async () => {
+  let seenUrl = null;
+  const server = createServer((req, res) => {
+    seenUrl = req.url;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ files: {} }));
+  });
+  server.listen(0);
+  await once(server, "listening");
+  try {
+    const url = `http://localhost:${server.address().port}`;
+    await pullTheme({ dir: mkdtempSync(join(tmpdir(), "p-")), url, token: "bcf_t", instance: "t7k2p9" });
+    assert.match(seenUrl, /\/api\/dev\/theme\?instance=t7k2p9/);
+  } finally {
+    server.close();
+  }
+});
+
+test("pushTheme --instance → POST body.instance", async () => {
+  let body = null;
+  const server = createServer((req, res) => {
+    let b = "";
+    req.on("data", (d) => (b += d));
+    req.on("end", () => {
+      body = JSON.parse(b || "{}");
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, instanceId: "t7k2p9", created: 0, updated: 0 }));
+    });
+  });
+  server.listen(0);
+  await once(server, "listening");
+  const dir = mkdtempSync(join(tmpdir(), "u-"));
+  mkdirSync(join(dir, "layout"), { recursive: true });
+  writeFileSync(join(dir, "layout", "theme.liquid"), "<html></html>");
+  try {
+    const url = `http://localhost:${server.address().port}`;
+    await pushTheme({ dir, url, token: "bcf_t", instance: "t7k2p9" });
+    assert.equal(body.instance, "t7k2p9");
+  } finally {
+    server.close();
+  }
+});
+
 test("pushTheme --draft: sends body.draft true; returns draft result", async () => {
   let received = null;
   const fake = createServer((req, res) => {

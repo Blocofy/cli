@@ -12,6 +12,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 
+import { parseArgs } from "../lib/args.mjs";
 import { pullContent, pushContent } from "../lib/content-sync.mjs";
 import { credentialsPath, loadCredentials, saveCredentials } from "../lib/credentials.mjs";
 import { startDevServer } from "../lib/dev-server.mjs";
@@ -29,24 +30,6 @@ const args = process.argv.slice(2);
 function siteLabel(site) {
   if (!site) return "";
   return site.name ? `${site.name} (${site.slug})` : site.slug;
-}
-
-/** Parse `--key value` and `--flag` (boolean) arguments. */
-function parseFlags(rest) {
-  const flags = {};
-  for (let i = 0; i < rest.length; i++) {
-    const arg = rest[i];
-    if (!arg.startsWith("--")) continue;
-    const key = arg.slice(2);
-    const next = rest[i + 1];
-    if (next && !next.startsWith("--")) {
-      flags[key] = next;
-      i++;
-    } else {
-      flags[key] = true;
-    }
-  }
-  return flags;
 }
 
 function printHelp() {
@@ -70,6 +53,8 @@ Usage
   blocofy theme pull [dir] [--draft]
       Download the live theme to disk. (dir defaults to cwd)
         --draft      pull the draft theme (what 'theme dev' syncs into) instead of live
+        --instance <handle>  pull a specific theme by its handle (from the admin
+                             panel theme card, or \`blocofy status\`)
 
   blocofy theme push [dir] [--draft] [--yes]
       Write the local theme to the LIVE site IMMEDIATELY (create/update; no delete,
@@ -77,12 +62,14 @@ Usage
         --draft      write to a draft theme instead — preview & publish it from the
                      admin panel (recommended; never touches the live site)
         --yes        confirm the live push without prompting (for CI / agents)
+        --instance <handle>  push to a specific theme by its handle (safe targeted
+                             write — no live-confirmation prompt)
 
-  blocofy theme publish [--instance <id>]
+  blocofy theme publish [--instance <handle>]
       Publish a draft theme to the LIVE site. With no flag, publishes the draft that
       'theme dev' / 'theme push --draft' writes into. The server refuses to publish a
       theme that has no pages (it would 404) — so publishing is always safe.
-        --instance <id>   publish a specific theme instance
+        --instance <handle>  publish a specific theme (handle from the panel / status)
 
   blocofy status
       Show the live theme, page distribution per instance, drafts, and a health flag
@@ -122,7 +109,7 @@ async function promptValid(rl, question, normalize, valid, hint, tries = 3) {
 }
 
 async function login(rest) {
-  const flags = parseFlags(rest);
+  const { flags } = parseArgs(rest);
   let url = typeof flags.url === "string" ? normalizeUrl(flags.url) : "";
   let token = typeof flags.token === "string" ? flags.token.trim() : "";
 
@@ -190,25 +177,26 @@ function requireCreds() {
 }
 
 async function themePull(rest) {
-  const flags = parseFlags(rest);
-  const positional = rest.filter((a) => !a.startsWith("--"));
-  const dir = resolve(positional[0] ?? process.cwd());
+  const { flags, positionals } = parseArgs(rest);
+  const dir = resolve(positionals[0] ?? process.cwd());
   const creds = requireCreds();
   const draft = Boolean(flags.draft);
-  const { count } = await pullTheme({ dir, url: creds.url, token: creds.token, draft });
-  console.log(`Downloaded ${count} ${draft ? "draft" : "live"} theme files → ${dir}`);
+  const instance = typeof flags.instance === "string" ? flags.instance : null;
+  const { count } = await pullTheme({ dir, url: creds.url, token: creds.token, draft, instance });
+  const what = instance ? `instance ${instance}` : draft ? "draft" : "live";
+  console.log(`Downloaded ${count} ${what} theme files → ${dir}`);
 }
 
 async function themePush(rest) {
-  const flags = parseFlags(rest);
-  const positional = rest.filter((a) => !a.startsWith("--"));
-  const dir = resolve(positional[0] ?? process.cwd());
+  const { flags, positionals } = parseArgs(rest);
+  const dir = resolve(positionals[0] ?? process.cwd());
   if (!existsSync(dir)) {
     console.error(`Theme directory not found: ${dir}`);
     process.exit(1);
   }
   const creds = requireCreds();
   const draft = Boolean(flags.draft);
+  const instance = typeof flags.instance === "string" ? flags.instance : null;
 
   // Hedef tenant'ı çöz ve GÖSTER — site sunucuda TOKEN'dan çözülür (URL kozmetik),
   // yanlış-tenant'a yazımı görünür kılar ("klarosa sandım, ksc'ye yazdım"). whoami
@@ -227,7 +215,7 @@ async function themePush(rest) {
   // Canlı push (flag'siz) ANINDA canlı temayı değiştirir (önizleme yok). Agent/CI
   // kazara canlıya basmasın diye açık onay şart (#431 L2).
   const decision = livePushDecision({
-    draft,
+    draft: draft || Boolean(instance),
     yes: Boolean(flags.yes),
     confirm: Boolean(flags.confirm),
     isTTY: Boolean(process.stdin.isTTY),
@@ -251,9 +239,9 @@ async function themePush(rest) {
     }
   }
 
-  const result = await pushTheme({ dir, url: creds.url, token: creds.token, draft });
-  if (result.draft) {
-    console.log(`Pushed to draft theme #${result.instanceId} (${result.created} created, ${result.updated} updated).`);
+  const result = await pushTheme({ dir, url: creds.url, token: creds.token, draft, instance });
+  if (result.instanceId) {
+    console.log(`Pushed to theme ${result.instanceId} (${result.created} created, ${result.updated} updated).`);
     console.log(`Preview & publish it in the admin panel: Theme → Theme library → "Open in editor".`);
   } else {
     const extra = result.skippedDeletes
@@ -264,8 +252,8 @@ async function themePush(rest) {
 }
 
 async function contentPush(scope, rest) {
-  const positional = rest.filter((a) => !a.startsWith("--"));
-  const dir = resolve(positional[0] ?? process.cwd());
+  const { positionals } = parseArgs(rest);
+  const dir = resolve(positionals[0] ?? process.cwd());
   if (!existsSync(dir)) {
     console.error(`Directory not found: ${dir}`);
     process.exit(1);
@@ -286,17 +274,16 @@ async function contentPush(scope, rest) {
 }
 
 async function contentPull(scope, rest) {
-  const positional = rest.filter((a) => !a.startsWith("--"));
-  const dir = resolve(positional[0] ?? process.cwd());
+  const { positionals } = parseArgs(rest);
+  const dir = resolve(positionals[0] ?? process.cwd());
   const creds = requireCreds();
   const { count } = await pullContent({ dir, url: creds.url, token: creds.token, scope });
   console.log(`Downloaded ${count} ${scope === "settings" ? "settings" : "page"} file(s) → ${dir}`);
 }
 
 async function themeDev(rest) {
-  const flags = parseFlags(rest);
-  const positional = rest.filter((a) => !a.startsWith("--"));
-  const themeDir = resolve(positional[0] ?? process.cwd());
+  const { flags, positionals } = parseArgs(rest);
+  const themeDir = resolve(positionals[0] ?? process.cwd());
 
   if (!existsSync(themeDir)) {
     console.error(`Theme directory not found: ${themeDir}`);
@@ -434,17 +421,17 @@ async function themeDev(rest) {
 }
 
 async function themePublish(rest) {
-  const flags = parseFlags(rest);
+  const { flags } = parseArgs(rest);
   const creds = requireCreds();
-  let instanceId = Number(flags.instance);
-  if (!Number.isInteger(instanceId) || instanceId <= 0) {
+  let instance = typeof flags.instance === "string" ? flags.instance : null;
+  if (!instance) {
     // Belirtilmediyse: `theme dev` / `theme push --draft`'ın yazdığı taslağı yayınla.
     const session = await fetchDevSession({ url: creds.url, token: creds.token });
-    instanceId = session.draftInstanceId;
+    instance = session.draftInstanceId;
   }
-  const result = await publishInstance({ url: creds.url, token: creds.token, instanceId });
+  const result = await publishInstance({ url: creds.url, token: creds.token, instanceId: instance });
   console.log(
-    `✓ Theme #${result.published} is now LIVE${result.cloned ? " (pages cloned from the previous live theme)" : ""}.`,
+    `✓ Theme ${result.published} is now LIVE${result.cloned ? " (pages cloned from the previous live theme)" : ""}.`,
   );
 }
 
@@ -452,10 +439,10 @@ async function status() {
   const creds = requireCreds();
   const s = await fetchSiteStatus({ url: creds.url, token: creds.token });
   const live = s.live_theme_instance;
-  console.log(`\nSite: ${s.site.slug} (id ${s.site.id})`);
+  console.log(`\nSite: ${s.site.slug} · ${s.site.id}`);
   console.log(
     live
-      ? `Live theme: #${live.id}${live.name ? ` ${live.name}` : ""} — ${live.template_count} files, ${s.pages_on_live} pages`
+      ? `Live theme: ${live.id}${live.name ? ` ${live.name}` : ""} — ${live.template_count} files, ${s.pages_on_live} pages`
       : `Live theme: none`,
   );
   console.log(`Health: ${s.health}`);
@@ -467,7 +454,7 @@ async function status() {
     console.warn(`  ⚠ ${s.orphaned_pages} page(s) live on a non-live instance (orphan).`);
   }
   if (Array.isArray(s.drafts) && s.drafts.length > 0) {
-    console.log(`Drafts: ${s.drafts.map((d) => `#${d.id}${d.name ? ` ${d.name}` : ""}`).join(", ")}`);
+    console.log(`Drafts: ${s.drafts.map((d) => `${d.id}${d.name ? ` ${d.name}` : ""}`).join(", ")}`);
   }
   console.log("");
 }
