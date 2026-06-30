@@ -12,6 +12,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 
+import { parseArgs } from "../lib/args.mjs";
 import { pullContent, pushContent } from "../lib/content-sync.mjs";
 import { credentialsPath, loadCredentials, saveCredentials } from "../lib/credentials.mjs";
 import { startDevServer } from "../lib/dev-server.mjs";
@@ -29,24 +30,6 @@ const args = process.argv.slice(2);
 function siteLabel(site) {
   if (!site) return "";
   return site.name ? `${site.name} (${site.slug})` : site.slug;
-}
-
-/** Parse `--key value` and `--flag` (boolean) arguments. */
-function parseFlags(rest) {
-  const flags = {};
-  for (let i = 0; i < rest.length; i++) {
-    const arg = rest[i];
-    if (!arg.startsWith("--")) continue;
-    const key = arg.slice(2);
-    const next = rest[i + 1];
-    if (next && !next.startsWith("--")) {
-      flags[key] = next;
-      i++;
-    } else {
-      flags[key] = true;
-    }
-  }
-  return flags;
 }
 
 function printHelp() {
@@ -122,7 +105,7 @@ async function promptValid(rl, question, normalize, valid, hint, tries = 3) {
 }
 
 async function login(rest) {
-  const flags = parseFlags(rest);
+  const { flags } = parseArgs(rest);
   let url = typeof flags.url === "string" ? normalizeUrl(flags.url) : "";
   let token = typeof flags.token === "string" ? flags.token.trim() : "";
 
@@ -190,9 +173,8 @@ function requireCreds() {
 }
 
 async function themePull(rest) {
-  const flags = parseFlags(rest);
-  const positional = rest.filter((a) => !a.startsWith("--"));
-  const dir = resolve(positional[0] ?? process.cwd());
+  const { flags, positionals } = parseArgs(rest);
+  const dir = resolve(positionals[0] ?? process.cwd());
   const creds = requireCreds();
   const draft = Boolean(flags.draft);
   const { count } = await pullTheme({ dir, url: creds.url, token: creds.token, draft });
@@ -200,9 +182,8 @@ async function themePull(rest) {
 }
 
 async function themePush(rest) {
-  const flags = parseFlags(rest);
-  const positional = rest.filter((a) => !a.startsWith("--"));
-  const dir = resolve(positional[0] ?? process.cwd());
+  const { flags, positionals } = parseArgs(rest);
+  const dir = resolve(positionals[0] ?? process.cwd());
   if (!existsSync(dir)) {
     console.error(`Theme directory not found: ${dir}`);
     process.exit(1);
@@ -264,8 +245,8 @@ async function themePush(rest) {
 }
 
 async function contentPush(scope, rest) {
-  const positional = rest.filter((a) => !a.startsWith("--"));
-  const dir = resolve(positional[0] ?? process.cwd());
+  const { positionals } = parseArgs(rest);
+  const dir = resolve(positionals[0] ?? process.cwd());
   if (!existsSync(dir)) {
     console.error(`Directory not found: ${dir}`);
     process.exit(1);
@@ -286,17 +267,16 @@ async function contentPush(scope, rest) {
 }
 
 async function contentPull(scope, rest) {
-  const positional = rest.filter((a) => !a.startsWith("--"));
-  const dir = resolve(positional[0] ?? process.cwd());
+  const { positionals } = parseArgs(rest);
+  const dir = resolve(positionals[0] ?? process.cwd());
   const creds = requireCreds();
   const { count } = await pullContent({ dir, url: creds.url, token: creds.token, scope });
   console.log(`Downloaded ${count} ${scope === "settings" ? "settings" : "page"} file(s) → ${dir}`);
 }
 
 async function themeDev(rest) {
-  const flags = parseFlags(rest);
-  const positional = rest.filter((a) => !a.startsWith("--"));
-  const themeDir = resolve(positional[0] ?? process.cwd());
+  const { flags, positionals } = parseArgs(rest);
+  const themeDir = resolve(positionals[0] ?? process.cwd());
 
   if (!existsSync(themeDir)) {
     console.error(`Theme directory not found: ${themeDir}`);
@@ -434,7 +414,7 @@ async function themeDev(rest) {
 }
 
 async function themePublish(rest) {
-  const flags = parseFlags(rest);
+  const { flags } = parseArgs(rest);
   const creds = requireCreds();
   let instanceId = Number(flags.instance);
   if (!Number.isInteger(instanceId) || instanceId <= 0) {
