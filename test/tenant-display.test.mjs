@@ -29,7 +29,7 @@ function fakePlatform() {
       req.on("end", () => {
         state.pushBody = JSON.parse(body || "{}");
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: true, draft: true, instanceId: 77, created: 1, updated: 0 }));
+        res.end(JSON.stringify({ ok: true, draft: true, instanceId: "t7k2p9", created: 1, updated: 0 }));
       });
       return;
     }
@@ -88,6 +88,7 @@ test("theme push --draft names the target tenant before writing", async () => {
       env: { ...process.env, BLOCOFY_URL: url, BLOCOFY_TOKEN: "bcf_t" },
     });
     assert.match(stdout, /Pushing to a draft of Ksc Metal \(ksc\)/);
+    assert.match(stdout, /Pushed to draft theme t7k2p9/);
     assert.equal(state.pushBody.draft, true);
   } finally {
     server.close();

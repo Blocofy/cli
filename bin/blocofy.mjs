@@ -234,7 +234,7 @@ async function themePush(rest) {
 
   const result = await pushTheme({ dir, url: creds.url, token: creds.token, draft });
   if (result.draft) {
-    console.log(`Pushed to draft theme #${result.instanceId} (${result.created} created, ${result.updated} updated).`);
+    console.log(`Pushed to draft theme ${result.instanceId} (${result.created} created, ${result.updated} updated).`);
     console.log(`Preview & publish it in the admin panel: Theme → Theme library → "Open in editor".`);
   } else {
     const extra = result.skippedDeletes
@@ -424,7 +424,7 @@ async function themePublish(rest) {
   }
   const result = await publishInstance({ url: creds.url, token: creds.token, instanceId });
   console.log(
-    `✓ Theme #${result.published} is now LIVE${result.cloned ? " (pages cloned from the previous live theme)" : ""}.`,
+    `✓ Theme ${result.published} is now LIVE${result.cloned ? " (pages cloned from the previous live theme)" : ""}.`,
   );
 }
 
@@ -432,10 +432,10 @@ async function status() {
   const creds = requireCreds();
   const s = await fetchSiteStatus({ url: creds.url, token: creds.token });
   const live = s.live_theme_instance;
-  console.log(`\nSite: ${s.site.slug} (id ${s.site.id})`);
+  console.log(`\nSite: ${s.site.slug} · ${s.site.id}`);
   console.log(
     live
-      ? `Live theme: #${live.id}${live.name ? ` ${live.name}` : ""} — ${live.template_count} files, ${s.pages_on_live} pages`
+      ? `Live theme: ${live.id}${live.name ? ` ${live.name}` : ""} — ${live.template_count} files, ${s.pages_on_live} pages`
       : `Live theme: none`,
   );
   console.log(`Health: ${s.health}`);
@@ -447,7 +447,7 @@ async function status() {
     console.warn(`  ⚠ ${s.orphaned_pages} page(s) live on a non-live instance (orphan).`);
   }
   if (Array.isArray(s.drafts) && s.drafts.length > 0) {
-    console.log(`Drafts: ${s.drafts.map((d) => `#${d.id}${d.name ? ` ${d.name}` : ""}`).join(", ")}`);
+    console.log(`Drafts: ${s.drafts.map((d) => `${d.id}${d.name ? ` ${d.name}` : ""}`).join(", ")}`);
   }
   console.log("");
 }

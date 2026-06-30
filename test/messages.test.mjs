@@ -12,8 +12,11 @@ test("syncScopeNote: tema dizinleri synced, config/pages not-synced", () => {
   assert.ok(notSynced.includes("pages/"));
 });
 
-test("statusLine: draft + live id", () => {
-  assert.equal(statusLine({ draftInstanceId: 19, liveThemeId: 18 }), "Local files → Draft theme #19    ·    Live theme → #18");
+test("statusLine: handle'ları öneksiz gösterir", () => {
+  const line = statusLine({ draftInstanceId: "t7k2p9", liveThemeId: "t3m1xx" });
+  assert.match(line, /Draft theme t7k2p9/);
+  assert.match(line, /Live theme → t3m1xx/);
+  assert.doesNotMatch(line, /#/); // ham-sayı çağrışımı yapan # yok
 });
 
 test("statusLine: liveThemeId yoksa (none)", () => {
