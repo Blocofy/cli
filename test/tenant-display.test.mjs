@@ -88,7 +88,7 @@ test("theme push --draft names the target tenant before writing", async () => {
       env: { ...process.env, BLOCOFY_URL: url, BLOCOFY_TOKEN: "bcf_t" },
     });
     assert.match(stdout, /Pushing to a draft of Ksc Metal \(ksc\)/);
-    assert.match(stdout, /Pushed to draft theme t7k2p9/);
+    assert.match(stdout, /Pushed to theme t7k2p9/);
     assert.equal(state.pushBody.draft, true);
   } finally {
     server.close();
