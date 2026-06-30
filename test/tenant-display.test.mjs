@@ -33,6 +33,22 @@ function fakePlatform() {
       });
       return;
     }
+    if (req.method === "GET" && req.url.endsWith("/api/dev/site")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          site: { slug: "ksc" },
+          url: "https://ksc.myblocofy.com",
+          live_theme_instance: { id: "t2bimup4", name: "CLI Draft", template_count: 12 },
+          pages_on_live: 3,
+          pages_by_instance: [],
+          orphaned_pages: 0,
+          drafts: [{ id: "t8dpkn1", name: "CLI Draft" }],
+          health: "ok",
+        }),
+      );
+      return;
+    }
     res.writeHead(404);
     res.end();
   });
@@ -93,5 +109,22 @@ test("theme push --draft names the target tenant before writing", async () => {
   } finally {
     server.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("status shows the site URL, not an opaque site id", async () => {
+  const { server } = fakePlatform();
+  server.listen(0);
+  await once(server, "listening");
+  const url = `http://localhost:${server.address().port}`;
+  try {
+    const { stdout } = await execFileP("node", [BIN, "status"], {
+      env: { ...process.env, BLOCOFY_URL: url, BLOCOFY_TOKEN: "bcf_t" },
+    });
+    assert.match(stdout, /Site:\s*ksc · https:\/\/ksc\.myblocofy\.com/);
+    assert.doesNotMatch(stdout, /Site:.*\bs[0-9a-v]{4,}\b/); // no opaque site handle
+    assert.match(stdout, /Drafts: t8dpkn1 CLI Draft/); // theme handle still shown
+  } finally {
+    server.close();
   }
 });
