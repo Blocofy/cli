@@ -1,6 +1,6 @@
 {
   "name": "@blocofy/cli",
-  "version": "0.1.14",
+  "version": "0.2.0",
   "description": "Develop your Blocofy theme locally against live data with instant preview — login, theme dev, pull, push.",
   "type": "module",
   "license": "MIT",
