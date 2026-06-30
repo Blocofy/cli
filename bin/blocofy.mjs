@@ -439,7 +439,7 @@ async function status() {
   const creds = requireCreds();
   const s = await fetchSiteStatus({ url: creds.url, token: creds.token });
   const live = s.live_theme_instance;
-  console.log(`\nSite: ${s.site.slug} · ${s.site.id}`);
+  console.log(`\nSite: ${s.site.slug}${s.url ? ` · ${s.url}` : ""}`);
   console.log(
     live
       ? `Live theme: ${live.id}${live.name ? ` ${live.name}` : ""} — ${live.template_count} files, ${s.pages_on_live} pages`
