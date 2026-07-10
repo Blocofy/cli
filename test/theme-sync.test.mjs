@@ -7,7 +7,117 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 
 import { localPathFor } from "../lib/local-theme.mjs";
-import { fetchDevSession, fetchSiteStatus, publishInstance, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
+import {
+  fetchDevSession,
+  fetchSiteStatus,
+  fetchWithRetry,
+  publishInstance,
+  pullTheme,
+  pushTheme,
+} from "../lib/theme-sync.mjs";
+
+// Zero backoff keeps retry tests instant; onRetry records each notice.
+const noWait = { backoff: [0, 0] };
+
+test("fetchWithRetry: network throw twice → succeeds on 3rd attempt (2 retries)", async () => {
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  const retries = [];
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls < 3) throw new TypeError("fetch failed");
+    return new Response("ok", { status: 200 });
+  };
+  after(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const res = await fetchWithRetry("http://x", {}, { ...noWait, onRetry: (i) => retries.push(i) });
+  assert.equal(res.status, 200);
+  assert.equal(calls, 3);
+  assert.equal(retries.length, 2);
+  assert.deepEqual(retries.map((r) => r.attempt), [1, 2]);
+});
+
+test("fetchWithRetry: persistent network error → throws after retries exhausted", async () => {
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    throw new TypeError("fetch failed");
+  };
+  after(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  await assert.rejects(fetchWithRetry("http://x", {}, noWait), /fetch failed/);
+  assert.equal(calls, 3); // initial + 2 retries
+});
+
+test("fetchWithRetry: 422 (permanent 4xx) → returned immediately, NO retry", async () => {
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  const retries = [];
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ error: "Unprocessable" }), { status: 422 });
+  };
+  after(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const res = await fetchWithRetry("http://x", {}, { ...noWait, onRetry: (i) => retries.push(i) });
+  assert.equal(res.status, 422);
+  assert.equal(calls, 1);
+  assert.equal(retries.length, 0);
+});
+
+test("fetchWithRetry: 503 then 200 → retries once on transient 5xx", async () => {
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return calls === 1
+      ? new Response("busy", { status: 503 })
+      : new Response("ok", { status: 200 });
+  };
+  after(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const res = await fetchWithRetry("http://x", {}, noWait);
+  assert.equal(res.status, 200);
+  assert.equal(calls, 2);
+});
+
+test("pushTheme: retries a transient 503 then succeeds; onRetry fired", async () => {
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  const retries = [];
+  globalThis.fetch = async () => {
+    calls += 1;
+    return calls === 1
+      ? new Response("busy", { status: 503 })
+      : new Response(JSON.stringify({ ok: true, created: 1, updated: 0 }), { status: 200 });
+  };
+  const dir = mkdtempSync(join(tmpdir(), "blocofy-retry-"));
+  mkdirSync(join(dir, "section"), { recursive: true });
+  writeFileSync(join(dir, "section", "Hero.liquid"), "H");
+  after(() => {
+    globalThis.fetch = realFetch;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const result = await pushTheme({
+    dir,
+    url: "http://localhost:1",
+    token: "bcf_t",
+    onRetry: (i) => retries.push(i),
+  });
+  assert.equal(result.created, 1);
+  assert.equal(calls, 2);
+  assert.equal(retries.length, 1);
+});
 
 test("publishInstance: POST /api/dev/publish {instanceId} → result (Bearer)", async () => {
   let seen = null;
