@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { statusLine, syncScopeNote } from "../lib/messages.mjs";
+import { retryNotice, statusLine, syncScopeNote } from "../lib/messages.mjs";
 
 test("syncScopeNote: tema dizinleri synced, config/pages not-synced", () => {
   const [synced, notSynced] = syncScopeNote();
@@ -25,4 +25,12 @@ test("statusLine: liveThemeId yoksa (none)", () => {
 
 test("statusLine: oturum yoksa null (local-only)", () => {
   assert.equal(statusLine(null), null);
+});
+
+test("retryNotice: attempt/retries + sebep içeren tek satır", () => {
+  assert.equal(
+    retryNotice({ attempt: 1, retries: 2, reason: "fetch failed" }),
+    "Network error (fetch failed) — retrying (1/2)…",
+  );
+  assert.equal(retryNotice({ attempt: 2, retries: 2 }), "Network error — retrying (2/2)…");
 });

@@ -18,7 +18,7 @@ import { pullContent, pushContent } from "../lib/content-sync.mjs";
 import { credentialsPath, loadCredentials, saveCredentials } from "../lib/credentials.mjs";
 import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
-import { githubNote, statusLine, syncScopeNote } from "../lib/messages.mjs";
+import { githubNote, retryNotice, statusLine, syncScopeNote } from "../lib/messages.mjs";
 import { fetchDevSession, fetchSiteStatus, fetchWhoami, publishInstance, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
 import { isAffirmative, livePushDecision } from "../lib/confirm.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
@@ -240,7 +240,14 @@ async function themePush(rest) {
     }
   }
 
-  const result = await pushTheme({ dir, url: creds.url, token: creds.token, draft, instance });
+  const result = await pushTheme({
+    dir,
+    url: creds.url,
+    token: creds.token,
+    draft,
+    instance,
+    onRetry: (info) => console.error(retryNotice(info)),
+  });
   if (result.instanceId) {
     console.log(`Pushed to theme ${result.instanceId} (${result.created} created, ${result.updated} updated).`);
     console.log(`Preview & publish it in the admin panel: Theme → Theme library → "Open in editor".`);
@@ -366,6 +373,7 @@ async function themeDev(rest) {
     token: creds.token,
     port,
     syncDraft: Boolean(session),
+    onRetry: (info) => console.error(`  ${retryNotice(info)}`),
     // Her kaydetmede ne olduğunu bas — "reloaded" = watch tetiklendi; "0 views"
     // = hiçbir tarayıcı sekmesi bağlı değil (yanlış görünüme bakıyorsun); sync
     // hatası = draft güncellenemedi (preview/editör eski kalır, local yine yenilenir).
