@@ -9,6 +9,7 @@
  * livereload. No monorepo required.
  */
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 
@@ -23,7 +24,7 @@ import { isAffirmative, livePushDecision } from "../lib/confirm.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
 
-const VERSION = "0.1.14";
+const VERSION = createRequire(import.meta.url)("../package.json").version;
 const args = process.argv.slice(2);
 
 /** Human label for a resolved site: "Name (slug)" or just the slug. */
