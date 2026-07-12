@@ -53,6 +53,7 @@ A theme is a directory of files grouped by top-level folder:
 | `asset/` | CSS and static files (`theme.css`) |
 | `pages/<slug>.json` | Page content (`/` → `pages/index.json`) |
 | `config/settings.json` | Theme settings + color schemes |
+| `config/settings_schema.json` | Theme settings panel schema (synced with `pull`/`push`) |
 
 Liquid templates use the `.liquid` extension; files under `asset/` are served as-is.
 
