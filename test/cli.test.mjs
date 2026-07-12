@@ -24,15 +24,26 @@ function themeFixture() {
   writeFileSync(join(dir, "asset", "logo.svg"), "<svg/>");
   writeFileSync(join(dir, "node_modules", "junk.js"), "ignored");
   writeFileSync(join(dir, "README.md"), "ignored");
+  mkdirSync(join(dir, "config"), { recursive: true });
+  writeFileSync(join(dir, "config", "settings_schema.json"), "[]");
+  writeFileSync(join(dir, "config", "color_schemes.json"), "[]");
   return dir;
 }
 
-test("readLocalTemplates: only THEME_DIRS, .liquid stripped, asset extension kept", () => {
+test("readLocalTemplates: THEME_DIRS + config/settings_schema.json, .liquid stripped, asset kept", () => {
   const dir = themeFixture();
   const t = readLocalTemplates(dir);
-  assert.deepEqual(Object.keys(t).sort(), ["asset/logo.svg", "asset/theme.css", "section/Hero"]);
+  assert.deepEqual(Object.keys(t).sort(), [
+    "asset/logo.svg",
+    "asset/theme.css",
+    "config/settings_schema.json",
+    "section/Hero",
+  ]);
   assert.equal(t["section/Hero"], "HERO");
   assert.equal(t["asset/theme.css"], ".x{}");
+  assert.equal(t["config/settings_schema.json"], "[]");
+  // diger config/* sync DISI (color_schemes/theme.json kendi sistemi)
+  assert.equal(t["config/color_schemes.json"], undefined);
   rmSync(dir, { recursive: true, force: true });
 });
 

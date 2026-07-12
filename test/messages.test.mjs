@@ -3,12 +3,12 @@ import assert from "node:assert/strict";
 
 import { retryNotice, statusLine, syncScopeNote } from "../lib/messages.mjs";
 
-test("syncScopeNote: tema dizinleri synced, config/pages not-synced", () => {
+test("syncScopeNote: tema dizinleri + config/settings_schema.json synced, pages not-synced", () => {
   const [synced, notSynced] = syncScopeNote();
   for (const d of ["layout/", "section/", "block/", "partial/", "asset/", "template/"]) {
-    assert.ok(synced.includes(d), `synced ${d} içermeli`);
+    assert.ok(synced.includes(d), `synced ${d} icermeli`);
   }
-  assert.ok(notSynced.includes("config/"));
+  assert.ok(synced.includes("config/settings_schema.json"));
   assert.ok(notSynced.includes("pages/"));
 });
 
