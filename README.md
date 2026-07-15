@@ -17,17 +17,25 @@ blocofy login [--url <url>] [--token <bcf_…>]
                           # Save your platform URL + dev token (~/.blocofy/credentials.json, 0600).
 blocofy theme dev [dir]   # Local dev server. Prints 3 views — local preview, a live-domain
                           # preview link, and the theme editor — all auto-reloading on save.
-                          # --port <n> (default 3030), --no-sync (local preview only)
+                          # --port <n> (default 3030), --no-sync (local preview only),
+                          # --name <name> (name the draft when first created)
 blocofy theme pull [dir]  # Download the live theme to disk.
 blocofy theme push [dir]  # Write the local theme to a DRAFT by default (create/update; no
                           # delete) — preview & publish from the admin panel. --live writes
                           # to the live site immediately (asks to confirm; add --yes for CI).
+                          # --name <name> names the new draft (draft mode only).
+blocofy theme rename <handle> <new name>
+                          # Rename a theme (label only). Works on any theme, live included.
+                          # Handle from the panel theme card or `blocofy status`.
 blocofy --version
 blocofy --help
 ```
 
 ## Changelog
 
+- **0.4.0** — `theme push` / `theme dev` accept `--name <name>` to name a new draft (applied
+  only when the draft is first created; reuse ignores it). New `theme rename <handle> <new name>`
+  renames a theme (the name is a label; works on any theme, including the live one).
 - **0.3.0** — `theme push` now writes to a **draft** by default; use `--live` for the old
   immediate-live behavior (with a confirmation prompt; `--yes` to skip it in CI). `blocofy
   status` now names the exact pages at 404 risk when a theme's pages are split off the live theme.
