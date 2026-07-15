@@ -481,12 +481,23 @@ async function status() {
       : `Live theme: none`,
   );
   console.log(`Health: ${s.health}`);
+  // orphan_missing_slugs yeni sunucu alanı (PR #661). Eski/deploy-edilmemiş sunucuda
+  // yok → null; o durumda eski (yumuşatılmış) sayaç satırına düş.
+  const missing = Array.isArray(s.orphan_missing_slugs) ? s.orphan_missing_slugs : null;
   if (s.health === "live_instance_empty") {
     console.error(
       `  ⚠ The live theme has no pages — the site will 404. Publish a theme with content:  blocofy theme publish`,
     );
   } else if (s.health === "pages_split") {
-    console.warn(`  ⚠ ${s.orphaned_pages} page(s) live on a non-live instance (orphan).`);
+    if (missing && missing.length) {
+      console.warn(
+        `  ⚠ These pages are published only on a non-live theme, so visitors can't reach them (404 risk): ` +
+          `${missing.join(", ")}\n` +
+          `  Fix: publish the theme that has them —  blocofy theme publish`,
+      );
+    } else {
+      console.warn(`  ⚠ ${s.orphaned_pages} page(s) published on a non-live theme.`);
+    }
   }
   if (Array.isArray(s.drafts) && s.drafts.length > 0) {
     console.log(`Drafts: ${s.drafts.map((d) => `${d.id}${d.name ? ` ${d.name}` : ""}`).join(", ")}`);
