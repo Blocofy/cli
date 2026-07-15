@@ -20,7 +20,7 @@ import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
 import { githubNote, retryNotice, statusLine, syncScopeNote } from "../lib/messages.mjs";
 import { fetchDevSession, fetchSiteStatus, fetchWhoami, publishInstance, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
-import { isAffirmative, livePushDecision } from "../lib/confirm.mjs";
+import { isAffirmative, livePushDecision, resolvePushMode } from "../lib/confirm.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
 
@@ -57,12 +57,14 @@ Usage
         --instance <handle>  pull a specific theme by its handle (from the admin
                              panel theme card, or \`blocofy status\`)
 
-  blocofy theme push [dir] [--draft] [--yes] [--instance <handle>]
-      Write the local theme to the LIVE site IMMEDIATELY (create/update; no delete,
-      no preview). Asks for confirmation first; non-interactive shells must pass --yes.
-        --draft      write to a draft theme instead — preview & publish it from the
-                     admin panel (recommended; never touches the live site)
-        --yes        confirm the live push without prompting (for CI / agents)
+  blocofy theme push [dir] [--live] [--yes] [--instance <handle>]
+      By DEFAULT writes to a DRAFT theme (create/update; no delete) — preview & publish
+      it from the admin panel, never touching the live site. Publish it with
+      'blocofy theme publish'.
+        --live       write to the LIVE site IMMEDIATELY (no preview). Asks for
+                     confirmation first; non-interactive shells must add --yes.
+        --draft      explicit draft (same as the default; safe)
+        --yes        confirm a --live push without prompting (for CI / agents)
         --instance <handle>  push to a specific theme by its handle (safe targeted
                              write — no live-confirmation prompt)
 
@@ -90,7 +92,7 @@ Usage
 Examples
   blocofy login --url https://store.myblocofy.com --token bcf_xxxxxxxx
   blocofy theme pull && blocofy theme dev
-  blocofy theme push --draft && blocofy theme publish
+  blocofy theme push && blocofy theme publish
   blocofy status
 
 Auth: ~/.blocofy/credentials.json (from \`login\`), or BLOCOFY_URL + BLOCOFY_TOKEN env vars.
@@ -196,8 +198,16 @@ async function themePush(rest) {
     process.exit(1);
   }
   const creds = requireCreds();
-  const draft = Boolean(flags.draft);
-  const instance = typeof flags.instance === "string" ? flags.instance : null;
+  const instanceFlag = typeof flags.instance === "string" ? flags.instance : null;
+
+  // Yeni varsayılan hedef: DRAFT (güvenli). `--live` eski anında-canlı davranışını
+  // açıkça geri getirir; `--instance` belirli bir temayı adresler. Sadece "live"
+  // modu canlıya yazar ve onay gerektirir.
+  const { mode, instance } = resolvePushMode({
+    live: Boolean(flags.live),
+    draft: Boolean(flags.draft),
+    instance: instanceFlag,
+  });
 
   // Hedef tenant'ı çöz ve GÖSTER — site sunucuda TOKEN'dan çözülür (URL kozmetik),
   // yanlış-tenant'a yazımı görünür kılar ("klarosa sandım, ksc'ye yazdım"). whoami
@@ -209,21 +219,26 @@ async function themePush(rest) {
     /* best-effort */
   }
   const target = site ? siteLabel(site) : creds.url;
-  if (site) {
-    console.log(`→ ${draft ? "Pushing to a draft" : "Pushing to the LIVE theme"} of ${target}`);
+  if (mode === "instance") {
+    console.log(`→ Pushing to theme ${instance}${site ? ` of ${target}` : ""}`);
+  } else if (mode === "live") {
+    console.log(`→ Pushing to the LIVE theme of ${target}`);
+  } else {
+    console.log(`→ Pushing to a draft${site ? ` of ${target}` : ""}`);
   }
 
-  // Canlı push (flag'siz) ANINDA canlı temayı değiştirir (önizleme yok). Agent/CI
-  // kazara canlıya basmasın diye açık onay şart (#431 L2).
+  // Canlı push (`--live`) ANINDA canlı temayı değiştirir (önizleme yok). Agent/CI
+  // kazara canlıya basmasın diye açık onay şart (#431 L2). Draft/instance modu
+  // güvenli → otomatik onay (prompt yok).
   const decision = livePushDecision({
-    draft: draft || Boolean(instance),
+    draft: mode !== "live",
     yes: Boolean(flags.yes),
     confirm: Boolean(flags.confirm),
     isTTY: Boolean(process.stdin.isTTY),
   });
   if (decision.mustAbort) {
-    console.error(`⚠ 'theme push' writes to the LIVE theme of ${target} immediately (no preview).`);
-    console.error(`  Non-interactive shell: pass --yes to confirm, or use --draft for a safe draft.`);
+    console.error(`⚠ 'theme push --live' writes to the LIVE theme of ${target} immediately (no preview).`);
+    console.error(`  Non-interactive shell: pass --live --yes to confirm, or omit --live to push to a safe draft.`);
     process.exit(1);
   }
   if (decision.needsPrompt) {
@@ -235,7 +250,7 @@ async function themePush(rest) {
       rl.close();
     }
     if (!isAffirmative(answer)) {
-      console.error("Aborted. Use `--draft` to push to a draft, or `--yes` to confirm the live push.");
+      console.error("Aborted. Omit `--live` to push to a safe draft, or pass `--live --yes` to confirm.");
       process.exit(1);
     }
   }
@@ -244,13 +259,24 @@ async function themePush(rest) {
     dir,
     url: creds.url,
     token: creds.token,
-    draft,
-    instance,
+    draft: mode === "draft",
+    instance: mode === "instance" ? instance : null,
     onRetry: (info) => console.error(retryNotice(info)),
   });
+
+  // Sunucu canlı-yazımı bildirdiyse (yeni alan; eski sunucuda yok) belirgin uyar.
+  if (result.warning === "live_write" && result.message) {
+    console.error(`\n⚠ ${result.message}\n`);
+  }
+
   if (result.instanceId) {
     console.log(`Pushed to theme ${result.instanceId} (${result.created} created, ${result.updated} updated).`);
-    console.log(`Preview & publish it in the admin panel: Theme → Theme library → "Open in editor".`);
+    if (mode === "draft") {
+      console.log(`Preview & publish it in the admin panel: Theme → Theme library → "Open in editor".`);
+      console.log(`Publish it live with:  blocofy theme publish`);
+    } else {
+      console.log(`Preview & publish it in the admin panel: Theme → Theme library → "Open in editor".`);
+    }
   } else {
     const extra = result.skippedDeletes
       ? `, ${result.skippedDeletes} remote file(s) absent locally (not deleted)`
@@ -455,12 +481,23 @@ async function status() {
       : `Live theme: none`,
   );
   console.log(`Health: ${s.health}`);
+  // orphan_missing_slugs yeni sunucu alanı (PR #661). Eski/deploy-edilmemiş sunucuda
+  // yok → null; o durumda eski (yumuşatılmış) sayaç satırına düş.
+  const missing = Array.isArray(s.orphan_missing_slugs) ? s.orphan_missing_slugs : null;
   if (s.health === "live_instance_empty") {
     console.error(
       `  ⚠ The live theme has no pages — the site will 404. Publish a theme with content:  blocofy theme publish`,
     );
   } else if (s.health === "pages_split") {
-    console.warn(`  ⚠ ${s.orphaned_pages} page(s) live on a non-live instance (orphan).`);
+    if (missing && missing.length) {
+      console.warn(
+        `  ⚠ These pages are published only on a non-live theme, so visitors can't reach them (404 risk): ` +
+          `${missing.join(", ")}\n` +
+          `  Fix: publish the theme that has them —  blocofy theme publish`,
+      );
+    } else {
+      console.warn(`  ⚠ ${s.orphaned_pages} page(s) published on a non-live theme.`);
+    }
   }
   if (Array.isArray(s.drafts) && s.drafts.length > 0) {
     console.log(`Drafts: ${s.drafts.map((d) => `${d.id}${d.name ? ` ${d.name}` : ""}`).join(", ")}`);

@@ -1,7 +1,31 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { isAffirmative, livePushDecision } from "../lib/confirm.mjs";
+import { isAffirmative, livePushDecision, resolvePushMode } from "../lib/confirm.mjs";
+
+test("resolvePushMode: flag yok → draft (yeni güvenli varsayılan)", () => {
+  assert.deepEqual(resolvePushMode({}), { mode: "draft" });
+});
+
+test("resolvePushMode: --draft → draft", () => {
+  assert.deepEqual(resolvePushMode({ draft: true }), { mode: "draft" });
+});
+
+test("resolvePushMode: --live → live", () => {
+  assert.deepEqual(resolvePushMode({ live: true }), { mode: "live" });
+});
+
+test("resolvePushMode: --instance → instance (handle taşınır)", () => {
+  assert.deepEqual(resolvePushMode({ instance: "t7k2p9" }), { mode: "instance", instance: "t7k2p9" });
+});
+
+test("resolvePushMode: --instance --live → instance kazanır (açık-hedef)", () => {
+  assert.deepEqual(resolvePushMode({ instance: "t7k2p9", live: true }), { mode: "instance", instance: "t7k2p9" });
+});
+
+test("resolvePushMode: --live --draft → draft (güvenli olan kazanır)", () => {
+  assert.deepEqual(resolvePushMode({ live: true, draft: true }), { mode: "draft" });
+});
 
 test("livePushDecision: --draft → onay gerekmez", () => {
   assert.deepEqual(livePushDecision({ draft: true, yes: false, confirm: false, isTTY: false }), {
