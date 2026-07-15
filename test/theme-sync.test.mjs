@@ -14,6 +14,7 @@ import {
   publishInstance,
   pullTheme,
   pushTheme,
+  renameInstance,
 } from "../lib/theme-sync.mjs";
 
 // Zero backoff keeps retry tests instant; onRetry records each notice.
@@ -343,4 +344,136 @@ test("pushTheme --draft: sends body.draft true; returns draft result", async () 
   });
   assert.equal(received.draft, true);
   assert.equal(result.instanceId, 77);
+});
+
+test("pushTheme --draft --name: includes name in the draft payload", async () => {
+  let received = null;
+  const fake = createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      received = JSON.parse(body);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, draft: true, instanceId: 77, created: 1, updated: 0 }));
+    });
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  const dir = mkdtempSync(join(tmpdir(), "blocofy-name-"));
+  mkdirSync(join(dir, "section"), { recursive: true });
+  writeFileSync(join(dir, "section", "Hero.liquid"), "H");
+  after(() => {
+    fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  await pushTheme({
+    dir,
+    url: `http://localhost:${fake.address().port}`,
+    token: "bcf_t",
+    draft: true,
+    name: "Kış Kampanyası",
+  });
+  assert.equal(received.draft, true);
+  assert.equal(received.name, "Kış Kampanyası");
+});
+
+test("pushTheme: omits name key when not set", async () => {
+  let received = null;
+  const fake = createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      received = JSON.parse(body);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, created: 1, updated: 0 }));
+    });
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  const dir = mkdtempSync(join(tmpdir(), "blocofy-noname-"));
+  mkdirSync(join(dir, "section"), { recursive: true });
+  writeFileSync(join(dir, "section", "Hero.liquid"), "H");
+  after(() => {
+    fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  await pushTheme({ dir, url: `http://localhost:${fake.address().port}`, token: "bcf_t", draft: true });
+  assert.ok(!("name" in received));
+});
+
+test("fetchDevSession --name: appends ?name=<encoded> to /api/dev/session", async () => {
+  let seenUrl = null;
+  const fake = createServer((req, res) => {
+    seenUrl = req.url;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ draftInstanceId: 77, previewUrl: "x", editorUrl: "y", site: { id: 1, slug: "s" } }));
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  after(() => fake.close());
+
+  await fetchDevSession({ url: `http://localhost:${fake.address().port}`, token: "bcf_t", name: "Yaz Teması" });
+  assert.ok(seenUrl.startsWith("/api/dev/session?name="));
+  assert.match(seenUrl, new RegExp(`name=${encodeURIComponent("Yaz Teması")}`));
+});
+
+test("fetchDevSession: no ?name when name omitted", async () => {
+  let seenUrl = null;
+  const fake = createServer((req, res) => {
+    seenUrl = req.url;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ draftInstanceId: 77, previewUrl: "x", editorUrl: "y", site: { id: 1, slug: "s" } }));
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  after(() => fake.close());
+
+  await fetchDevSession({ url: `http://localhost:${fake.address().port}`, token: "bcf_t" });
+  assert.equal(seenUrl, "/api/dev/session");
+});
+
+test("renameInstance: POST /api/dev/theme/rename {instance,name} → result (Bearer)", async () => {
+  let seen = null;
+  const fake = createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      seen = { method: req.method, auth: req.headers.authorization, url: req.url, body: JSON.parse(body || "{}") };
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, id: "t7k2p9", name: "Yeni Ad" }));
+    });
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  after(() => fake.close());
+
+  const r = await renameInstance({
+    url: `http://localhost:${fake.address().port}`,
+    token: "bcf_t",
+    instance: "t7k2p9",
+    name: "Yeni Ad",
+  });
+  assert.equal(r.id, "t7k2p9");
+  assert.equal(r.name, "Yeni Ad");
+  assert.equal(seen.method, "POST");
+  assert.ok(seen.url.endsWith("/api/dev/theme/rename"));
+  assert.equal(seen.auth, "Bearer bcf_t");
+  assert.equal(seen.body.instance, "t7k2p9");
+  assert.equal(seen.body.name, "Yeni Ad");
+});
+
+test("renameInstance: server 404 → throws (error text)", async () => {
+  const fake = createServer((req, res) => {
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "Not found" }));
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  after(() => fake.close());
+  await assert.rejects(
+    renameInstance({ url: `http://localhost:${fake.address().port}`, token: "bcf_t", instance: "t7k2p9", name: "X" }),
+    /Not found/,
+  );
 });
