@@ -19,7 +19,7 @@ import { credentialsPath, loadCredentials, saveCredentials } from "../lib/creden
 import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
 import { githubNote, retryNotice, statusLine, syncScopeNote } from "../lib/messages.mjs";
-import { fetchDevSession, fetchSiteStatus, fetchWhoami, publishInstance, pullTheme, pushTheme } from "../lib/theme-sync.mjs";
+import { fetchDevSession, fetchSiteStatus, fetchWhoami, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
 import { isAffirmative, livePushDecision, resolvePushMode } from "../lib/confirm.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
@@ -43,13 +43,14 @@ Usage
       Save your platform URL + dev token to ~/.blocofy/credentials.json.
       Get a token from the admin panel → Settings → Theme CLI tokens.
 
-  blocofy theme dev [dir] [--port <n>] [--no-sync]
+  blocofy theme dev [dir] [--port <n>] [--no-sync] [--name <name>]
       Start a dev server and print 3 auto-reloading views — Local, live-domain
       Preview, and the theme Editor. Press l / p / e to open each, q to quit.
       Edit a file and save → every open view reloads. Saves sync to a DRAFT theme
       only (never the live site). (dir defaults to cwd)
         --port <n>   local port (default 3030)
         --no-sync    local preview only (skip draft sync + remote views)
+        --name <name>  name the draft when it is first created (ignored if it already exists)
 
   blocofy theme pull [dir] [--draft] [--instance <handle>]
       Download the live theme to disk. (dir defaults to cwd)
@@ -67,6 +68,11 @@ Usage
         --yes        confirm a --live push without prompting (for CI / agents)
         --instance <handle>  push to a specific theme by its handle (safe targeted
                              write — no live-confirmation prompt)
+        --name <name>  name the NEW draft (draft mode only; ignored on --live/--instance)
+
+  blocofy theme rename <handle> <new name>
+      Rename a theme (the name is just a label). Works on any of your themes,
+      including the live one. Handle comes from the panel theme card or 'blocofy status'.
 
   blocofy theme publish [--instance <handle>]
       Publish a draft theme to the LIVE site. With no flag, publishes the draft that
@@ -199,6 +205,7 @@ async function themePush(rest) {
   }
   const creds = requireCreds();
   const instanceFlag = typeof flags.instance === "string" ? flags.instance : null;
+  const name = typeof flags.name === "string" ? flags.name : null;
 
   // Yeni varsayılan hedef: DRAFT (güvenli). `--live` eski anında-canlı davranışını
   // açıkça geri getirir; `--instance` belirli bir temayı adresler. Sadece "live"
@@ -255,12 +262,19 @@ async function themePush(rest) {
     }
   }
 
+  // `--name` yalnızca YENİ taslak yaratırken (draft modu) anlamlı — canlıya/mevcut
+  // instance'a yazarken ad kaydedilmez, sessizce kaybolmasın diye açıkça uyar.
+  if (name && mode !== "draft") {
+    console.error("Note: --name yalnız yeni taslak yaratırken (varsayılan push) geçerli, yok sayıldı.");
+  }
+
   const result = await pushTheme({
     dir,
     url: creds.url,
     token: creds.token,
     draft: mode === "draft",
     instance: mode === "instance" ? instance : null,
+    name: mode === "draft" ? name : null,
     onRetry: (info) => console.error(retryNotice(info)),
   });
 
@@ -332,7 +346,8 @@ async function themeDev(rest) {
   let session = null;
   if (!flags["no-sync"]) {
     try {
-      session = await fetchDevSession({ url: creds.url, token: creds.token });
+      const name = typeof flags.name === "string" ? flags.name : null;
+      session = await fetchDevSession({ url: creds.url, token: creds.token, name });
     } catch (error) {
       console.warn(
         `Warning: dev session unavailable (${error?.message ?? error}). ` +
@@ -470,6 +485,20 @@ async function themePublish(rest) {
   );
 }
 
+async function themeRename(rest) {
+  const { flags, positionals } = parseArgs(rest);
+  const handle = positionals[0];
+  const name = positionals.slice(1).join(" ") || (typeof flags.name === "string" ? flags.name : null);
+  if (!handle || !name) {
+    console.error("Usage: blocofy theme rename <handle> <new name>");
+    console.error("  Rename a theme (handle from the panel theme card or `blocofy status`).");
+    process.exit(1);
+  }
+  const creds = requireCreds();
+  const result = await renameInstance({ url: creds.url, token: creds.token, instance: handle, name });
+  console.log(`✓ Renamed to "${result.name}" (${result.id}).`);
+}
+
 async function status() {
   const creds = requireCreds();
   const s = await fetchSiteStatus({ url: creds.url, token: creds.token });
@@ -533,6 +562,11 @@ if (first === "--version" || first === "-v") {
   });
 } else if (first === "theme" && rest[0] === "publish") {
   themePublish(rest.slice(1)).catch((error) => {
+    console.error(error?.message ?? error);
+    process.exit(1);
+  });
+} else if (first === "theme" && rest[0] === "rename") {
+  themeRename(rest.slice(1)).catch((error) => {
     console.error(error?.message ?? error);
     process.exit(1);
   });
