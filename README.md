@@ -19,10 +19,18 @@ blocofy theme dev [dir]   # Local dev server. Prints 3 views — local preview, 
                           # preview link, and the theme editor — all auto-reloading on save.
                           # --port <n> (default 3030), --no-sync (local preview only)
 blocofy theme pull [dir]  # Download the live theme to disk.
-blocofy theme push [dir]  # Write the local theme to the live site (create/update; no delete).
+blocofy theme push [dir]  # Write the local theme to a DRAFT by default (create/update; no
+                          # delete) — preview & publish from the admin panel. --live writes
+                          # to the live site immediately (asks to confirm; add --yes for CI).
 blocofy --version
 blocofy --help
 ```
+
+## Changelog
+
+- **0.3.0** — `theme push` now writes to a **draft** by default; use `--live` for the old
+  immediate-live behavior (with a confirmation prompt; `--yes` to skip it in CI). `blocofy
+  status` now names the exact pages at 404 risk when a theme's pages are split off the live theme.
 
 ## How it works
 
