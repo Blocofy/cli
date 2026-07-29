@@ -32,7 +32,9 @@ test("isValidUrl / isValidToken", () => {
   assert.equal(isValidUrl("https://x.com"), true);
   assert.equal(isValidUrl("ftp://x"), false);
   assert.equal(isValidUrl("x.com"), false);
-  assert.equal(isValidToken("bcf_abcdefghij"), true);
+  // M4: server-authoritative minimum token length is 24 (aligns the old bcf_+12 drift).
+  assert.equal(isValidToken("bcf_abcdefghijklmnopqrstuvwx"), true); // 4 + 24 = 28
+  assert.equal(isValidToken("bcf_abcdefghij"), false); // 14 chars — below the 24 floor
   assert.equal(isValidToken("nope"), false);
   assert.equal(isValidToken("bcf_x"), false);
 });

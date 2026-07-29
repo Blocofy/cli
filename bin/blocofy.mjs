@@ -19,7 +19,7 @@ import { credentialsPath, loadCredentials, saveCredentials } from "../lib/creden
 import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
 import { githubNote, retryNotice, statusLine, syncScopeNote } from "../lib/messages.mjs";
-import { fetchDevSession, fetchSiteStatus, fetchWhoami, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
+import { diffTheme, fetchDevSession, fetchSiteStatus, fetchWhoami, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
 import { isAffirmative, livePushDecision, resolvePushMode } from "../lib/confirm.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
@@ -69,6 +69,10 @@ Usage
         --instance <handle>  push to a specific theme by its handle (safe targeted
                              write — no live-confirmation prompt)
         --name <name>  name the NEW draft (draft mode only; ignored on --live/--instance)
+        --dry-run    validate on the server WITHOUT writing (auth + snapshot + Liquid check)
+        --validate   alias for --dry-run (validate only, nothing written)
+        --diff       show what a push WOULD change vs the target (read-only), then stop
+        --idempotency-key <k>  attach an idempotency key so a retried push is not double-applied
 
   blocofy theme rename <handle> <new name>
       Rename a theme (the name is just a label). Works on any of your themes,
@@ -206,6 +210,23 @@ async function themePush(rest) {
   const creds = requireCreds();
   const instanceFlag = typeof flags.instance === "string" ? flags.instance : null;
   const name = typeof flags.name === "string" ? flags.name : null;
+  const dryRun = Boolean(flags["dry-run"] || flags.validate);
+  const idempotencyKey = typeof flags["idempotency-key"] === "string" ? flags["idempotency-key"] : null;
+
+  // `--diff`: read-only preview of what a push WOULD change (pull remote, compare to local). No write.
+  if (flags.diff) {
+    const d = await diffTheme({ dir, url: creds.url, token: creds.token, draft: Boolean(flags.draft), instance: instanceFlag });
+    const total = d.added.length + d.changed.length + d.removed.length;
+    if (total === 0) {
+      console.log("No differences — local theme matches the target.");
+      return;
+    }
+    for (const k of d.added) console.log(`  + ${k}`);
+    for (const k of d.changed) console.log(`  ~ ${k}`);
+    for (const k of d.removed) console.log(`  - ${k} (present on target, absent locally — push does not delete)`);
+    console.log(`\n${d.added.length} added, ${d.changed.length} changed, ${d.removed.length} remote-only.`);
+    return;
+  }
 
   // Yeni varsayılan hedef: DRAFT (güvenli). `--live` eski anında-canlı davranışını
   // açıkça geri getirir; `--instance` belirli bir temayı adresler. Sadece "live"
@@ -275,8 +296,18 @@ async function themePush(rest) {
     draft: mode === "draft",
     instance: mode === "instance" ? instance : null,
     name: mode === "draft" ? name : null,
+    dryRun,
+    idempotencyKey,
     onRetry: (info) => console.error(retryNotice(info)),
   });
+
+  // --dry-run / --validate: the server validated without writing. Report and stop.
+  if (result.dryRun) {
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    console.log(`✓ Validation passed (dry run — nothing written).${warnings.length ? ` ${warnings.length} warning(s).` : ""}`);
+    for (const w of warnings) console.log(`  ⚠ ${w}`);
+    return;
+  }
 
   // Sunucu canlı-yazımı bildirdiyse (yeni alan; eski sunucuda yok) belirgin uyar.
   if (result.warning === "live_write" && result.message) {

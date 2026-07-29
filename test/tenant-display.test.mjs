@@ -81,7 +81,7 @@ test("login shows the token's real site (catches a wrong-tenant token)", async (
   // Isolated HOME so the smoke test never clobbers the real ~/.blocofy/credentials.json.
   const home = mkdtempSync(join(tmpdir(), "blocofy-home-"));
   try {
-    const { stdout } = await execFileP("node", [BIN, "login", "--url", url, "--token", "bcf_testtoken123"], {
+    const { stdout } = await execFileP("node", [BIN, "login", "--url", url, "--token", "bcf_testtoken1234567890abcd"], {
       env: { ...process.env, HOME: home, USERPROFILE: home },
     });
     assert.match(stdout, /Site:\s*Ksc Metal \(ksc\)/);
