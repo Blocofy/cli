@@ -33,6 +33,18 @@ blocofy --help
 
 ## Changelog
 
+- **0.5.0** — M4 canonical deploy protocol. `theme push` now deploys through the platform's atomic
+  source pipeline: the CLI declares the protocol handshake and auto-generates a per-push idempotency
+  key (transport retries converge; `--idempotency-key <k>` overrides it for scripting). A `--live`
+  push is finally visible on the pinned production render again. "Push does not delete" still holds —
+  remote-only files are carried along, and server-retained rows survive. New flags: `--dry-run` /
+  `--validate` (server-side validation, nothing written — refused against a server that predates the
+  protocol, which would otherwise silently write), `--diff` (read-only compare vs the LIVE theme).
+  `--help` on ANY subcommand now prints help and never runs the command (0.4.0 executed a real push);
+  unknown flags exit write-free instead of silently swallowing the next argument. `layer/` joined the
+  synced theme directories. Server errors `cli_upgrade_required` (426) and `idempotency_conflict`
+  (409) get human messages. Token format check aligned to the server minimum (`bcf_` + ≥24 chars;
+  real tokens were always longer).
 - **0.4.0** — `theme push` / `theme dev` accept `--name <name>` to name a new draft (applied
   only when the draft is first created; reuse ignores it). New `theme rename <handle> <new name>`
   renames a theme (the name is a label; works on any theme, including the live one).

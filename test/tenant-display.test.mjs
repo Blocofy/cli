@@ -23,6 +23,12 @@ function fakePlatform() {
       res.end(JSON.stringify({ site: { id: 14, slug: "ksc", name: "Ksc Metal" }, liveThemeId: 9 }));
       return;
     }
+    // 0.5.0: keyed (canonical) push precedes the write with a remote-file GET (remote-only merge).
+    if (req.method === "GET" && req.url.includes("/api/dev/theme")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ files: {}, protocol: 1 }));
+      return;
+    }
     if (req.method === "POST" && req.url.endsWith("/api/dev/theme")) {
       let body = "";
       req.on("data", (d) => (body += d));
