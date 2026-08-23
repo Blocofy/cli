@@ -8,6 +8,7 @@
  * `/api/dev/render` endpoint (local theme files + live data) with file-watch
  * livereload. No monorepo required.
  */
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
@@ -19,13 +20,35 @@ import { credentialsPath, loadCredentials, saveCredentials } from "../lib/creden
 import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
 import { githubNote, retryNotice, statusLine, syncScopeNote } from "../lib/messages.mjs";
-import { fetchDevSession, fetchSiteStatus, fetchWhoami, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
+import { diffTheme, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, fetchWhoami, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
 import { isAffirmative, livePushDecision, resolvePushMode } from "../lib/confirm.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
 
 const VERSION = createRequire(import.meta.url)("../package.json").version;
 const args = process.argv.slice(2);
+
+// 0.5.0 güvenlik sıkılaştırması: her komutun kabul ettiği bayraklar açık bir listedir. Bilinmeyen bir
+// bayrak YAZIMSIZ çıkışla reddedilir (eskiden sonraki token'ı değer olarak yutup hedef dizini sessizce
+// kaydırıyordu). `--confirm` ve `--dry` belgelenmemiş ama gerçek bayraklardır; `--dry` (theme dev'in
+// sunucu-başlatmama kancası) `--dry-run`'dan (sunucu-tarafı doğrulama) FARKLIDIR, alias değildir.
+const KNOWN = {
+  login: ["url", "token"],
+  themePull: ["draft", "instance"],
+  themePush: ["diff", "draft", "instance", "name", "live", "yes", "confirm", "dry-run", "validate", "idempotency-key"],
+  themeDev: ["port", "dry", "no-sync", "name"],
+  themePublish: ["instance"],
+  themeRename: ["name"],
+  content: [],
+};
+function parseArgsOrExit(rest, known) {
+  const parsed = parseArgs(rest, new Set([...known, "help", "version"]));
+  if (parsed.unknownFlag) {
+    console.error(`Unknown flag ${parsed.unknownFlag}. Nothing was written. See \`blocofy --help\`.`);
+    process.exit(1);
+  }
+  return parsed;
+}
 
 /** Human label for a resolved site: "Name (slug)" or just the slug. */
 function siteLabel(site) {
@@ -69,6 +92,10 @@ Usage
         --instance <handle>  push to a specific theme by its handle (safe targeted
                              write — no live-confirmation prompt)
         --name <name>  name the NEW draft (draft mode only; ignored on --live/--instance)
+        --dry-run    validate on the server WITHOUT writing (auth + snapshot + Liquid check)
+        --validate   alias for --dry-run (validate only, nothing written)
+        --diff       show what a push WOULD change vs the target (read-only), then stop
+        --idempotency-key <k>  attach an idempotency key so a retried push is not double-applied
 
   blocofy theme rename <handle> <new name>
       Rename a theme (the name is just a label). Works on any of your themes,
@@ -118,7 +145,7 @@ async function promptValid(rl, question, normalize, valid, hint, tries = 3) {
 }
 
 async function login(rest) {
-  const { flags } = parseArgs(rest);
+  const { flags } = parseArgsOrExit(rest, KNOWN.login);
   let url = typeof flags.url === "string" ? normalizeUrl(flags.url) : "";
   let token = typeof flags.token === "string" ? flags.token.trim() : "";
 
@@ -186,7 +213,7 @@ function requireCreds() {
 }
 
 async function themePull(rest) {
-  const { flags, positionals } = parseArgs(rest);
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.themePull);
   const dir = resolve(positionals[0] ?? process.cwd());
   const creds = requireCreds();
   const draft = Boolean(flags.draft);
@@ -197,7 +224,7 @@ async function themePull(rest) {
 }
 
 async function themePush(rest) {
-  const { flags, positionals } = parseArgs(rest);
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.themePush);
   const dir = resolve(positionals[0] ?? process.cwd());
   if (!existsSync(dir)) {
     console.error(`Theme directory not found: ${dir}`);
@@ -206,6 +233,38 @@ async function themePush(rest) {
   const creds = requireCreds();
   const instanceFlag = typeof flags.instance === "string" ? flags.instance : null;
   const name = typeof flags.name === "string" ? flags.name : null;
+  const dryRun = Boolean(flags["dry-run"] || flags.validate);
+  // 0.5.0: her push'a otomatik idempotency key — kanonik dal (protokol + key) ancak böyle seçilir; key
+  // OLMADAN header'lar tek başına legacy writer'a düşer ve --live push pinned render'a YANSIMAZ (M4
+  // read cutover'ının ana CLI şikâyeti). Push-OPERASYONU-başına üretilir: fetchWithRetry'nin 5xx/429
+  // denemeleri aynı key'le yakınsar, ardışık push'lar farklı key alır (sabit key, settings/hedef
+  // değişiminde kalıcı 409 idempotency_conflict üretirdi). Ham id gönderilir — sunucu `idem:` ile
+  // ad-alanlar, önek EKLENMEZ.
+  const idempotencyKey = typeof flags["idempotency-key"] === "string" ? flags["idempotency-key"] : `cli-${randomUUID()}`;
+
+  // `--diff`: read-only preview vs the LIVE theme (or --instance). No write; the draft target is not
+  // diffable (a draft GET would PROVISION the draft server-side — a read-only command must not mutate).
+  if (flags.diff) {
+    let diffSite = null;
+    try {
+      diffSite = (await fetchWhoami({ url: creds.url, token: creds.token })).site;
+    } catch {
+      /* best-effort — etiket kozmetik, diff yine koşar */
+    }
+    const diffTarget = diffSite ? ` of ${siteLabel(diffSite)}` : "";
+    const d = await diffTheme({ dir, url: creds.url, token: creds.token, instance: instanceFlag });
+    console.log(instanceFlag ? `Diff vs theme ${instanceFlag}${diffTarget}:` : `Diff vs the LIVE theme${diffTarget} (push default writes to a DRAFT):`);
+    const total = d.added.length + d.changed.length + d.removed.length;
+    if (total === 0) {
+      console.log("No differences — local theme matches the target.");
+      return;
+    }
+    for (const k of d.added) console.log(`  + ${k}`);
+    for (const k of d.changed) console.log(`  ~ ${k}`);
+    for (const k of d.removed) console.log(`  - ${k} (present on target, absent locally — push does not delete)`);
+    console.log(`\n${d.added.length} added, ${d.changed.length} changed, ${d.removed.length} remote-only.`);
+    return;
+  }
 
   // Yeni varsayılan hedef: DRAFT (güvenli). `--live` eski anında-canlı davranışını
   // açıkça geri getirir; `--instance` belirli bir temayı adresler. Sadece "live"
@@ -229,7 +288,7 @@ async function themePush(rest) {
   if (mode === "instance") {
     console.log(`→ Pushing to theme ${instance}${site ? ` of ${target}` : ""}`);
   } else if (mode === "live") {
-    console.log(`→ Pushing to the LIVE theme of ${target}`);
+    console.log(dryRun ? `→ Validating against the LIVE theme of ${target} (dry run — nothing will be written)` : `→ Pushing to the LIVE theme of ${target}`);
   } else {
     console.log(`→ Pushing to a draft${site ? ` of ${target}` : ""}`);
   }
@@ -237,8 +296,9 @@ async function themePush(rest) {
   // Canlı push (`--live`) ANINDA canlı temayı değiştirir (önizleme yok). Agent/CI
   // kazara canlıya basmasın diye açık onay şart (#431 L2). Draft/instance modu
   // güvenli → otomatik onay (prompt yok).
+  // 0.5.0: `--dry-run` hiçbir şey yazmaz → canlı onayı gereksiz (draft:true gibi davranır).
   const decision = livePushDecision({
-    draft: mode !== "live",
+    draft: mode !== "live" || dryRun,
     yes: Boolean(flags.yes),
     confirm: Boolean(flags.confirm),
     isTTY: Boolean(process.stdin.isTTY),
@@ -268,15 +328,65 @@ async function themePush(rest) {
     console.error("Note: --name yalnız yeni taslak yaratırken (varsayılan push) geçerli, yok sayıldı.");
   }
 
-  const result = await pushTheme({
-    dir,
-    url: creds.url,
-    token: creds.token,
-    draft: mode === "draft",
-    instance: mode === "instance" ? instance : null,
-    name: mode === "draft" ? name : null,
-    onRetry: (info) => console.error(retryNotice(info)),
-  });
+  // 0.5.0: eski (protokolsüz) bir sunucu `dryRun` alanını bilmez ve SESSİZCE GERÇEK YAZIM yapardı —
+  // dry-run yalnız sunucu kanonik protokolü beyan ediyorsa koşar (sorgusuz, mutasyonsuz GET ön kontrolü).
+  if (dryRun) {
+    const { supported } = await fetchCanonicalSupport({ url: creds.url, token: creds.token });
+    if (!supported) {
+      console.error("✗ --dry-run needs a server that speaks the canonical protocol; this one does not.");
+      console.error("  An old server would IGNORE dryRun and write for real. Nothing was sent.");
+      process.exit(1);
+    }
+  }
+
+  let result;
+  try {
+    result = await pushTheme({
+      dir,
+      url: creds.url,
+      token: creds.token,
+      draft: mode === "draft",
+      instance: mode === "instance" ? instance : null,
+      name: mode === "draft" ? name : null,
+      dryRun,
+      idempotencyKey,
+      onRetry: (info) => console.error(retryNotice(info)),
+    });
+  } catch (error) {
+    if (error?.code === "cli_upgrade_required") {
+      const missing = Array.isArray(error?.body?.fence?.missing) ? error.body.fence.missing.join(", ") : "";
+      console.error("✗ Sunucu bu CLI sürümünü reddetti (cli_upgrade_required).");
+      console.error(`  Güncelle:  npm i -g @blocofy/cli@latest${missing ? `\n  Sunucunun istediği eksik yetenekler: ${missing}` : ""}`);
+      process.exit(1);
+    }
+    if (error?.code === "idempotency_conflict") {
+      console.error("✗ Idempotency çakışması: aynı anahtar daha önce FARKLI içerikle kullanılmış (409).");
+      console.error("  `--idempotency-key` verdiysen yeni bir anahtarla dene; vermediysen tekrar `blocofy theme push` yeterli (her koşu taze anahtar üretir).");
+      process.exit(1);
+    }
+    throw error;
+  }
+
+  // --dry-run / --validate: the server validated without writing. Report and stop.
+  if (result.dryRun) {
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    console.log(`✓ Validation passed (dry run — nothing written).${warnings.length ? ` ${warnings.length} warning(s).` : ""}`);
+    for (const w of warnings) console.log(`  ⚠ ${w}`);
+    return;
+  }
+
+  // 0.5.0: kanonik boru hattı yanıtı (CP üzerinden atomik deploy) — legacy created/updated alanları yok.
+  if (result.committed === true) {
+    if (Array.isArray(result.remoteOnlyKept) && result.remoteOnlyKept.length) {
+      console.log(`  (kept ${result.remoteOnlyKept.length} remote-only file(s) — push does not delete)`);
+    }
+    console.log(`✓ Deployed atomically: deployment #${result.deploymentId}, revision #${result.sourceRevisionId}, pointer v${result.pointerVersion}.`);
+    if (mode === "draft") {
+      console.log("Preview & publish it in the admin panel: Theme -> Theme library -> \"Open in editor\".");
+      console.log("Publish it live with:  blocofy theme publish");
+    }
+    return;
+  }
 
   // Sunucu canlı-yazımı bildirdiyse (yeni alan; eski sunucuda yok) belirgin uyar.
   if (result.warning === "live_write" && result.message) {
@@ -300,7 +410,7 @@ async function themePush(rest) {
 }
 
 async function contentPush(scope, rest) {
-  const { positionals } = parseArgs(rest);
+  const { positionals } = parseArgsOrExit(rest, KNOWN.content);
   const dir = resolve(positionals[0] ?? process.cwd());
   if (!existsSync(dir)) {
     console.error(`Directory not found: ${dir}`);
@@ -322,7 +432,7 @@ async function contentPush(scope, rest) {
 }
 
 async function contentPull(scope, rest) {
-  const { positionals } = parseArgs(rest);
+  const { positionals } = parseArgsOrExit(rest, KNOWN.content);
   const dir = resolve(positionals[0] ?? process.cwd());
   const creds = requireCreds();
   const { count } = await pullContent({ dir, url: creds.url, token: creds.token, scope });
@@ -330,7 +440,7 @@ async function contentPull(scope, rest) {
 }
 
 async function themeDev(rest) {
-  const { flags, positionals } = parseArgs(rest);
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.themeDev);
   const themeDir = resolve(positionals[0] ?? process.cwd());
 
   if (!existsSync(themeDir)) {
@@ -471,7 +581,7 @@ async function themeDev(rest) {
 }
 
 async function themePublish(rest) {
-  const { flags } = parseArgs(rest);
+  const { flags } = parseArgsOrExit(rest, KNOWN.themePublish);
   const creds = requireCreds();
   let instance = typeof flags.instance === "string" ? flags.instance : null;
   if (!instance) {
@@ -486,7 +596,7 @@ async function themePublish(rest) {
 }
 
 async function themeRename(rest) {
-  const { flags, positionals } = parseArgs(rest);
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.themeRename);
   const handle = positionals[0];
   const name = positionals.slice(1).join(" ") || (typeof flags.name === "string" ? flags.name : null);
   if (!handle || !name) {
@@ -540,6 +650,13 @@ if (first === "--version" || first === "-v") {
   console.log(VERSION);
 } else if (!first || first === "--help" || first === "-h" || first === "help") {
   printHelp();
+} else if (args.includes("--help") || args.includes("-h")) {
+  // 0.5.0: `--help` HERHANGİ bir konumda YARDIMDIR — alt-komut handler'ı asla koşmaz.
+  // (0.4.0'da `blocofy theme push --help` GERÇEK bir push koşuyordu.)
+  printHelp();
+} else if (args.includes("--version") || args.includes("-v")) {
+  // Aynı simetri: `theme push <dir> --version` da yalnız sürüm basar, asla yazmaz.
+  console.log(VERSION);
 } else if (first === "login") {
   login(rest).catch((error) => {
     console.error(error?.message ?? error);

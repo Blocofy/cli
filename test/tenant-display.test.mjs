@@ -23,6 +23,12 @@ function fakePlatform() {
       res.end(JSON.stringify({ site: { id: 14, slug: "ksc", name: "Ksc Metal" }, liveThemeId: 9 }));
       return;
     }
+    // 0.5.0: keyed (canonical) push precedes the write with a remote-file GET (remote-only merge).
+    if (req.method === "GET" && req.url.includes("/api/dev/theme")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ files: {}, protocol: 1 }));
+      return;
+    }
     if (req.method === "POST" && req.url.endsWith("/api/dev/theme")) {
       let body = "";
       req.on("data", (d) => (body += d));
@@ -81,7 +87,7 @@ test("login shows the token's real site (catches a wrong-tenant token)", async (
   // Isolated HOME so the smoke test never clobbers the real ~/.blocofy/credentials.json.
   const home = mkdtempSync(join(tmpdir(), "blocofy-home-"));
   try {
-    const { stdout } = await execFileP("node", [BIN, "login", "--url", url, "--token", "bcf_testtoken123"], {
+    const { stdout } = await execFileP("node", [BIN, "login", "--url", url, "--token", "bcf_testtoken1234567890abcd"], {
       env: { ...process.env, HOME: home, USERPROFILE: home },
     });
     assert.match(stdout, /Site:\s*Ksc Metal \(ksc\)/);
