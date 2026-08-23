@@ -209,6 +209,8 @@ test("fetchDevSession: GET /api/dev/session → session JSON (Bearer)", async ()
 
 test("localPathFor: adds .liquid for Liquid kinds, leaves assets raw", () => {
   assert.equal(localPathFor("section/Hero"), "section/Hero.liquid");
+  // 0.5.0: uzantılı anahtarlar AYNEN — template/index.json diske .json.liquid ikizi olarak düşmez.
+  assert.equal(localPathFor("template/index.json"), "template/index.json");
   assert.equal(localPathFor("layout/theme"), "layout/theme.liquid");
   assert.equal(localPathFor("asset/theme.css"), "asset/theme.css");
   assert.equal(localPathFor("section/Hero.liquid"), "section/Hero.liquid"); // no double extension
