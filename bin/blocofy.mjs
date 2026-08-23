@@ -245,8 +245,15 @@ async function themePush(rest) {
   // `--diff`: read-only preview vs the LIVE theme (or --instance). No write; the draft target is not
   // diffable (a draft GET would PROVISION the draft server-side — a read-only command must not mutate).
   if (flags.diff) {
+    let diffSite = null;
+    try {
+      diffSite = (await fetchWhoami({ url: creds.url, token: creds.token })).site;
+    } catch {
+      /* best-effort — etiket kozmetik, diff yine koşar */
+    }
+    const diffTarget = diffSite ? ` of ${siteLabel(diffSite)}` : "";
     const d = await diffTheme({ dir, url: creds.url, token: creds.token, instance: instanceFlag });
-    console.log(instanceFlag ? `Diff vs theme ${instanceFlag}:` : "Diff vs the LIVE theme (push default writes to a DRAFT):");
+    console.log(instanceFlag ? `Diff vs theme ${instanceFlag}${diffTarget}:` : `Diff vs the LIVE theme${diffTarget} (push default writes to a DRAFT):`);
     const total = d.added.length + d.changed.length + d.removed.length;
     if (total === 0) {
       console.log("No differences — local theme matches the target.");
@@ -281,7 +288,7 @@ async function themePush(rest) {
   if (mode === "instance") {
     console.log(`→ Pushing to theme ${instance}${site ? ` of ${target}` : ""}`);
   } else if (mode === "live") {
-    console.log(`→ Pushing to the LIVE theme of ${target}`);
+    console.log(dryRun ? `→ Validating against the LIVE theme of ${target} (dry run — nothing will be written)` : `→ Pushing to the LIVE theme of ${target}`);
   } else {
     console.log(`→ Pushing to a draft${site ? ` of ${target}` : ""}`);
   }
@@ -647,6 +654,9 @@ if (first === "--version" || first === "-v") {
   // 0.5.0: `--help` HERHANGİ bir konumda YARDIMDIR — alt-komut handler'ı asla koşmaz.
   // (0.4.0'da `blocofy theme push --help` GERÇEK bir push koşuyordu.)
   printHelp();
+} else if (args.includes("--version") || args.includes("-v")) {
+  // Aynı simetri: `theme push <dir> --version` da yalnız sürüm basar, asla yazmaz.
+  console.log(VERSION);
 } else if (first === "login") {
   login(rest).catch((error) => {
     console.error(error?.message ?? error);

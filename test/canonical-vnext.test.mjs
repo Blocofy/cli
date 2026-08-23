@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -31,9 +31,10 @@ function themeDir(files) {
 
 /** Fake platform: configurable GET body + POST responder; records every request. */
 function fakePlatform({ getBody = { files: {}, protocol: 1 }, postResponder = null } = {}) {
-  const seen = { gets: 0, posts: [], other: 0 };
+  const seen = { gets: 0, posts: [], other: 0, whoami: 0 };
   const server = createServer((req, res) => {
     if (req.method === "GET" && req.url.includes("/api/dev/whoami")) {
+      seen.whoami += 1;
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ site: { id: 14, slug: "ksc", name: "Ksc" }, liveThemeId: 9 }));
       return;
@@ -87,12 +88,16 @@ test("theme push auto-generates a RAW per-push idempotency key (distinct across 
       const r2 = await runBin(url, ["theme", "push", dir, "--draft"]);
       assert.equal(r1.code, 0, r1.stderr);
       assert.equal(r2.code, 0, r2.stderr);
+      // 0.5.0 canonical push = 2 POSTs per push (preflight dry-run + real), SAME key within a push.
       const keys = seen.posts.map((p) => p.headers["x-idempotency-key"]);
-      assert.equal(keys.length, 2);
+      assert.equal(keys.length, 4, "preflight + real per push");
+      assert.equal(seen.posts[0].body.dryRun, true, "first POST of a push is the write-free preflight");
       for (const k of keys) {
         assert.match(k, /^cli-[0-9a-f-]{36}$/, "raw cli-<uuid> — the server namespaces with idem:, the CLI must not");
       }
-      assert.notEqual(keys[0], keys[1], "each push operation gets a FRESH key (a reused key would 409 after any settings/target change)");
+      assert.equal(keys[0], keys[1], "preflight and real share ONE push-operation key");
+      assert.equal(keys[2], keys[3], "second push likewise");
+      assert.notEqual(keys[0], keys[2], "each push operation gets a FRESH key (a reused key would 409 after any settings/target change)");
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -105,17 +110,23 @@ test("the key is stable ACROSS transport retries of one push (5xx converges on t
     await withFake(
       {
         postResponder: (res, n) => {
-          if (n === 1) return res.writeHead(500, { "content-type": "application/json" }).end("{}");
+          // n=1 preflight (dry) OK; n=2 real push 500 -> retry; n=3 real push OK.
+          if (n === 1) {
+            res.writeHead(200, { "content-type": "application/json" });
+            return res.end(JSON.stringify({ ok: true, dryRun: true, warnings: [] }));
+          }
+          if (n === 2) return res.writeHead(500, { "content-type": "application/json" }).end("{}");
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ ok: true, created: 1, updated: 0 }));
         },
       },
       async (url, seen) => {
         await pushTheme({ dir, url, token: TOKEN, draft: true, idempotencyKey: "cli-fixed-for-retry" });
-        assert.equal(seen.posts.length, 2, "one retry after the 500");
+        assert.equal(seen.posts.length, 3, "preflight + one retry after the 500");
         assert.deepEqual(
           seen.posts.map((p) => p.headers["x-idempotency-key"]),
-          ["cli-fixed-for-retry", "cli-fixed-for-retry"],
+          ["cli-fixed-for-retry", "cli-fixed-for-retry", "cli-fixed-for-retry"],
+          "the key is stable across the preflight AND every transport retry of the real POST",
         );
       },
     );
@@ -132,7 +143,9 @@ test("keyed push merges remote-only GATE-ACCEPTABLE files into the payload (push
       async (url, seen) => {
         const result = await pushTheme({ dir, url, token: TOKEN, draft: true, idempotencyKey: "cli-merge-1" });
         assert.equal(seen.gets, 1, "exactly one merge probe GET");
-        const files = seen.posts[0].body.files;
+        assert.equal(seen.posts.length, 2, "preflight + real");
+        assert.ok(!("section/Old" in seen.posts[0].body.files), "the preflight validates the LOCAL set only (before any provisioning)");
+        const files = seen.posts[1].body.files;
         assert.equal(files["section/Hero"], "LOCAL", "a local file wins over its remote copy");
         assert.equal(files["section/Old"], "OLD", "remote-only theme file carried verbatim");
         assert.equal(files["template/index.json"], "{}", "retained-class theme-dir file carried verbatim");
@@ -208,11 +221,51 @@ test("theme push --help prints help, exits 0 and sends ZERO requests (0.4.0 ran 
       const r = await runBin(url, ["theme", "push", dir, "--help"]);
       assert.equal(r.code, 0, r.stderr);
       assert.match(r.stdout, /Usage/);
-      assert.equal(seen.gets + seen.posts.length + seen.other, 0, "help must never touch the network");
+      assert.equal(seen.gets + seen.posts.length + seen.whoami + seen.other, 0, "help must never touch the network (whoami included)");
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("theme push <dir> --version prints the version and sends ZERO requests (same symmetry as --help)", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  try {
+    await withFake({}, async (url, seen) => {
+      const r = await runBin(url, ["theme", "push", dir, "--version"]);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout.trim(), /^\d+\.\d+\.\d+$/);
+      assert.equal(seen.gets + seen.posts.length + seen.whoami + seen.other, 0, "version must never touch the network");
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("theme push --name survives the merge probe (the draft GET carries ?name= — an unnamed probe used to kill --name via name-agnostic reuse)", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  try {
+    const urls = [];
+    await withFake({}, async (url, seen) => {
+      const { server } = { server: null };
+      const r = await runBin(url, ["theme", "push", dir, "--name", "My Draft"]);
+      assert.equal(r.code, 0, r.stderr);
+      // probe URL'ini fake kaydetmiyor; POST gövdesi adın hayatta kaldığını kanıtlar, probe'un adlı
+      // olduğunu ise pushTheme kaynak-metni pinler (aşağıdaki oracle).
+      const real = seen.posts.find((p) => !p.body.dryRun);
+      assert.equal(real.body.name, "My Draft", "the POST still carries --name");
+    });
+    void urls;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("source oracles: the draft probe carries ?name=, and dev-server's sync stays keyless", async () => {
+  const themeSync = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "theme-sync.mjs"), "utf8");
+  assert.match(themeSync, /draft=1\$\{name \? `&name=/, "the merge probe forwards --name to the draft GET");
+  const devServer = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "dev-server.mjs"), "utf8");
+  assert.doesNotMatch(devServer, /idempotencyKey/, "dev-sync must stay keyless (a canonical seal per keystroke mints unbounded revisions)");
 });
 
 test("an unknown flag is a write-free exit (0.4.0 swallowed the next token and silently shifted the target dir)", async () => {
@@ -222,7 +275,7 @@ test("an unknown flag is a write-free exit (0.4.0 swallowed the next token and s
       const r = await runBin(url, ["theme", "push", "--halp", dir]);
       assert.equal(r.code, 1);
       assert.match(r.stderr, /Unknown flag --halp/);
-      assert.equal(seen.gets + seen.posts.length + seen.other, 0, "nothing written, nothing fetched");
+      assert.equal(seen.gets + seen.posts.length + seen.whoami + seen.other, 0, "nothing written, nothing fetched (whoami included)");
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
