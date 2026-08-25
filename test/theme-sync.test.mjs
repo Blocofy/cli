@@ -479,3 +479,40 @@ test("renameInstance: server 404 → throws (error text)", async () => {
     /Not found/,
   );
 });
+
+test("fetchDevSession: içeriksiz 410 → boş değil, teşhis edilebilir mesaj", async () => {
+  const fake = createServer((req, res) => {
+    res.writeHead(410);
+    res.end();
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  after(() => fake.close());
+
+  await assert.rejects(
+    () => fetchDevSession({ url: `http://localhost:${fake.address().port}`, token: "bcf_t" }),
+    (err) => {
+      assert.notEqual(err.message, "");
+      assert.match(err.message, /410/);
+      return true;
+    },
+  );
+});
+
+test("fetchDevSession: JSON gövdeli hata mesajı korunur (regresyon)", async () => {
+  const fake = createServer((req, res) => {
+    res.writeHead(422, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "şema geçersiz" }));
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  after(() => fake.close());
+
+  await assert.rejects(
+    () => fetchDevSession({ url: `http://localhost:${fake.address().port}`, token: "bcf_t" }),
+    (err) => {
+      assert.equal(err.message, "şema geçersiz");
+      return true;
+    },
+  );
+});
