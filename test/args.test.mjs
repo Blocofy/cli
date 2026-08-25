@@ -29,3 +29,17 @@ test("sondaki value flag değersizse boolean olur", () => {
   const { flags } = parseArgs(["--port"]);
   assert.equal(flags.port, true);
 });
+
+// `theme dev`'in syncDraft'ı artık `Boolean(session)` değil `!flags["no-sync"]` — bayrağın
+// boolean olarak ayrıştığı sözleşme bu yüzden yük taşıyor. Bir sonraki positional'ı yutarsa
+// (`theme dev --no-sync theme`) tema dizini kaybolurdu.
+test("theme dev: --no-sync boolean flag, sonraki positional'ı yutmaz", () => {
+  const { flags, positionals } = parseArgs(["--no-sync", "theme"]);
+  assert.equal(flags["no-sync"], true);
+  assert.deepEqual(positionals, ["theme"]);
+});
+
+test("theme dev: --no-sync verilmezse flag yok (senkron varsayılan açık)", () => {
+  const { flags } = parseArgs(["theme"]);
+  assert.ok(!flags["no-sync"]);
+});

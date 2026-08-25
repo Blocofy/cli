@@ -180,3 +180,76 @@ test("dev server: platform error → 4xx + error page (with livereload)", async 
   assert.match(html, /Unknown token/);
   assert.match(html, /EventSource/);
 });
+
+/** Sahte platform: /api/dev/theme taslak handle'ı döner, /api/dev/render gövdeyi kaydeder. */
+function fakePlatform(seen, { instanceId = "t7k2p9" } = {}) {
+  return createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      if (req.url.endsWith("/api/dev/theme")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(instanceId ? { ok: true, draft: true, instanceId } : { ok: true, draft: true }));
+        return;
+      }
+      if (req.url.endsWith("/api/dev/render")) {
+        seen.push(JSON.parse(body || "{}"));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ html: "<body>draft</body>" }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+  });
+}
+
+async function renderOnce({ syncDraft, platform = {} }) {
+  const seen = [];
+  const warnings = [];
+  const fake = fakePlatform(seen, platform);
+  fake.listen(0);
+  await once(fake, "listening");
+  const dir = themeFixture();
+  const dev = startDevServer({
+    dir,
+    url: `http://localhost:${fake.address().port}`,
+    token: "bcf_test",
+    port: 0,
+    syncDraft,
+    onWarn: (msg) => warnings.push(msg),
+  });
+  await once(dev.server, "listening");
+  after(() => {
+    dev.close();
+    fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const res = await fetch(`http://localhost:${dev.server.address().port}/`);
+  await res.text();
+  return { seen, warnings };
+}
+
+test("dev server: render isteği taslak instance handle'ını taşır", async () => {
+  const { seen } = await renderOnce({ syncDraft: true });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].instance, "t7k2p9");
+});
+
+test("dev server: preview bayrağı GÖNDERİLMEZ (platform chrome enjekte edilmesin)", async () => {
+  const { seen } = await renderOnce({ syncDraft: true });
+  assert.equal(seen[0].preview, undefined);
+});
+
+test("dev server: --no-sync → instance taşınmaz, canlı render", async () => {
+  const { seen } = await renderOnce({ syncDraft: false });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].instance, undefined);
+});
+
+test("dev server: push yanıtında instanceId yoksa SESSİZ kalmaz, uyarır", async () => {
+  const { seen, warnings } = await renderOnce({ syncDraft: true, platform: { instanceId: null } });
+  assert.equal(seen[0].instance, undefined);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /draft/i);
+});

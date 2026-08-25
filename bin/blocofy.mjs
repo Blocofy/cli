@@ -460,8 +460,8 @@ async function themeDev(rest) {
       session = await fetchDevSession({ url: creds.url, token: creds.token, name });
     } catch (error) {
       console.warn(
-        `Warning: dev session unavailable (${error?.message ?? error}). ` +
-          `Local preview only — live-domain/editor views + draft sync disabled.`,
+        `Warning: dev session unavailable (${error?.message || error}). ` +
+          `Live-domain and editor views are disabled; draft sync and local preview keep working.`,
       );
     }
   }
@@ -523,8 +523,12 @@ async function themeDev(rest) {
     url: creds.url,
     token: creds.token,
     port,
-    syncDraft: Boolean(session),
+    // Taslak senkronu dev session'a BAĞLI DEĞİL: `pushTheme({draft:true})` /api/dev/theme'e gider ve
+    // session'dan hiçbir veri kullanmaz. Bu satır `Boolean(session)` iken, session 410 alınca senkron
+    // da sessizce kapanıyordu — ölü bir uç, çalışan bir özelliği götürüyordu. Tek kapatma yolu --no-sync.
+    syncDraft: !flags["no-sync"],
     onRetry: (info) => console.error(`  ${retryNotice(info)}`),
+    onWarn: (msg) => console.warn(`  ⚠ ${msg}`),
     // Her kaydetmede ne olduğunu bas — "reloaded" = watch tetiklendi; "0 views"
     // = hiçbir tarayıcı sekmesi bağlı değil (yanlış görünüme bakıyorsun); sync
     // hatası = draft güncellenemedi (preview/editör eski kalır, local yine yenilenir).
@@ -585,9 +589,26 @@ async function themePublish(rest) {
   const creds = requireCreds();
   let instance = typeof flags.instance === "string" ? flags.instance : null;
   if (!instance) {
-    // Belirtilmediyse: `theme dev` / `theme push --draft`'ın yazdığı taslağı yayınla.
-    const session = await fetchDevSession({ url: creds.url, token: creds.token });
-    instance = session.draftInstanceId;
+    // Belirtilmediyse: `theme dev` / `theme push --draft`'ın yazdığı taslağı yayınla. Kaynak
+    // `GET /api/dev/site` — eski `fetchDevSession` yolu sunucuda 410'a döndü ve bu komutu
+    // try/catch'siz, boş mesajlı bir Error ile tamamen çalışmaz hâle getirmişti.
+    //
+    // `drafts` canlı OLMAYAN HER instance'ı içerir; sunucunun `ensureDraftInstance`'ı ise
+    // `source === "import"` olanı seçer (yayınlanan taslak import'tan çıkarılır). Aynı seçimi
+    // burada tekrarla — yoksa bir kez yayın yapmış her sitede iki taslak görünür ve komut takılır.
+    const status = await fetchSiteStatus({ url: creds.url, token: creds.token });
+    const drafts = status?.drafts ?? [];
+    const cliDrafts = drafts.filter((d) => d.source === "import");
+    if (cliDrafts.length === 1) {
+      instance = cliDrafts[0].id;
+    } else if (drafts.length === 0) {
+      console.error("No draft theme to publish. Create one first:  blocofy theme push --draft");
+      process.exit(1);
+    } else {
+      console.error("Could not tell which draft to publish — pick one with --instance <handle>:");
+      for (const d of drafts) console.error(`  ${d.id}  ${d.name ?? "(unnamed)"}`);
+      process.exit(1);
+    }
   }
   const result = await publishInstance({ url: creds.url, token: creds.token, instanceId: instance });
   console.log(
