@@ -33,6 +33,19 @@ blocofy --help
 
 ## Changelog
 
+- **0.6.0** — `theme dev`'s local view finally shows what you are working on. It used to render your
+  DRAFT theme against the site's LIVE page content, so draft page documents were invisible; each render
+  now carries the draft theme instance and the platform resolves that instance's pages. Three failures
+  caused by a retired server endpoint (`/api/dev/session`, gone since the platform's preview-security
+  work) are fixed at the root: **draft sync** was switched off whenever that endpoint failed even though
+  sync never used it (it posts to `/api/dev/theme`); **`theme publish`** without `--instance` called it
+  with no error handling and died with an empty message — it now resolves the CLI draft from
+  `blocofy status` (`source: "import"`); and an empty response body produced the undiagnosable
+  `dev session unavailable ()` — errors now fall back to `HTTP <status>` and a 410 explains itself.
+  If the server ever stops returning a draft handle, the CLI now says so instead of silently rendering
+  live content. Remote (shared-link and editor) preview is NOT restored — that surface was retired on
+  the platform side; `theme dev` prints the local view only.
+
 - **0.5.0** — M4 canonical deploy protocol. `theme push` now deploys through the platform's atomic
   source pipeline: the CLI declares the protocol handshake and auto-generates a per-push idempotency
   key (transport retries converge; `--idempotency-key <k>` overrides it for scripting). A `--live`
