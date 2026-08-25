@@ -588,9 +588,26 @@ async function themePublish(rest) {
   const creds = requireCreds();
   let instance = typeof flags.instance === "string" ? flags.instance : null;
   if (!instance) {
-    // Belirtilmediyse: `theme dev` / `theme push --draft`'ın yazdığı taslağı yayınla.
-    const session = await fetchDevSession({ url: creds.url, token: creds.token });
-    instance = session.draftInstanceId;
+    // Belirtilmediyse: `theme dev` / `theme push --draft`'ın yazdığı taslağı yayınla. Kaynak
+    // `GET /api/dev/site` — eski `fetchDevSession` yolu sunucuda 410'a döndü ve bu komutu
+    // try/catch'siz, boş mesajlı bir Error ile tamamen çalışmaz hâle getirmişti.
+    //
+    // `drafts` canlı OLMAYAN HER instance'ı içerir; sunucunun `ensureDraftInstance`'ı ise
+    // `source === "import"` olanı seçer (yayınlanan taslak import'tan çıkarılır). Aynı seçimi
+    // burada tekrarla — yoksa bir kez yayın yapmış her sitede iki taslak görünür ve komut takılır.
+    const status = await fetchSiteStatus({ url: creds.url, token: creds.token });
+    const drafts = status?.drafts ?? [];
+    const cliDrafts = drafts.filter((d) => d.source === "import");
+    if (cliDrafts.length === 1) {
+      instance = cliDrafts[0].id;
+    } else if (drafts.length === 0) {
+      console.error("No draft theme to publish. Create one first:  blocofy theme push --draft");
+      process.exit(1);
+    } else {
+      console.error("Could not tell which draft to publish — pick one with --instance <handle>:");
+      for (const d of drafts) console.error(`  ${d.id}  ${d.name ?? "(unnamed)"}`);
+      process.exit(1);
+    }
   }
   const result = await publishInstance({ url: creds.url, token: creds.token, instanceId: instance });
   console.log(
