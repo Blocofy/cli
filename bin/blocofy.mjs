@@ -528,6 +528,7 @@ async function themeDev(rest) {
     // da sessizce kapanıyordu — ölü bir uç, çalışan bir özelliği götürüyordu. Tek kapatma yolu --no-sync.
     syncDraft: !flags["no-sync"],
     onRetry: (info) => console.error(`  ${retryNotice(info)}`),
+    onWarn: (msg) => console.warn(`  ⚠ ${msg}`),
     // Her kaydetmede ne olduğunu bas — "reloaded" = watch tetiklendi; "0 views"
     // = hiçbir tarayıcı sekmesi bağlı değil (yanlış görünüme bakıyorsun); sync
     // hatası = draft güncellenemedi (preview/editör eski kalır, local yine yenilenir).
