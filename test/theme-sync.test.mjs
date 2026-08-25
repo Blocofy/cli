@@ -516,3 +516,21 @@ test("fetchDevSession: JSON gövdeli hata mesajı korunur (regresyon)", async ()
     },
   );
 });
+
+test("fetchDevSession: 410 gövdeli ise SUNUCUNUN mesajı gösterilir (otorite sunucudur)", async () => {
+  const fake = createServer((req, res) => {
+    res.writeHead(410, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "CLI remote preview has been retired on this server.", code: "cli_remote_preview_retired" }));
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  after(() => fake.close());
+
+  await assert.rejects(
+    () => fetchDevSession({ url: `http://localhost:${fake.address().port}`, token: "bcf_t" }),
+    (err) => {
+      assert.equal(err.message, "CLI remote preview has been retired on this server.");
+      return true;
+    },
+  );
+});
