@@ -460,8 +460,8 @@ async function themeDev(rest) {
       session = await fetchDevSession({ url: creds.url, token: creds.token, name });
     } catch (error) {
       console.warn(
-        `Warning: dev session unavailable (${error?.message ?? error}). ` +
-          `Local preview only — live-domain/editor views + draft sync disabled.`,
+        `Warning: dev session unavailable (${error?.message || error}). ` +
+          `Live-domain and editor views are disabled; draft sync and local preview keep working.`,
       );
     }
   }
@@ -523,7 +523,10 @@ async function themeDev(rest) {
     url: creds.url,
     token: creds.token,
     port,
-    syncDraft: Boolean(session),
+    // Taslak senkronu dev session'a BAĞLI DEĞİL: `pushTheme({draft:true})` /api/dev/theme'e gider ve
+    // session'dan hiçbir veri kullanmaz. Bu satır `Boolean(session)` iken, session 410 alınca senkron
+    // da sessizce kapanıyordu — ölü bir uç, çalışan bir özelliği götürüyordu. Tek kapatma yolu --no-sync.
+    syncDraft: !flags["no-sync"],
     onRetry: (info) => console.error(`  ${retryNotice(info)}`),
     // Her kaydetmede ne olduğunu bas — "reloaded" = watch tetiklendi; "0 views"
     // = hiçbir tarayıcı sekmesi bağlı değil (yanlış görünüme bakıyorsun); sync
