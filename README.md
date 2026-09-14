@@ -24,6 +24,8 @@ blocofy theme push [dir]  # Write the local theme to a DRAFT by default (create/
                           # delete) — preview & publish from the admin panel. --live writes
                           # to the live site immediately (asks to confirm; add --yes for CI).
                           # --name <name> names the new draft (draft mode only).
+                          # --prune also removes target files deleted locally (lists them
+                          # first; on the live theme asks to confirm — --yes for CI).
 blocofy theme rename <handle> <new name>
                           # Rename a theme (label only). Works on any theme, live included.
                           # Handle from the panel theme card or `blocofy status`.
@@ -32,6 +34,15 @@ blocofy --help
 ```
 
 ## Changelog
+
+- **0.7.0** — `theme push --prune`: files that exist on the platform but no longer exist locally are
+  removed. Until now a push merged remote-only files back into the upload, so a file deleted locally
+  stayed on the theme forever. The list is printed before anything is written; pruning the LIVE theme
+  (`--live`, or `--instance` pointing at the live theme) asks for confirmation or `--yes`, and a
+  non-interactive shell without `--yes` exits without writing. Removal goes through the platform's atomic
+  deploy, so it is revision-tracked. A draft push also no longer creates a draft as a side effect of its
+  pre-push remote read: the CLI probes the existing CLI draft by handle and skips the probe when there is
+  none. Previously a failure during that read left an empty draft behind and printed a bare `HTTP 500`.
 
 - **0.6.0** — `theme dev`'s local view finally shows what you are working on. It used to render your
   DRAFT theme against the site's LIVE page content, so draft page documents were invisible; each render
