@@ -35,7 +35,7 @@ const args = process.argv.slice(2);
 const KNOWN = {
   login: ["url", "token"],
   themePull: ["draft", "instance"],
-  themePush: ["diff", "draft", "instance", "name", "live", "yes", "confirm", "dry-run", "validate", "idempotency-key"],
+  themePush: ["diff", "draft", "instance", "name", "live", "yes", "confirm", "dry-run", "validate", "idempotency-key", "prune"],
   themeDev: ["port", "dry", "no-sync", "name"],
   themePublish: ["instance"],
   themeRename: ["name"],
@@ -81,7 +81,7 @@ Usage
         --instance <handle>  pull a specific theme by its handle (from the admin
                              panel theme card, or \`blocofy status\`)
 
-  blocofy theme push [dir] [--live] [--yes] [--instance <handle>]
+  blocofy theme push [dir] [--live] [--yes] [--instance <handle>] [--prune]
       By DEFAULT writes to a DRAFT theme (create/update; no delete) — preview & publish
       it from the admin panel, never touching the live site. Publish it with
       'blocofy theme publish'.
@@ -96,6 +96,8 @@ Usage
         --validate   alias for --dry-run (validate only, nothing written)
         --diff       show what a push WOULD change vs the target (read-only), then stop
         --idempotency-key <k>  attach an idempotency key so a retried push is not double-applied
+        --prune      also REMOVE target files that no longer exist locally (lists them first;
+                     on the live theme asks to confirm — non-interactive shells must add --yes)
 
   blocofy theme rename <handle> <new name>
       Rename a theme (the name is just a label). Works on any of your themes,
@@ -261,7 +263,7 @@ async function themePush(rest) {
     }
     for (const k of d.added) console.log(`  + ${k}`);
     for (const k of d.changed) console.log(`  ~ ${k}`);
-    for (const k of d.removed) console.log(`  - ${k} (present on target, absent locally — push does not delete)`);
+    for (const k of d.removed) console.log(`  - ${k} (present on target, absent locally — ${flags.prune ? "--prune removes it" : "push does not delete"})`);
     console.log(`\n${d.added.length} added, ${d.changed.length} changed, ${d.removed.length} remote-only.`);
     return;
   }
@@ -279,8 +281,10 @@ async function themePush(rest) {
   // yanlış-tenant'a yazımı görünür kılar ("klarosa sandım, ksc'ye yazdım"). whoami
   // yoksa/erişilemezse sessiz geç; etiketi confirmation mesajlarında da kullan.
   let site = null;
+  let whoami = null;
   try {
-    site = (await fetchWhoami({ url: creds.url, token: creds.token })).site;
+    whoami = await fetchWhoami({ url: creds.url, token: creds.token });
+    site = whoami.site;
   } catch {
     /* best-effort */
   }
@@ -322,6 +326,34 @@ async function themePush(rest) {
     }
   }
 
+  // PS-13 `--prune`: canlı temadan dosya SİLER. Hedef canlıysa (`--live` ya da canlı temanın handle'ı
+  // verilmiş `--instance`; whoami çözülemediyse canlı sayılır) canlı-push onay kuralı aynen uygulanır:
+  // `--yes`/`--confirm` → onaylı, TTY → liste basıldıktan sonra y/N, non-TTY → yazımsız çıkış.
+  const prune = Boolean(flags.prune) && !dryRun;
+  const liveTarget = mode === "live" || (mode === "instance" && (whoami == null || String(instance) === String(whoami.liveThemeId)));
+  const pruneDecision = livePushDecision({
+    draft: !prune || !liveTarget,
+    yes: Boolean(flags.yes),
+    confirm: Boolean(flags.confirm),
+    isTTY: Boolean(process.stdin.isTTY),
+  });
+  if (pruneDecision.mustAbort) {
+    console.error(`⚠ 'theme push --prune' removes files from the LIVE theme of ${target}.`);
+    console.error(`  Non-interactive shell: pass --prune --yes to confirm. Nothing was written.`);
+    process.exit(1);
+  }
+  const confirmPrune = async (keys) => {
+    console.log(`--prune will remove ${keys.length} file(s) absent locally:`);
+    for (const k of keys) console.log(`  - ${k}`);
+    if (!pruneDecision.needsPrompt) return true;
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      return isAffirmative(await rl.question(`⚠ Remove these files from the LIVE theme of ${target}? [y/N] `));
+    } finally {
+      rl.close();
+    }
+  };
+
   // `--name` yalnızca YENİ taslak yaratırken (draft modu) anlamlı — canlıya/mevcut
   // instance'a yazarken ad kaydedilmez, sessizce kaybolmasın diye açıkça uyar.
   if (name && mode !== "draft") {
@@ -351,6 +383,8 @@ async function themePush(rest) {
       dryRun,
       idempotencyKey,
       onRetry: (info) => console.error(retryNotice(info)),
+      prune,
+      confirmPrune,
     });
   } catch (error) {
     if (error?.code === "cli_upgrade_required") {
@@ -367,6 +401,11 @@ async function themePush(rest) {
     throw error;
   }
 
+  if (result.aborted) {
+    console.error("Aborted. Nothing was written.");
+    process.exit(1);
+  }
+
   // --dry-run / --validate: the server validated without writing. Report and stop.
   if (result.dryRun) {
     const warnings = Array.isArray(result.warnings) ? result.warnings : [];
@@ -379,6 +418,9 @@ async function themePush(rest) {
   if (result.committed === true) {
     if (Array.isArray(result.remoteOnlyKept) && result.remoteOnlyKept.length) {
       console.log(`  (kept ${result.remoteOnlyKept.length} remote-only file(s) — push does not delete)`);
+    }
+    if (Array.isArray(result.remoteOnlyRemoved) && result.remoteOnlyRemoved.length) {
+      console.log(`  (removed ${result.remoteOnlyRemoved.length} file(s) absent locally — --prune)`);
     }
     console.log(`✓ Deployed atomically: deployment #${result.deploymentId}, revision #${result.sourceRevisionId}, pointer v${result.pointerVersion}.`);
     if (mode === "draft") {

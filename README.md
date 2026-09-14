@@ -24,6 +24,8 @@ blocofy theme push [dir]  # Write the local theme to a DRAFT by default (create/
                           # delete) — preview & publish from the admin panel. --live writes
                           # to the live site immediately (asks to confirm; add --yes for CI).
                           # --name <name> names the new draft (draft mode only).
+                          # --prune also removes target files deleted locally (lists them
+                          # first; on the live theme asks to confirm — --yes for CI).
 blocofy theme rename <handle> <new name>
                           # Rename a theme (label only). Works on any theme, live included.
                           # Handle from the panel theme card or `blocofy status`.

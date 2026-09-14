@@ -30,9 +30,15 @@ function themeDir(files) {
 }
 
 /** Fake platform: configurable GET body + POST responder; records every request. */
-function fakePlatform({ getBody = { files: {}, protocol: 1 }, postResponder = null } = {}) {
-  const seen = { gets: 0, posts: [], other: 0, whoami: 0 };
+function fakePlatform({ getBody = { files: {}, protocol: 1 }, postResponder = null, siteBody = { drafts: [] } } = {}) {
+  const seen = { gets: 0, getUrls: [], posts: [], other: 0, whoami: 0, site: 0 };
   const server = createServer((req, res) => {
+    if (req.method === "GET" && req.url.includes("/api/dev/site")) {
+      seen.site += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(siteBody));
+      return;
+    }
     if (req.method === "GET" && req.url.includes("/api/dev/whoami")) {
       seen.whoami += 1;
       res.writeHead(200, { "content-type": "application/json" });
@@ -41,6 +47,7 @@ function fakePlatform({ getBody = { files: {}, protocol: 1 }, postResponder = nu
     }
     if (req.method === "GET" && req.url.includes("/api/dev/theme")) {
       seen.gets += 1;
+      seen.getUrls.push(req.url);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(getBody));
       return;
@@ -139,7 +146,10 @@ test("keyed push merges remote-only GATE-ACCEPTABLE files into the payload (push
   const dir = themeDir({ "section/Hero": "LOCAL" });
   try {
     await withFake(
-      { getBody: { files: { "section/Hero": "REMOTE", "section/Old": "OLD", "template/index.json": "{}", "README.md": "readme" }, protocol: 1 } },
+      {
+        getBody: { files: { "section/Hero": "REMOTE", "section/Old": "OLD", "template/index.json": "{}", "README.md": "readme" }, protocol: 1 },
+        siteBody: { drafts: [{ id: "t-existing", name: "CLI Draft", source: "import" }] },
+      },
       async (url, seen) => {
         const result = await pushTheme({ dir, url, token: TOKEN, draft: true, idempotencyKey: "cli-merge-1" });
         assert.equal(seen.gets, 1, "exactly one merge probe GET");
@@ -261,9 +271,9 @@ test("theme push --name survives the merge probe (the draft GET carries ?name= �
   }
 });
 
-test("source oracles: the draft probe carries ?name=, and dev-server's sync stays keyless", async () => {
+test("source oracles: the merge probe never provisions a draft, and dev-server's sync stays keyless", async () => {
   const themeSync = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "theme-sync.mjs"), "utf8");
-  assert.match(themeSync, /draft=1\$\{name \? `&name=/, "the merge probe forwards --name to the draft GET");
+  assert.doesNotMatch(themeSync.slice(themeSync.indexOf("export async function pushTheme"), themeSync.indexOf("`blocofy theme push --diff`")), /draft=1/, "PS-09: a `?draft=1` GET provisions a draft server-side — the push probe must not issue one");
   const devServer = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "dev-server.mjs"), "utf8");
   assert.doesNotMatch(devServer, /idempotencyKey/, "dev-sync must stay keyless (a canonical seal per keystroke mints unbounded revisions)");
 });
@@ -291,6 +301,124 @@ test("--dry-run REFUSES a server that does not declare the canonical protocol (a
       assert.match(r.stderr, /canonical protocol/);
       assert.equal(seen.posts.length, 0, "nothing was sent to the write endpoint");
     });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// PS-09 — the merge probe used `GET ?draft=1`, which PROVISIONS a draft server-side as a side effect (and
+// a failure there left an empty draft behind). The draft target now resolves the existing CLI draft from
+// `/api/dev/site` and probes it by handle; with no draft there is nothing remote to merge, so no probe.
+test("PS-09: draft push with NO existing draft issues no `?draft=1` GET and no probe at all", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  try {
+    await withFake({ siteBody: { drafts: [{ id: "t-dup", name: "Copy", source: "duplicate" }] } }, async (url, seen) => {
+      await pushTheme({ dir, url, token: TOKEN, draft: true, name: "My Draft", idempotencyKey: "cli-ps09-a" });
+      assert.equal(seen.site, 1, "the existing draft is looked up via /api/dev/site");
+      assert.deepEqual(seen.getUrls, [], "no theme GET — in particular no `?draft=1` provisioning probe");
+      const real = seen.posts.find((p) => !p.body.dryRun);
+      assert.equal(real.body.draft, true);
+      assert.equal(real.body.name, "My Draft", "--name reaches the POST that creates the draft");
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("PS-09: draft push with an existing CLI draft probes it by handle (`?instance=`), never `?draft=1`", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  try {
+    await withFake(
+      {
+        getBody: { files: { "section/Old": "OLD" }, protocol: 1 },
+        siteBody: { drafts: [{ id: "t-dup", name: "Copy", source: "duplicate" }, { id: "t-cli", name: "CLI Draft", source: "import" }] },
+      },
+      async (url, seen) => {
+        const result = await pushTheme({ dir, url, token: TOKEN, draft: true, idempotencyKey: "cli-ps09-b" });
+        assert.deepEqual(seen.getUrls, ["/api/dev/theme?instance=t-cli"]);
+        assert.deepEqual(result.remoteOnlyKept, ["section/Old"]);
+      },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// PS-13 — `--prune`: a file deleted locally used to survive every push because the merge probe carried it
+// back into the payload. With prune the remote-only files are left out (the canonical deploy replaces the
+// folders atomically, so they are removed) and reported BEFORE the write.
+test("PS-13: prune leaves remote-only files out of the POST and reports them; the default keeps them", async () => {
+  const opts = { getBody: { files: { "section/Hero": "R", "section/PsProbe": "P" }, protocol: 1 } };
+  const dir = themeDir({ "section/Hero": "H" });
+  try {
+    await withFake(opts, async (url, seen) => {
+      const reported = [];
+      const result = await pushTheme({ dir, url, token: TOKEN, idempotencyKey: "cli-ps13-a", prune: true, confirmPrune: async (keys) => { reported.push(...keys); return true; } });
+      assert.deepEqual(reported, ["section/PsProbe"], "the removal list is reported before the write");
+      const real = seen.posts.find((p) => !p.body.dryRun);
+      assert.ok(!("section/PsProbe" in real.body.files), "pruned file is not re-added");
+      assert.deepEqual(result.remoteOnlyRemoved, ["section/PsProbe"]);
+      assert.equal(result.remoteOnlyKept, undefined);
+    });
+    await withFake(opts, async (url, seen) => {
+      const result = await pushTheme({ dir, url, token: TOKEN, idempotencyKey: "cli-ps13-b" });
+      const real = seen.posts.find((p) => !p.body.dryRun);
+      assert.equal(real.body.files["section/PsProbe"], "P", "default push still does not delete");
+      assert.deepEqual(result.remoteOnlyKept, ["section/PsProbe"]);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("PS-13: a declined prune confirmation sends no write", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  try {
+    await withFake({ getBody: { files: { "section/PsProbe": "P" }, protocol: 1 } }, async (url, seen) => {
+      const result = await pushTheme({ dir, url, token: TOKEN, idempotencyKey: "cli-ps13-c", prune: true, confirmPrune: async () => false });
+      assert.equal(result.aborted, true);
+      assert.equal(seen.posts.filter((p) => !p.body.dryRun).length, 0, "no real POST after a declined prune");
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("PS-13: `--prune` on the LIVE theme by --instance needs --yes in a non-interactive shell", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  try {
+    await withFake({ getBody: { files: { "section/PsProbe": "P" }, protocol: 1 } }, async (url, seen) => {
+      const r = await runBin(url, ["theme", "push", dir, "--instance", "9", "--prune"]);
+      assert.equal(r.code, 1);
+      assert.doesNotMatch(r.stderr, /Unknown flag/);
+      assert.match(r.stderr, /--yes/);
+      assert.equal(seen.posts.length, 0, "nothing sent");
+    });
+    await withFake({ getBody: { files: { "section/PsProbe": "P" }, protocol: 1 } }, async (url, seen) => {
+      const r = await runBin(url, ["theme", "push", dir, "--instance", "9", "--prune", "--yes"]);
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /section\/PsProbe/, "the removal list is printed");
+      const real = seen.posts.find((p) => !p.body.dryRun);
+      assert.ok(!("section/PsProbe" in real.body.files));
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("PS-13: `--prune` on a draft needs no confirmation and prints the removal list", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  try {
+    await withFake(
+      { getBody: { files: { "section/PsProbe": "P" }, protocol: 1 }, siteBody: { drafts: [{ id: "t-cli", name: "CLI Draft", source: "import" }] } },
+      async (url, seen) => {
+        const r = await runBin(url, ["theme", "push", dir, "--prune"]);
+        assert.equal(r.code, 0, r.stderr);
+        assert.match(r.stdout, /section\/PsProbe/);
+        const real = seen.posts.find((p) => !p.body.dryRun);
+        assert.ok(!("section/PsProbe" in real.body.files));
+      },
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
