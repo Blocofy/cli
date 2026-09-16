@@ -9,17 +9,19 @@
  * livereload. No monorepo required.
  */
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 
 import { parseArgs } from "../lib/args.mjs";
 import { pullContent, pushContent } from "../lib/content-sync.mjs";
-import { credentialsPath, loadCredentials, saveCredentials } from "../lib/credentials.mjs";
+import { credentialsPath, loadApiCredentials, loadCredentials, saveCredentials } from "../lib/credentials.mjs";
 import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
+import { CliRefusal, DEFAULT_API_URL, decidePageMediaUses, fetchPageMediaUses, isValidApiKey } from "../lib/media-uses.mjs";
 import { githubNote, retryNotice, statusLine, syncScopeNote } from "../lib/messages.mjs";
+import { promptSecret } from "../lib/secret-prompt.mjs";
 import { diffTheme, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, fetchWhoami, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
 import { isAffirmative, livePushDecision, resolvePushMode } from "../lib/confirm.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
@@ -32,8 +34,11 @@ const args = process.argv.slice(2);
 // bayrak YAZIMSIZ çıkışla reddedilir (eskiden sonraki token'ı değer olarak yutup hedef dizini sessizce
 // kaydırıyordu). `--confirm` ve `--dry` belgelenmemiş ama gerçek bayraklardır; `--dry` (theme dev'in
 // sunucu-başlatmama kancası) `--dry-run`'dan (sunucu-tarafı doğrulama) FARKLIDIR, alias değildir.
+// 0.8.0: `login --api-key` DEĞERSİZ bayraktır (parser'da boolean) — sır gizli prompt'tan ya da
+// BLOCOFY_API_KEY'den gelir, argv'ye asla girmez. `pages media-uses` / `media-decide` v1 API komutlarıdır.
 const KNOWN = {
-  login: ["url", "token"],
+  login: ["url", "token", "api-key", "api-url"],
+  pages: ["decisions", "expected-revision-id", "expected-version", "json"],
   themePull: ["draft", "instance"],
   themePush: ["diff", "draft", "instance", "name", "live", "yes", "confirm", "dry-run", "validate", "idempotency-key", "prune"],
   themeDev: ["port", "dry", "no-sync", "name"],
@@ -65,6 +70,13 @@ Usage
   blocofy login [--url <url>] [--token <bcf_…>]
       Save your platform URL + dev token to ~/.blocofy/credentials.json.
       Get a token from the admin panel → Settings → Theme CLI tokens.
+
+  blocofy login --api-key [--api-url <url>]
+      Save a v1 API key (blcf_live_…) for the \`pages media-*\` commands. The key is read
+      from a HIDDEN prompt — the flag takes no value, so the key never lands in your shell
+      history. Kept alongside the dev token in the same credentials file.
+        --api-url <url>  API origin (default https://app.blocofy.com)
+      Non-interactive shells: set BLOCOFY_API_KEY + BLOCOFY_API_URL instead.
 
   blocofy theme dev [dir] [--port <n>] [--no-sync] [--name <name>]
       Start a dev server and print 3 auto-reloading views — Local, live-domain
@@ -118,6 +130,21 @@ Usage
       push: write pages/*.json to the site. Updates EXISTING pages only —
             never creates or deletes a page; unchanged pages are skipped.
 
+  blocofy pages media-uses <page-handle> [--json]
+      List a page's localized-media decisions on its newest DRAFT (v1 API, pages:read).
+      Prints the draft's revision id/version needed by media-decide. --json: raw response.
+
+  blocofy pages media-decide <page-handle> --decisions <file.json>
+                             [--expected-revision-id <n> --expected-version <n>] [--json]
+      Apply one or more media decisions to the page's draft atomically (v1 API, pages:write).
+      The file is { "decisions": [ { path, facet, decision, target_asset?, alt?, caption?,
+      decorative?, idempotency_key?, witness? } ] } (max 20). Without the two --expected-*
+      flags the CLI first GETs the draft and uses its current revision id/version; items
+      without an idempotency_key get a random UUID.
+      Exit codes: 0 applied (or "No changes" when every item was already recorded);
+      1 usage/auth/network/5xx (no retry); 2 the server refused (4xx) — the {error} JSON
+      is printed to stderr.
+
   blocofy settings pull [dir] / settings push [dir]
       Download / upload config/settings.json (theme tokens/settings + color schemes).
 
@@ -129,8 +156,12 @@ Examples
   blocofy theme pull && blocofy theme dev
   blocofy theme push && blocofy theme publish
   blocofy status
+  blocofy login --api-key
+  blocofy pages media-uses pg_abc123 --json
+  blocofy pages media-decide pg_abc123 --decisions decisions.json
 
 Auth: ~/.blocofy/credentials.json (from \`login\`), or BLOCOFY_URL + BLOCOFY_TOKEN env vars.
+v1 API (pages media-*): \`login --api-key\`, or BLOCOFY_API_KEY + BLOCOFY_API_URL env vars.
 The CLI does not build assets — bring your own (npm/Vite/Tailwind); the platform serves
 plain Liquid + static assets.`);
 }
@@ -146,8 +177,60 @@ async function promptValid(rl, question, normalize, valid, hint, tries = 3) {
   process.exit(1);
 }
 
+/**
+ * `blocofy login --api-key [--api-url <url>]` — v1 API key login (0.8.0, D3 §4.7).
+ * The key is NEVER taken from argv: a hidden prompt on a TTY, BLOCOFY_API_KEY otherwise.
+ * Non-TTY without the env var → message + exit 1, nothing written (fail-closed). No message
+ * printed by this function ever contains the key (not even a prefix).
+ */
+async function loginApiKey(flags, positionals) {
+  if (positionals.length > 0 || flags.url !== undefined || flags.token !== undefined) {
+    console.error("`login --api-key` takes no value and no --url/--token: the API key is read from a hidden prompt (or BLOCOFY_API_KEY). Nothing was written.");
+    process.exit(1);
+  }
+  let apiUrl;
+  if (typeof flags["api-url"] === "string") apiUrl = normalizeUrl(flags["api-url"]);
+  else if (process.env.BLOCOFY_API_URL) apiUrl = normalizeUrl(process.env.BLOCOFY_API_URL);
+  else apiUrl = DEFAULT_API_URL;
+  if (!isValidUrl(apiUrl)) {
+    console.error("Invalid --api-url — must be a valid http(s):// URL. Nothing was written.");
+    process.exit(1);
+  }
+
+  let apiKey = null;
+  if (process.stdin.isTTY) {
+    apiKey = await promptSecret("API key (blcf_live_…, hidden): ");
+    if (apiKey === null) {
+      console.error("Cancelled. Nothing was written.");
+      process.exit(1);
+    }
+    apiKey = apiKey.trim();
+  } else if (process.env.BLOCOFY_API_KEY) {
+    apiKey = process.env.BLOCOFY_API_KEY.trim();
+  } else {
+    console.error("Non-interactive shell: `login --api-key` needs a terminal for the hidden prompt. Set BLOCOFY_API_KEY (+ BLOCOFY_API_URL) instead. Nothing was written.");
+    process.exit(1);
+  }
+  if (!isValidApiKey(apiKey)) {
+    console.error("Invalid API key — a v1 key starts with blcf_live_ (a bcf_ dev token is not accepted for the v1 API). Nothing was written.");
+    process.exit(1);
+  }
+
+  saveCredentials({ apiUrl, apiKey });
+  console.log(`✓ API key saved → ${credentialsPath()} (API: ${apiUrl})`);
+  console.log("Next: blocofy pages media-uses <page-handle>");
+}
+
 async function login(rest) {
-  const { flags } = parseArgsOrExit(rest, KNOWN.login);
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.login);
+  if (flags["api-key"] || flags["api-url"] !== undefined) {
+    if (!flags["api-key"]) {
+      console.error("--api-url is only used with --api-key. Nothing was written.");
+      process.exit(1);
+    }
+    await loginApiKey(flags, positionals);
+    return;
+  }
   let url = typeof flags.url === "string" ? normalizeUrl(flags.url) : "";
   let token = typeof flags.token === "string" ? flags.token.trim() : "";
 
@@ -481,6 +564,130 @@ async function contentPull(scope, rest) {
   console.log(`Downloaded ${count} ${scope === "settings" ? "settings" : "page"} file(s) → ${dir}`);
 }
 
+/** Resolve the v1 API pair (blcf_live_ key only) or exit 1 with guidance. Never prints the key. */
+function requireApiCreds() {
+  let creds;
+  try {
+    creds = loadApiCredentials();
+  } catch (error) {
+    console.error(error?.message ?? error);
+    process.exit(1);
+  }
+  if (!creds) {
+    console.error("API key required: run `blocofy login --api-key` (or set BLOCOFY_API_KEY + BLOCOFY_API_URL). The dev token (bcf_) is not accepted for the v1 API.");
+    process.exit(1);
+  }
+  if (!isValidApiKey(creds.apiKey)) {
+    console.error(`The stored API key (${creds.source}) is not a v1 key — it must start with blcf_live_. Run \`blocofy login --api-key\`.`);
+    process.exit(1);
+  }
+  return creds;
+}
+
+/** v1 refusal (4xx) → {error} JSON on stderr, exit 2; anything else → message, exit 1. */
+function exitForApiError(error) {
+  if (error instanceof CliRefusal) {
+    console.error(JSON.stringify({ error: error.error }));
+    process.exit(2);
+  }
+  console.error(error?.message ?? error);
+  process.exit(1);
+}
+
+function printMediaUsesView(view) {
+  if (view.applicable === false) {
+    console.log(`Page ${view.page?.id}: media decisions not applicable (${view.reason}).`);
+    return;
+  }
+  const uses = Array.isArray(view.uses) ? view.uses : [];
+  console.log(`Page ${view.page?.id} — draft revision ${view.revision?.id} v${view.revision?.version} — ${view.locale} ← ${view.source_locale}`);
+  console.log(`${view.counts?.total ?? uses.length} use(s), ${view.counts?.blocked ?? 0} blocked`);
+  for (const u of uses) {
+    const marks = [u.stale ? "stale" : null, u.blocks ? "BLOCKS" : null, u.editable ? null : "read-only"].filter(Boolean);
+    const extra = marks.length ? ` [${marks.join(", ")}]` : "";
+    const reasons = Array.isArray(u.reasons) && u.reasons.length ? ` — ${u.reasons.join(", ")}` : "";
+    console.log(`  ${u.decision.padEnd(9)} ${u.path} (${u.facet}, ${u.kind})${extra}${reasons}`);
+  }
+}
+
+async function pagesMediaUses(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.pages);
+  const page = positionals[0];
+  if (!page) {
+    console.error("Usage: blocofy pages media-uses <page-handle> [--json]");
+    process.exit(1);
+  }
+  const { apiUrl, apiKey } = requireApiCreds();
+  const view = await fetchPageMediaUses({ apiUrl, apiKey, page });
+  if (flags.json) console.log(JSON.stringify(view, null, 2));
+  else printMediaUsesView(view);
+}
+
+function parseExpected(flags, name) {
+  const raw = flags[name];
+  if (raw === undefined) return null;
+  const n = Number(raw);
+  if (typeof raw !== "string" || !Number.isSafeInteger(n) || n < 0) {
+    console.error(`--${name} must be a non-negative integer.`);
+    process.exit(1);
+  }
+  return n;
+}
+
+async function pagesMediaDecide(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.pages);
+  const page = positionals[0];
+  const file = typeof flags.decisions === "string" ? resolve(flags.decisions) : null;
+  if (!page || !file) {
+    console.error("Usage: blocofy pages media-decide <page-handle> --decisions <file.json> [--expected-revision-id <n> --expected-version <n>] [--json]");
+    process.exit(1);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(file, "utf8"));
+  } catch (error) {
+    console.error(`Cannot read decisions file ${file}: ${error?.message ?? error}`);
+    process.exit(1);
+  }
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.decisions) || parsed.decisions.length === 0) {
+    console.error(`Decisions file must be { "decisions": [ ... ] } with at least one item: ${file}`);
+    process.exit(1);
+  }
+  let expectedRevisionId = parseExpected(flags, "expected-revision-id");
+  let expectedVersion = parseExpected(flags, "expected-version");
+  if ((expectedRevisionId === null) !== (expectedVersion === null)) {
+    console.error("--expected-revision-id and --expected-version must be given together (or both omitted to use the current draft).");
+    process.exit(1);
+  }
+
+  const { apiUrl, apiKey } = requireApiCreds();
+  if (expectedRevisionId === null) {
+    const view = await fetchPageMediaUses({ apiUrl, apiKey, page });
+    if (view.applicable === false) {
+      console.error(`Page ${page}: media decisions not applicable (${view.reason}). Nothing was written.`);
+      process.exit(1);
+    }
+    expectedRevisionId = view.revision.id;
+    expectedVersion = view.revision.version;
+  }
+  const decisions = parsed.decisions.map((item) =>
+    item && typeof item === "object" && typeof item.idempotency_key !== "string" ? { ...item, idempotency_key: randomUUID() } : item,
+  );
+
+  const out = await decidePageMediaUses({ apiUrl, apiKey, page, expectedRevisionId, expectedVersion, decisions });
+  if (flags.json) {
+    console.log(JSON.stringify(out, null, 2));
+    return;
+  }
+  if (out.written === false) {
+    console.log("No changes — the decisions were already recorded (replay).");
+    return;
+  }
+  const applied = Array.isArray(out.applied) ? out.applied : [];
+  console.log(`✓ Applied ${applied.length} decision(s) → draft revision ${out.revision?.id} v${out.revision?.version}`);
+  for (const a of applied) console.log(`  ${a.decision.padEnd(9)} ${a.path} (${a.facet})${a.replayed ? " [replayed]" : ""}`);
+}
+
 async function themeDev(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, KNOWN.themeDev);
   const themeDir = resolve(positionals[0] ?? process.cwd());
@@ -755,6 +962,10 @@ if (first === "--version" || first === "-v") {
     console.error(error?.message ?? error);
     process.exit(1);
   });
+} else if (first === "pages" && rest[0] === "media-uses") {
+  pagesMediaUses(rest.slice(1)).catch(exitForApiError);
+} else if (first === "pages" && rest[0] === "media-decide") {
+  pagesMediaDecide(rest.slice(1)).catch(exitForApiError);
 } else if (first === "pages" && rest[0] === "pull") {
   contentPull("pages", rest.slice(1)).catch((error) => {
     console.error(error?.message ?? error);
