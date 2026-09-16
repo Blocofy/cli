@@ -29,11 +29,41 @@ blocofy theme push [dir]  # Write the local theme to a DRAFT by default (create/
 blocofy theme rename <handle> <new name>
                           # Rename a theme (label only). Works on any theme, live included.
                           # Handle from the panel theme card or `blocofy status`.
+blocofy login --api-key [--api-url <url>]
+                          # Save a v1 API key (blcf_live_…) for the `pages media-*` commands.
+                          # The flag takes NO value: the key is typed into a hidden prompt, so
+                          # it never lands in argv or shell history. Non-interactive shells use
+                          # BLOCOFY_API_KEY + BLOCOFY_API_URL instead (no prompt, nothing
+                          # written without them). --api-url defaults to https://app.blocofy.com.
+blocofy pages media-uses <page-handle> [--json]
+                          # List a page's localized-media decisions on its newest draft
+                          # (v1 API, pages:read) with the draft revision id/version.
+blocofy pages media-decide <page-handle> --decisions <file.json>
+                          [--expected-revision-id <n> --expected-version <n>] [--json]
+                          # Apply the file's { "decisions": [...] } (max 20) to the draft
+                          # atomically (v1 API, pages:write). Without the --expected-* pair
+                          # the CLI GETs the draft first and uses its current revision;
+                          # items without idempotency_key get a random UUID. Exit 0 applied
+                          # (or "No changes" when already recorded), 1 usage/auth/network/5xx
+                          # (no retry), 2 server refusal (4xx) — {error} JSON on stderr.
 blocofy --version
 blocofy --help
 ```
 
 ## Changelog
+
+- **0.8.0** — Page media decisions over the public v1 API: `pages media-uses <page-handle>` lists a
+  page's localized-media decisions on its newest draft, and `pages media-decide <page-handle>
+  --decisions <file.json>` applies a batch of decisions to that draft atomically (all or nothing;
+  a replayed batch answers "No changes"). Both use a **v1 API key** (`blcf_live_…`, scopes
+  `pages:read` / `pages:write`) — the `bcf_` dev token is not accepted. `blocofy login --api-key`
+  stores the key from a **hidden prompt**; the flag deliberately takes no value so the key never
+  enters argv or shell history, and a non-interactive shell without `BLOCOFY_API_KEY` +
+  `BLOCOFY_API_URL` exits without writing. The API pair lives next to the dev pair in
+  `~/.blocofy/credentials.json` (still 0600): logging in one way keeps the other. Exit codes for
+  the new commands: 0 success, 1 usage/auth/network/5xx (no automatic retry), 2 server refusal
+  (4xx, with the server's `{error}` JSON on stderr). Existing commands and the dev-token flow are
+  unchanged.
 
 - **0.7.0** — `theme push --prune`: files that exist on the platform but no longer exist locally are
   removed. Until now a push merged remote-only files back into the upload, so a file deleted locally
@@ -94,7 +124,10 @@ editor — without affecting your published theme. Save a file and **every open 
 the draft from the theme editor when you're ready.
 
 Credentials come from `~/.blocofy/credentials.json` (written by `blocofy login`) or the
-`BLOCOFY_URL` + `BLOCOFY_TOKEN` environment variables (for CI/automation).
+`BLOCOFY_URL` + `BLOCOFY_TOKEN` environment variables (for CI/automation). The v1 API commands
+(`pages media-uses`, `pages media-decide`) use a separate `blcf_live_…` key from the same file
+(written by `blocofy login --api-key`) or `BLOCOFY_API_KEY` + `BLOCOFY_API_URL` — both variables
+together; with only one set the CLI fails instead of falling back to the file.
 
 ## Theme structure
 
