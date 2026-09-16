@@ -123,3 +123,14 @@ test("a broken file anywhere refuses the migration", async () => {
   assert.deepEqual(snapshot(dir), before);
   rmSync(dir, { recursive: true, force: true });
 });
+
+test("legacy /a and /a/index.json migrate to paths that can coexist", async () => {
+  const dir = tmp();
+  put(dir, "pages/a.json", legacy("/a", { locale: "en-US" }));
+  put(dir, "pages/a/index.json.json", legacy("/a/index.json", { locale: "en-US" }));
+  const r = await migrateLayout({ dir, write: true });
+  assert.equal(r.refused, false);
+  assert.equal(r.moved, 2);
+  assert.deepEqual(Object.keys(snapshot(dir)), ["pages/en-US/routes/a/index.json", "pages/en-US/routes/a/~69ndex.json/index.json"]);
+  rmSync(dir, { recursive: true, force: true });
+});

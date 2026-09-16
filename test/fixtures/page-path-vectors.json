@@ -120,6 +120,21 @@
       "en-US",
       "/xxxxxxxxxxxxxxxxxxx/xxxxxxxxxxxxxxxxxxx/xxxxxxxxxxxxxxxxxxx/xxxxxxxxxxxxxxxxxxx/xxxxxxxxxxxxxxxxxxx/xxxxxxxxxxxxxxxxxxx/xxxxxxxxxxxxxxxxxxx/xxxxxxxxxxxxxxxxxxx/xxxxxxxxxxxxxxxxxxx/xxxxxxxxxxxxxxxxxxx",
       "pages/en-US/hashed/dc068b9679844e2a1d99d587a0a12f00ad42ddb2da2d3995d46fda96a117d525/index.json"
+    ],
+    [
+      "en-US",
+      "/blog/index.json",
+      "pages/en-US/routes/blog/~69ndex.json/index.json"
+    ],
+    [
+      "en-US",
+      "/com0",
+      "pages/en-US/routes/~63om0/index.json"
+    ],
+    [
+      "en-US",
+      "/lpt0.txt",
+      "pages/en-US/routes/~6cpt0.txt/index.json"
     ]
   ],
   "invalidSlugs": [
@@ -223,6 +238,10 @@
     ],
     [
       "pages/en-US/routes/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/index.json",
+      "PAGES_INVALID_PATH"
+    ],
+    [
+      "pages/en-US/routes/blog/index.json/index.json",
       "PAGES_INVALID_PATH"
     ]
   ],

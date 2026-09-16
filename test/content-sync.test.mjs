@@ -333,3 +333,46 @@ test("check online: server dry-run findings are included", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("stagedWrite refuses a target that another target needs as a folder, before writing anything", async () => {
+  const { stagedWrite } = await import("../lib/page-files.mjs");
+  const dir = tmp();
+  const root = (await import("node:fs")).realpathSync(dir);
+  assert.throws(
+    () => stagedWrite(root, [["pages/en-US/routes/a/index.json", "A"], ["pages/en-US/routes/a/index.json/index.json", "B"], ["pages/en-US/routes/z/index.json", "Z"]]),
+    (e) => e.code === "PAGES_INVALID_PATH",
+  );
+  assert.deepEqual(snapshot(dir), {});
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a failure while moving staged files into place is a coded error naming how many were written", async () => {
+  const { stagedWrite } = await import("../lib/page-files.mjs");
+  const dir = tmp();
+  const root = (await import("node:fs")).realpathSync(dir);
+  let n = 0;
+  const rename = (from, to) => {
+    n += 1;
+    if (n === 2) throw new Error("EIO");
+    return renameReal(from, to);
+  };
+  const { renameSync: renameReal } = await import("node:fs");
+  assert.throws(
+    () => stagedWrite(root, [["pages/en-US/index.json", "A"], ["pages/tr-TR/index.json", "B"]], { rename }),
+    (e) => e.code === "PAGES_WRITE_FAILED" && /1 of 2/.test(e.message),
+  );
+  assert.deepEqual(readdirSync(root).filter((x) => x.startsWith(".blocofy")), []);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("page-like file names that would be silently skipped are reported (about.JSON, trailing space)", () => {
+  const dir = tmp();
+  put(dir, "pages/about.JSON", "{}");
+  put(dir, "pages/contact.json ", "{}");
+  put(dir, "pages/README.md", "x");
+  assert.throws(() => readContentFiles(dir, "pages"), (e) => {
+    assert.deepEqual(e.diagnostics.map((d) => [d.path, d.code]), [["pages/about.JSON", "PAGES_INVALID_PATH"], ["pages/contact.json ", "PAGES_INVALID_PATH"]]);
+    return true;
+  });
+  rmSync(dir, { recursive: true, force: true });
+});
