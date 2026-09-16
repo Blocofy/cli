@@ -140,7 +140,7 @@ A theme is a directory of files grouped by top-level folder:
 | `block/` | Repeatable pieces used inside sections |
 | `partial/` | Shared snippets (header/footer, …) |
 | `asset/` | CSS and static files (`theme.css`) |
-| `pages/<slug>.json` | Page content (`/` → `pages/index.json`) |
+| `pages/<locale>/index.json`, `pages/<locale>/routes/<path>/index.json` | Page content, one folder per language (`blocofy pages pull/push/check/migrate-layout`). The old `pages/<slug>.json` layout is still read, with a warning |
 | `config/settings.json` | Theme settings + color schemes |
 | `config/settings_schema.json` | Theme settings panel schema (synced with `pull`/`push`) |
 

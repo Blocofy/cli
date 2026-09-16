@@ -15,7 +15,8 @@ import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 
 import { parseArgs } from "../lib/args.mjs";
-import { pullContent, pushContent } from "../lib/content-sync.mjs";
+import { checkPages, migrateLayout, pullContent, pushContent } from "../lib/content-sync.mjs";
+import { PagesCliError, formatDiagnostic } from "../lib/page-files.mjs";
 import { credentialsPath, loadApiCredentials, loadCredentials, saveCredentials } from "../lib/credentials.mjs";
 import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
@@ -45,6 +46,10 @@ const KNOWN = {
   themePublish: ["instance"],
   themeRename: ["name"],
   content: [],
+  pagesPull: ["strict"],
+  pagesPush: ["dry-run", "strict"],
+  pagesCheck: ["strict"],
+  pagesMigrate: ["dry-run", "write", "strict"],
 };
 function parseArgsOrExit(rest, known) {
   const parsed = parseArgs(rest, new Set([...known, "help", "version"]));
@@ -125,10 +130,28 @@ Usage
       Show the live theme, page distribution per instance, drafts, and a health flag
       (ok / live_instance_empty / pages_split). Run before/after publishing.
 
-  blocofy pages pull [dir] / pages push [dir]
-      pull: download published pages → pages/<slug>.json.
-      push: write pages/*.json to the site. Updates EXISTING pages only —
-            never creates or deletes a page; unchanged pages are skipped.
+  blocofy pages pull [dir] [--strict]
+      Download published pages, one folder per language:
+        pages/<locale>/index.json                 the home page ("/")
+        pages/<locale>/routes/<path>/index.json   every other page ("/about" → routes/about/index.json)
+      Files from the old layout (pages/<slug>.json) are reported, never deleted or overwritten.
+      Exit 1 when the site reports pages it could not export (--strict: also on warnings).
+
+  blocofy pages push [dir] [--dry-run] [--strict]
+      Write pages/**.json to the site. Updates EXISTING pages only — never creates or
+      deletes a page; unchanged pages are skipped. Every file is checked first: if any
+      file is invalid, two files point at the same page, or a folder's language does not
+      match the file's "locale", NO page is changed. --dry-run: check on the server, write nothing.
+      Needs a platform that supports language folders (else PAGES_SERVER_UPGRADE_REQUIRED).
+
+  blocofy pages check [dir] [--strict]
+      Check page files. Offline: paths, JSON, layout, duplicates. Logged in: also the
+      site's languages and the server-side dry run. Exit 1 on errors (--strict: warnings too).
+
+  blocofy pages migrate-layout [dir] [--dry-run | --write] [--strict]
+      Move old-layout files (pages/<slug>.json) to language folders. --dry-run (default)
+      prints the plan; --write moves only proven files. Any ambiguity or conflict: nothing
+      is moved, exit 1. Files without "locale" use the site's default language (login needed).
 
   blocofy pages media-uses <page-handle> [--json]
       List a page's localized-media decisions on its newest DRAFT (v1 API, pages:read).
@@ -534,6 +557,109 @@ async function themePush(rest) {
   }
 }
 
+/** PS-19 — print platform/CLI findings; returns the exit code they imply. */
+function reportPageDiagnostics(diagnostics, { strict = false } = {}) {
+  for (const d of diagnostics) (d.level === "error" ? console.error : console.warn)(formatDiagnostic(d));
+  const errors = diagnostics.filter((d) => d.level === "error").length;
+  const warnings = diagnostics.length - errors;
+  return errors > 0 || (strict && warnings > 0) ? 1 : 0;
+}
+
+function exitForPagesError(error) {
+  if (error instanceof PagesCliError) {
+    if (error.diagnostics?.length) reportPageDiagnostics(error.diagnostics);
+    else console.error(`error [${error.code}]:\n    ${error.message}`);
+    if (error.diagnostics?.length) console.error(`\n${error.message}`);
+    if (Array.isArray(error.pages) && error.pages.length) {
+      console.error("Per-file result:");
+      for (const p of error.pages) console.error(`  ${p.outcome ?? p.action}  ${p.path}`);
+    }
+    process.exit(1);
+  }
+  console.error(error?.message ?? error);
+  process.exit(1);
+}
+
+function localeLabel(p) {
+  return `${p.locale} ${p.slug}`;
+}
+
+async function pagesPush(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.pagesPush);
+  const dir = resolve(positionals[0] ?? process.cwd());
+  if (!existsSync(dir)) {
+    console.error(`Directory not found: ${dir}`);
+    process.exit(1);
+  }
+  const creds = requireCreds();
+  const dryRun = Boolean(flags["dry-run"]);
+  const result = await pushContent({ dir, url: creds.url, token: creds.token, scope: "pages", dryRun });
+  const code = reportPageDiagnostics(result.diagnostics ?? [], { strict: Boolean(flags.strict) });
+  const pages = result.pages ?? [];
+  const count = (k, v) => pages.filter((p) => p[k] === v).length;
+  const warnings = (result.diagnostics ?? []).filter((d) => d.level === "warning").length;
+  if (dryRun) {
+    console.log(`Preflight passed: ${count("action", "publish")} updates, ${count("action", "draft")} drafts, ${count("action", "unchanged")} unchanged, 0 conflicts, ${warnings} warning(s).`);
+    console.log("Dry run only; no pages were changed.");
+  } else {
+    for (const p of pages) if (p.outcome !== "unchanged") console.log(`  ${p.outcome}  ${localeLabel(p)}  (${p.path})`);
+    console.log(
+      `Pages push: ${result.pagesUpdated} updated, ${result.pagesSkipped} skipped, ${warnings} warning(s) ` +
+        `(only existing pages are updated — none created or deleted).`,
+    );
+  }
+  process.exit(code);
+}
+
+async function pagesPull(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.pagesPull);
+  const dir = resolve(positionals[0] ?? process.cwd());
+  const creds = requireCreds();
+  const { count, diagnostics } = await pullContent({ dir, url: creds.url, token: creds.token, scope: "pages" });
+  const code = reportPageDiagnostics(diagnostics, { strict: Boolean(flags.strict) });
+  console.log(`Downloaded ${count} page file(s) → ${dir}`);
+  process.exit(code);
+}
+
+async function pagesCheck(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.pagesCheck);
+  const dir = resolve(positionals[0] ?? process.cwd());
+  if (!existsSync(dir)) {
+    console.error(`Directory not found: ${dir}`);
+    process.exit(1);
+  }
+  const creds = loadCredentials();
+  const online = Boolean(creds?.url && creds?.token);
+  const r = await checkPages({ dir, ...(online ? { url: creds.url, token: creds.token } : {}) });
+  const code = reportPageDiagnostics(r.diagnostics, { strict: Boolean(flags.strict) });
+  const errors = r.diagnostics.filter((d) => d.level === "error").length;
+  console.log(`Checked ${r.fileCount} page file(s) ${r.online ? "(with the site's languages and a server dry run)" : "(offline — log in to also check against the site)"}: ${errors} error(s), ${r.diagnostics.length - errors} warning(s).`);
+  process.exit(code);
+}
+
+async function pagesMigrate(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.pagesMigrate);
+  if (flags["dry-run"] && flags.write) {
+    console.error("Use either --dry-run or --write, not both. Nothing was moved.");
+    process.exit(1);
+  }
+  const dir = resolve(positionals[0] ?? process.cwd());
+  if (!existsSync(dir)) {
+    console.error(`Directory not found: ${dir}`);
+    process.exit(1);
+  }
+  const creds = loadCredentials();
+  const online = Boolean(creds?.url && creds?.token);
+  const write = Boolean(flags.write);
+  const r = await migrateLayout({ dir, write, ...(online ? { url: creds.url, token: creds.token } : {}) });
+  const code = reportPageDiagnostics(r.diagnostics, { strict: Boolean(flags.strict) });
+  for (const m of r.moves) console.log(`  ${write && !r.refused ? "moved" : "move"}  ${m.from} → ${m.to}`);
+  if (r.refused) console.error(`Migration refused; no files were moved.`);
+  else if (write) console.log(`Moved ${r.moved} file(s) to the language-folder layout.`);
+  else console.log(`${r.moves.length} file(s) would move. Dry run only; run with --write to move them.`);
+  process.exit(r.refused ? 1 : code);
+}
+
 async function contentPush(scope, rest) {
   const { positionals } = parseArgsOrExit(rest, KNOWN.content);
   const dir = resolve(positionals[0] ?? process.cwd());
@@ -543,17 +669,10 @@ async function contentPush(scope, rest) {
   }
   const creds = requireCreds();
   const result = await pushContent({ dir, url: creds.url, token: creds.token, scope });
-  if (scope === "settings") {
-    console.log(
-      `Settings push: ${result.settingsUpdated ? "theme settings updated" : "theme settings unchanged"}, ` +
-        `${result.schemesUpserted} color scheme(s) upserted (${result.fileCount} file).`,
-    );
-  } else {
-    console.log(
-      `Pages push: ${result.pagesUpdated} updated, ${result.pagesSkipped} skipped ` +
-        `(only existing pages are updated — none created or deleted).`,
-    );
-  }
+  console.log(
+    `Settings push: ${result.settingsUpdated ? "theme settings updated" : "theme settings unchanged"}, ` +
+      `${result.schemesUpserted} color scheme(s) upserted (${result.fileCount} file).`,
+  );
 }
 
 async function contentPull(scope, rest) {
@@ -561,7 +680,7 @@ async function contentPull(scope, rest) {
   const dir = resolve(positionals[0] ?? process.cwd());
   const creds = requireCreds();
   const { count } = await pullContent({ dir, url: creds.url, token: creds.token, scope });
-  console.log(`Downloaded ${count} ${scope === "settings" ? "settings" : "page"} file(s) → ${dir}`);
+  console.log(`Downloaded ${count} settings file(s) → ${dir}`);
 }
 
 /** Resolve the v1 API pair (blcf_live_ key only) or exit 1 with guidance. Never prints the key. */
@@ -967,15 +1086,13 @@ if (first === "--version" || first === "-v") {
 } else if (first === "pages" && rest[0] === "media-decide") {
   pagesMediaDecide(rest.slice(1)).catch(exitForApiError);
 } else if (first === "pages" && rest[0] === "pull") {
-  contentPull("pages", rest.slice(1)).catch((error) => {
-    console.error(error?.message ?? error);
-    process.exit(1);
-  });
+  pagesPull(rest.slice(1)).catch(exitForPagesError);
 } else if (first === "pages" && rest[0] === "push") {
-  contentPush("pages", rest.slice(1)).catch((error) => {
-    console.error(error?.message ?? error);
-    process.exit(1);
-  });
+  pagesPush(rest.slice(1)).catch(exitForPagesError);
+} else if (first === "pages" && rest[0] === "check") {
+  pagesCheck(rest.slice(1)).catch(exitForPagesError);
+} else if (first === "pages" && rest[0] === "migrate-layout") {
+  pagesMigrate(rest.slice(1)).catch(exitForPagesError);
 } else if (first === "settings" && rest[0] === "pull") {
   contentPull("settings", rest.slice(1)).catch((error) => {
     console.error(error?.message ?? error);
