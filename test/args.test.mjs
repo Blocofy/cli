@@ -43,3 +43,17 @@ test("theme dev: --no-sync verilmezse flag yok (senkron varsayılan açık)", ()
   const { flags } = parseArgs(["theme"]);
   assert.ok(!flags["no-sync"]);
 });
+
+// 0.8.0: `login --api-key` DEĞERSİZ bir bayraktır — sır argv'ye girmez, gizli prompt'tan okunur. Bayrak
+// bir sonraki token'ı yutarsa `--api-key <değer>` sözdizimi kazara çalışır ve anahtar shell geçmişine düşer.
+test("login: --api-key sonraki token'ı YUTMAZ (--api-key mydir → true, positional mydir)", () => {
+  const { flags, positionals } = parseArgs(["--api-key", "mydir"]);
+  assert.equal(flags["api-key"], true);
+  assert.deepEqual(positionals, ["mydir"]);
+});
+
+test("pages: --json boolean flag, sayfa handle'ını yutmaz", () => {
+  const { flags, positionals } = parseArgs(["--json", "pg_1"]);
+  assert.equal(flags.json, true);
+  assert.deepEqual(positionals, ["pg_1"]);
+});
