@@ -376,3 +376,73 @@ test("page-like file names that would be silently skipped are reported (about.JS
   });
   rmSync(dir, { recursive: true, force: true });
 });
+
+// ── PS-19 PM remediation F1/F2 ────────────────────────────────────────────────────────────────────────────
+const INCOMPLETE = {
+  protocol_version: 2,
+  code: "PAGES_EXPORT_INCOMPLETE",
+  error: "2 published page(s) cannot be exported; nothing was exported.",
+  diagnostics: [
+    { level: "error", code: "PAGES_INVALID_LOCALE", message: "Page /about has no language", slug: "/about" },
+    { level: "error", code: "PAGES_INVALID_SLUG", message: "bad slug", slug: "bad" },
+  ],
+};
+function incompleteServer() {
+  const orig = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify(INCOMPLETE), { status: 422 });
+  return () => (globalThis.fetch = orig);
+}
+
+test("F2: an incomplete export (422) → PAGES_EXPORT_INCOMPLETE with EVERY diagnostic, destination unchanged", async () => {
+  const dir = tmp();
+  put(dir, "pages/tr-TR/index.json", "ORIGINAL");
+  const before = snapshot(dir);
+  const restore = incompleteServer();
+  try {
+    await assert.rejects(pullContent({ dir, ...creds, scope: "pages" }), (e) => {
+      assert.equal(e.code, "PAGES_EXPORT_INCOMPLETE");
+      assert.deepEqual(e.diagnostics.map((d) => d.code), ["PAGES_INVALID_LOCALE", "PAGES_INVALID_SLUG"]);
+      return true;
+    });
+    assert.deepEqual(snapshot(dir), before);
+  } finally {
+    restore();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("F2: the 0.8.0 client's pull (frozen copy) also writes nothing on the same 422", async () => {
+  // Byte-for-byte the pull loop of Blocofy/cli 611aeee lib/content-sync.mjs: status check, then write every path.
+  async function legacyPull({ dir, url, token, scope }) {
+    const res = await fetch(`${url}/api/dev/content?scope=${encodeURIComponent(scope)}`, { headers: { authorization: `Bearer ${token}` } });
+    if (!res.ok) throw new Error(await res.text());
+    const { files } = await res.json();
+    for (const [path, content] of Object.entries(files ?? {})) put(dir, path, content);
+  }
+  const dir = tmp();
+  put(dir, "pages/index.json", "ORIGINAL");
+  const before = snapshot(dir);
+  const restore = incompleteServer();
+  try {
+    await assert.rejects(legacyPull({ dir, ...creds, scope: "pages" }));
+    assert.deepEqual(snapshot(dir), before);
+  } finally {
+    restore();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("F1: settings pull works against a v2 server's settings-only response (no page-scoped fields)", async () => {
+  const dir = tmp();
+  const orig = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ protocol_version: 2, files: { "config/settings.json": '{"theme":{}}' }, diagnostics: [] }), { status: 200 });
+  try {
+    const { count, diagnostics } = await pullContent({ dir, ...creds, scope: "settings" });
+    assert.equal(count, 1);
+    assert.deepEqual(diagnostics, []);
+    assert.equal(readFileSync(join(dir, "config", "settings.json"), "utf8"), '{"theme":{}}');
+  } finally {
+    globalThis.fetch = orig;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

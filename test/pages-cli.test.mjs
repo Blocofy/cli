@@ -151,3 +151,27 @@ test("unknown flag on a pages command is refused without writing", () => {
   assert.ok(existsSync(join(dir, "pages", "about.json")));
   rmSync(dir, { recursive: true, force: true });
 });
+
+test("F2: pages pull against an incomplete export prints every diagnostic, exits 1 and writes nothing", async () => {
+  const server = createServer((req, res) => {
+    res.writeHead(422, { "content-type": "application/json" });
+    res.end(JSON.stringify({ protocol_version: 2, code: "PAGES_EXPORT_INCOMPLETE", error: "2 published page(s) cannot be exported; nothing was exported.", diagnostics: [
+      { level: "error", code: "PAGES_INVALID_LOCALE", message: "Page /about has no language", slug: "/about" },
+      { level: "error", code: "PAGES_INVALID_SLUG", message: "bad slug", slug: "bad" },
+    ] }));
+  });
+  server.listen(0);
+  await once(server, "listening");
+  const dir = site({});
+  try {
+    const r = await runAsync(["pages", "pull", dir], { BLOCOFY_URL: `http://127.0.0.1:${server.address().port}`, BLOCOFY_TOKEN: "bcf_" + "x".repeat(30) });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /PAGES_INVALID_LOCALE/);
+    assert.match(r.stderr, /PAGES_INVALID_SLUG/);
+    assert.match(r.stderr, /nothing was exported/);
+    assert.ok(!existsSync(join(dir, "pages")));
+  } finally {
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
