@@ -578,7 +578,15 @@ async function linkCommand(rest) {
   const identity = await verifyTarget({ resolved, secrets, binding: null, retry });
   for (const w of identity.warnings ?? []) printWarning(w, { json: JSON_MODE });
 
-  const own = existsSync(join(dir, ".blocofy", "project.json")) ? findBinding(dir) : null;
+  let own = null;
+  if (existsSync(join(dir, ".blocofy", "project.json"))) {
+    try {
+      own = findBinding(dir);
+    } catch (error) {
+      // Review M2: --adopt replaces an unreadable binding (the TARGET_BINDING_INVALID message recommends it).
+      if (!(flags.adopt && error instanceof TargetError && error.code === "TARGET_BINDING_INVALID")) throw error;
+    }
+  }
   const ownOrigin = own ? compareOrigin(own.project.platform_origin, identity.platformOrigin) : "match";
   if (own && (String(own.project.site_id) !== String(identity.site.id) || (ownOrigin !== "match" && ownOrigin !== "upgrade")) && !flags.adopt) {
     throw new TargetError(
@@ -587,7 +595,8 @@ async function linkCommand(rest) {
       { dir, binding_site_id: own.project.site_id, remote_site_id: identity.site.id },
     );
   }
-  const projectPath = writeBinding(dir, { site: identity.site, platformOrigin: identity.platformOrigin, contextName: resolved.name });
+  // Review M3: an env-context link owns no local.json; a stale one (naming another context) is removed.
+  const projectPath = writeBinding(dir, { site: identity.site, platformOrigin: identity.platformOrigin, contextName: resolved.name, staleLocal: true });
   recordVerifiedSite(resolved, identity);
   console.log(`✓ Bound ${dir} to ${siteLabel(identity.site) || identity.site.id} (${identity.site.id}) via context "${resolved.name}".`);
   console.log(`  ${relative(process.cwd(), projectPath) || projectPath} — commit it; .blocofy/local.json stays private (git-ignored).`);

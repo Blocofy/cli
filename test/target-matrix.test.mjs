@@ -706,6 +706,32 @@ test("[25] review M1: `theme pull --draft` (provisions a server draft) into an u
   assert.equal(A.state.mutations, 0);
 });
 
+test("[26] review M2: `link --adopt` repairs a corrupt project.json (the refusal message recommends exactly that)", async () => {
+  const { home } = await world();
+  const dir = tmp("bcf-mx-corruptbind-");
+  mkdirSync(join(dir, ".blocofy"));
+  writeFileSync(join(dir, ".blocofy", "project.json"), "{ not json");
+  resetSites();
+  const refused = await run(home, ["link", dir, "--context", "alpha", "--json"]);
+  assert.equal(refused.code, 3, refused.stderr);
+  assert.equal(jsonError(refused).code, "TARGET_BINDING_INVALID");
+  assert.match(jsonError(refused).message, /--adopt/);
+  const adopted = await run(home, ["link", dir, "--context", "alpha", "--adopt"]);
+  assert.equal(adopted.code, 0, adopted.stderr);
+  assert.equal(JSON.parse(readFileSync(join(dir, ".blocofy", "project.json"), "utf8")).site_id, "sA1");
+});
+
+test("[27] review M3: `link --adopt` with env credentials removes a stale local.json (which would otherwise pick another context)", async () => {
+  const { home } = await world();
+  const dir = tmp("bcf-mx-stalelocal-");
+  writeBinding(dir, { siteId: "sB2", slug: "beta", context: "beta" });
+  resetSites();
+  const r = await run(home, ["link", dir, "--adopt"], { env: { BLOCOFY_URL: A.url, BLOCOFY_TOKEN: SECRETS.A.token } });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(JSON.parse(readFileSync(join(dir, ".blocofy", "project.json"), "utf8")).site_id, "sA1");
+  assert.equal(existsSync(join(dir, ".blocofy", "local.json")), false, "stale local.json (context beta) survived");
+});
+
 test("[18] secret leakage scan: every captured stdout/stderr and every file written outside the secret stores", () => {
   assert.ok(OUTPUTS.length > 50, `only ${OUTPUTS.length} outputs captured`);
   for (const o of OUTPUTS) {
