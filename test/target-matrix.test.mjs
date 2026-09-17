@@ -694,6 +694,18 @@ test("[24] review I4c: `status` and `target` refuse a mismatch end-to-end inside
   }
 });
 
+test("[25] review M1: `theme pull --draft` (provisions a server draft) into an unbound empty dir → TARGET_BINDING_REQUIRED, zero requests", async () => {
+  const { home } = await world();
+  const fresh = join(tmp("bcf-mx-draft-"), "theme");
+  resetSites();
+  assertRefused(await run(home, ["theme", "pull", fresh, "--draft", "--context", "alpha", "--json"]), "TARGET_BINDING_REQUIRED", { hashes: [[fresh, "missing"]] });
+  // A live pull into the same empty dir still binds it.
+  resetSites();
+  const live = await run(home, ["theme", "pull", fresh, "--context", "alpha"]);
+  assert.equal(live.code, 0, live.stderr);
+  assert.equal(A.state.mutations, 0);
+});
+
 test("[18] secret leakage scan: every captured stdout/stderr and every file written outside the secret stores", () => {
   assert.ok(OUTPUTS.length > 50, `only ${OUTPUTS.length} outputs captured`);
   for (const o of OUTPUTS) {

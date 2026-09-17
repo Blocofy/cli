@@ -137,7 +137,8 @@ Usage
 
   blocofy theme pull [dir] [--draft] [--instance <handle>]
       Download the live theme to disk. (dir defaults to cwd)
-        --draft      pull the draft theme (what 'theme dev' syncs into) instead of live
+        --draft      pull the draft theme (what 'theme dev' syncs into) instead of live;
+                     creates the draft if missing, so it needs a bound project
         --instance <handle>  pull a specific theme by its handle (from the admin
                              panel theme card, or \`blocofy status\`)
 
@@ -697,7 +698,8 @@ async function themePull(rest) {
   const draft = Boolean(flags.draft);
   const instance = typeof flags.instance === "string" ? flags.instance : null;
   const what = instance ? `instance ${instance}` : draft ? "draft" : "live";
-  const target = await prepareTarget({ command: "theme pull", commandClass: "local-write", dir, flags, needs: "dev", mode: what });
+  // Review M1: a draft pull provisions the draft server-side (`?draft=1`), so it is a remote mutation: binding required.
+  const target = await prepareTarget({ command: draft ? "theme pull --draft" : "theme pull", commandClass: draft ? "remote-mutation" : "local-write", dir, flags, needs: "dev", mode: what });
   const { count } = await pullTheme({ dir, url: target.dev.url, token: target.dev.token, draft, instance, onRetry });
   console.log(`Downloaded ${count} ${what} theme files → ${dir}`);
   bindAfterPull(target, dir);
