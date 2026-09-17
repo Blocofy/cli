@@ -153,3 +153,14 @@ test("usage and local refusals: unknown flag and a local pages preflight error p
   assert.ok(Array.isArray(error.details.diagnostics) && error.details.diagnostics.length > 0);
   assert.ok(!s.reqs.includes("POST /api/dev/content"), "nothing was sent");
 });
+
+test("review M7: a generic server error that echoes the token is redacted, with and without --json", async () => {
+  const dir = project();
+  const s = await fakeSite({ "POST /api/dev/publish": { status: 400, body: { error: `bad token ${TOKEN}` } } });
+  for (const extra of [[], ["--json"]]) {
+    const r = await run(["theme", "publish", "--instance", "t2", ...extra], { url: s.url, cwd: dir });
+    assert.equal(r.code, 2, r.stderr);
+    assert.ok(!r.stderr.includes(TOKEN), `token leaked ${extra.join(" ")}`);
+    assert.match(r.stderr, /bad token \[redacted\]/);
+  }
+});
