@@ -573,7 +573,8 @@ function exitForPagesError(error) {
   if (error instanceof PagesCliError) {
     if (error.diagnostics?.length) reportPageDiagnostics(error.diagnostics);
     else console.error(`error [${error.code}]:\n    ${error.message}`);
-    if (error.diagnostics?.length) console.error(`\n${error.message}`);
+    // The stable top code always prints, after the individual findings it summarises.
+    if (error.diagnostics?.length) console.error(`\nerror [${error.code}]:\n    ${error.message}`);
     if (Array.isArray(error.pages) && error.pages.length) {
       console.error("Per-file result:");
       for (const p of error.pages) console.error(`  ${p.outcome ?? p.action}  ${p.path}`);

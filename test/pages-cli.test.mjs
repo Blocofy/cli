@@ -168,6 +168,7 @@ test("F2: pages pull against an incomplete export prints every diagnostic, exits
     assert.equal(r.status, 1);
     assert.match(r.stderr, /PAGES_INVALID_LOCALE/);
     assert.match(r.stderr, /PAGES_INVALID_SLUG/);
+    assert.match(r.stderr, /error \[PAGES_EXPORT_INCOMPLETE\]/);
     assert.match(r.stderr, /nothing was exported/);
     assert.ok(!existsSync(join(dir, "pages")));
   } finally {
