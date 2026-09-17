@@ -88,6 +88,17 @@ async function fakePlatform({ cas = true, pages: initial } = {}) {
     const injected = state.fail[kind].shift();
     if (injected) return json(res, injected, { error: "busy" }, { "retry-after": state.retryAfter });
 
+    // CF-T3 gap (review): the real (non-dry) apply can itself fail mid-batch — a page changes on the
+    // server in the window between the dry run and the real POST actually reaching that page's row,
+    // after some earlier rows already committed. Tests set this to return that canned partial response
+    // once instead of running the normal apply loop.
+    if (!body.dry_run && state.realOverride) {
+      const override = state.realOverride;
+      state.realOverride = null;
+      const { status, body: outBody } = override(body);
+      return json(res, status, outBody);
+    }
+
     if (!cas) {
       const rows = Object.keys(body.files).map((path) => {
         const p = state.pages.find((x) => x.path === path);
@@ -352,6 +363,92 @@ test("row 9: the site changes between the dry run and the push → PAGES_PLAN_ST
     assert.match(r.stderr, /PAGES_PLAN_STALE/);
     assert.match(r.stderr, /site changed between the plan and the push/);
     assert.equal(fake.applied, undefined);
+  } finally {
+    fake.close();
+  }
+});
+
+test("row 9b (CF-T3 review gap): the dry run passes but the real push itself 409s mid-apply (partial outcome) — exit 2, per-file result incl. not_applied, no retry", async () => {
+  const fake = await fakePlatform();
+  try {
+    const dir = await pulledProject(fake, {
+      "pages/en-US/index.json": "Home v2",
+      "pages/en-US/routes/about/index.json": "About v2",
+    });
+    fake.realOverride = () => ({
+      status: 409,
+      body: {
+        ok: false,
+        protocol_version: 2,
+        code: "PAGES_REVISION_CONFLICT",
+        error: "1 page changed on the server while this push was being applied; some pages were already updated.",
+        pages: [
+          { path: "pages/en-US/index.json", locale: "en-US", slug: "/", outcome: "published" },
+          { path: "pages/en-US/routes/about/index.json", locale: "en-US", slug: "/about", outcome: "not_applied" },
+        ],
+        diagnostics: [
+          {
+            level: "error",
+            code: "PAGES_REVISION_CONFLICT",
+            message: "the page changed on the server since this file was pulled",
+            path: "pages/en-US/routes/about/index.json",
+            locale: "en-US",
+            slug: "/about",
+          },
+        ],
+      },
+    });
+    const r = await run(["pages", "push", dir], fake.url);
+    assert.equal(r.status, 2, r.stderr);
+    assert.deepEqual(fake.posts.map((p) => p.kind), ["dry", "real"], "409 is not retried");
+    assert.match(r.stderr, /PAGES_REVISION_CONFLICT/);
+    assert.match(r.stderr, /Per-file result:/);
+    assert.match(r.stderr, /published\s+pages\/en-US\/index\.json/);
+    assert.match(r.stderr, /not_applied\s+pages\/en-US\/routes\/about\/index\.json/);
+  } finally {
+    fake.close();
+  }
+});
+
+test("row 9c: same mid-apply 409 under --json — envelope is the last stderr line, stdout empty, no retry", async () => {
+  const fake = await fakePlatform();
+  try {
+    const dir = await pulledProject(fake, {
+      "pages/en-US/index.json": "Home v2",
+      "pages/en-US/routes/about/index.json": "About v2",
+    });
+    fake.realOverride = () => ({
+      status: 409,
+      body: {
+        ok: false,
+        protocol_version: 2,
+        code: "PAGES_REVISION_CONFLICT",
+        error: "1 page changed on the server while this push was being applied; some pages were already updated.",
+        pages: [
+          { path: "pages/en-US/index.json", locale: "en-US", slug: "/", outcome: "published" },
+          { path: "pages/en-US/routes/about/index.json", locale: "en-US", slug: "/about", outcome: "not_applied" },
+        ],
+        diagnostics: [
+          {
+            level: "error",
+            code: "PAGES_REVISION_CONFLICT",
+            message: "the page changed on the server since this file was pulled",
+            path: "pages/en-US/routes/about/index.json",
+            locale: "en-US",
+            slug: "/about",
+          },
+        ],
+      },
+    });
+    const r = await run(["pages", "push", dir, "--json"], fake.url);
+    assert.equal(r.status, 2, r.stderr);
+    assert.equal(r.stdout, "");
+    assert.deepEqual(fake.posts.map((p) => p.kind), ["dry", "real"], "409 is not retried");
+    const lines = r.stderr.trim().split("\n");
+    const env = JSON.parse(lines[lines.length - 1]).error;
+    assert.equal(env.code, "PAGES_REVISION_CONFLICT");
+    assert.equal(env.details.pages.find((p) => p.outcome === "not_applied").path, "pages/en-US/routes/about/index.json");
+    assert.equal(env.details.pages.find((p) => p.outcome === "published").path, "pages/en-US/index.json");
   } finally {
     fake.close();
   }
