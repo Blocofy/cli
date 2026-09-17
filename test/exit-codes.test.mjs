@@ -109,7 +109,7 @@ test("theme publish: 409 → exit 2 with envelope; 4× 503 → exit 1 after retr
 test("settings push 422 → exit 2; theme rename 404 → exit 2; status network reset → exit 1 NETWORK_ERROR", async () => {
   const dir = project();
   const s = await fakeSite({ "POST /api/dev/content": { status: 422, body: { error: "invalid settings" } } });
-  const r = await run(["settings", "push", dir, "--json"], { url: s.url, cwd: dir });
+  const r = await run(["settings", "push", dir, "--live", "--yes", "--json"], { url: s.url, cwd: dir });
   assert.equal(r.code, 2, r.stderr);
   assert.equal(lastEnvelope(r).error.message, "invalid settings");
 

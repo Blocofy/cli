@@ -344,7 +344,7 @@ test("[6] project A dir + context beta push/publish/rename/media-decide → refu
     ["theme", "push", projA, "--live", "--yes"],
     ["theme", "push", projA, "--prune", "--yes"],
     ["pages", "push", projA],
-    ["settings", "push", projA],
+    ["settings", "push", projA, "--live", "--yes"],
     ["theme", "publish"],
     ["theme", "rename", "tAlive", "New"],
     ["pages", "media-decide", "pgA", "--decisions", decisions],
@@ -446,7 +446,7 @@ test("[11] CI: env credentials, no binding → mutation and non-empty pull refus
   const loose = tmp("bcf-mx-loose-");
   writeTheme(loose, "A");
   const before = treeHash(loose);
-  for (const args of [["theme", "push", loose, "--live", "--yes"], ["pages", "push", loose], ["settings", "push", loose], ["theme", "pull", loose], ["pages", "pull", loose]]) {
+  for (const args of [["theme", "push", loose, "--live", "--yes"], ["pages", "push", loose], ["settings", "push", loose, "--live", "--yes"], ["theme", "pull", loose], ["pages", "pull", loose]]) {
     resetSites();
     assertRefused(await run(home, [...args, "--json"], { env }), "TARGET_BINDING_REQUIRED", { hashes: [[loose, before]] });
   }

@@ -73,6 +73,7 @@ const KNOWN = {
   themePublish: ["instance"],
   themeRename: ["name"],
   content: [],
+  settingsPush: ["instance", "live", "yes", "confirm"],
   pagesPull: ["strict"],
   pagesPush: ["dry-run", "strict", "force", "reason"],
   pagesCheck: ["strict"],
@@ -235,8 +236,14 @@ Usage
       1 usage/auth/network/5xx; 2 the server refused (4xx) — the {error} JSON
       is printed to stderr.
 
-  blocofy settings pull [dir] / settings push [dir]
+  blocofy settings pull [dir]
+  blocofy settings push [dir] (--instance <handle> | --live [--yes])
       Download / upload config/settings.json (theme tokens/settings + color schemes).
+      A push names its target (no implicit live write):
+        --instance <handle>  write that theme's settings; a draft shows them in its preview
+                             and goes live with 'blocofy theme publish --instance <handle>'
+        --live       write the LIVE theme (asks to confirm; non-interactive shells add --yes)
+      After a push the CLI says where it applied (preview now / live now / after deploy).
 
   blocofy --version
   blocofy --help
@@ -1140,19 +1147,66 @@ async function pagesMigrate(rest) {
 }
 
 async function contentPush(scope, rest) {
-  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.content);
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.settingsPush);
   const dir = resolve(positionals[0] ?? process.cwd());
+  // T10.1 "never implicitly live": the target is named — a theme handle or an explicit --live. Refused before any request.
+  if (flags.instance === true || flags.instance === "") {
+    console.error("--instance needs a theme handle (from the admin panel theme card, or `blocofy status`). Nothing was sent.");
+    process.exit(1);
+  }
+  const instance = typeof flags.instance === "string" ? flags.instance : null;
+  if (instance && flags.live) {
+    console.error("Pass either --instance <handle> or --live, not both. Nothing was sent.");
+    process.exit(1);
+  }
+  if (!instance && !flags.live) {
+    console.error("settings push needs a target. Nothing was sent.");
+    console.error("  --instance <handle>  write a specific theme (a draft stays out of the live site until published)");
+    console.error("  --live               write the LIVE theme (asks to confirm; non-interactive shells add --yes)");
+    process.exit(1);
+  }
   if (!existsSync(dir)) {
     console.error(`Directory not found: ${dir}`);
     process.exit(1);
   }
-  const target = await prepareTarget({ command: `${scope} push`, commandClass: "remote-mutation", dir, flags, needs: "dev", mode: "live" });
+  const target = await prepareTarget({ command: `${scope} push`, commandClass: "remote-mutation", dir, flags, needs: "dev", mode: instance ? `instance ${instance}` : "live" });
   const creds = target.dev;
-  const result = await pushContent({ dir, url: creds.url, token: creds.token, scope, onRetry });
+  if (!instance) {
+    const siteName = siteLabel(target.identity.site) || String(target.identity.site.id);
+    const decision = livePushDecision({ draft: false, yes: Boolean(flags.yes), confirm: Boolean(flags.confirm), isTTY: Boolean(process.stdin.isTTY) });
+    if (decision.mustAbort) {
+      console.error(`⚠ 'settings push --live' writes the theme settings of the LIVE theme of ${siteName}.`);
+      console.error("  Non-interactive shell: pass --live --yes to confirm, or target a draft with --instance <handle>. Nothing was sent.");
+      process.exit(1);
+    }
+    if (decision.needsPrompt) {
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      let answer;
+      try {
+        answer = await rl.question(`⚠ Push settings to the LIVE theme of ${siteName}? [y/N] `);
+      } finally {
+        rl.close();
+      }
+      if (!isAffirmative(answer)) {
+        console.error("Aborted. Nothing was sent.");
+        process.exit(1);
+      }
+    }
+  }
+  const result = await pushContent({ dir, url: creds.url, token: creds.token, scope, instance, onRetry });
   console.log(
     `Settings push: ${result.settingsUpdated ? "theme settings updated" : "theme settings unchanged"}, ` +
       `${result.schemesUpserted} color scheme(s) upserted (${result.fileCount} file).`,
   );
+  // T10.1 — where the write is visible (an older server sends none of these fields).
+  const h = result.instance ?? instance;
+  if (result.live_requires === "theme_publish") {
+    console.log(`Applied to draft theme ${h} — visible in its preview; not live until \`blocofy theme publish --instance ${h}\`.`);
+  } else if (result.live_requires === "theme_deploy") {
+    console.log(`Saved; the live site shows it after the next theme deploy/publish (live_applied: false). Visible in the preview now.`);
+  } else if (result.live_applied === true) {
+    console.log(`Applied to the live theme${h ? ` ${h}` : ""} — live now.`);
+  }
 }
 
 async function contentPull(scope, rest) {
