@@ -33,6 +33,7 @@ import { printError, printTarget, printWarning, redact, registerSecret, targetDa
 import {
   CONTEXT_NAME_RE,
   TargetError,
+  claimNewBinding,
   compareOrigin,
   enforceBindingPolicy,
   findBinding,
@@ -693,6 +694,21 @@ async function prepareTarget({ command, commandClass, dir, flags, needs, mode, r
   };
 }
 
+/**
+ * Review M4: a pull into a new directory claims the binding exclusively BEFORE fetching/writing content; the claim is
+ * released if the pull fails. `fn` performs the pull.
+ */
+async function withNewBindingClaim(target, dir, fn) {
+  if (!target.newBinding) return fn();
+  const claim = claimNewBinding(dir, { site: target.identity.site, platformOrigin: target.identity.platformOrigin });
+  try {
+    return await fn();
+  } catch (error) {
+    claim.release();
+    throw error;
+  }
+}
+
 /** After a successful pull into a new directory: record provenance (project.json + local.json + .gitignore). */
 function bindAfterPull(target, dir) {
   if (!target.newBinding) return;
@@ -709,7 +725,7 @@ async function themePull(rest) {
   const what = instance ? `instance ${instance}` : draft ? "draft" : "live";
   // Review M1: a draft pull provisions the draft server-side (`?draft=1`), so it is a remote mutation: binding required.
   const target = await prepareTarget({ command: draft ? "theme pull --draft" : "theme pull", commandClass: draft ? "remote-mutation" : "local-write", dir, flags, needs: "dev", mode: what });
-  const { count } = await pullTheme({ dir, url: target.dev.url, token: target.dev.token, draft, instance, onRetry });
+  const { count } = await withNewBindingClaim(target, dir, () => pullTheme({ dir, url: target.dev.url, token: target.dev.token, draft, instance, onRetry }));
   console.log(`Downloaded ${count} ${what} theme files → ${dir}`);
   bindAfterPull(target, dir);
 }
@@ -978,7 +994,7 @@ async function pagesPull(rest) {
   const dir = resolve(positionals[0] ?? process.cwd());
   const target = await prepareTarget({ command: "pages pull", commandClass: "local-write", dir, flags, needs: "dev", mode: "published pages" });
   const creds = target.dev;
-  const { count, diagnostics } = await pullContent({ dir, url: creds.url, token: creds.token, scope: "pages", onRetry });
+  const { count, diagnostics } = await withNewBindingClaim(target, dir, () => pullContent({ dir, url: creds.url, token: creds.token, scope: "pages", onRetry }));
   const code = reportPageDiagnostics(diagnostics, { strict: Boolean(flags.strict) });
   console.log(`Downloaded ${count} page file(s) → ${dir}`);
   bindAfterPull(target, dir);
@@ -1045,7 +1061,7 @@ async function contentPull(scope, rest) {
   const dir = resolve(positionals[0] ?? process.cwd());
   const target = await prepareTarget({ command: `${scope} pull`, commandClass: "local-write", dir, flags, needs: "dev", mode: "live" });
   const creds = target.dev;
-  const { count } = await pullContent({ dir, url: creds.url, token: creds.token, scope, onRetry });
+  const { count } = await withNewBindingClaim(target, dir, () => pullContent({ dir, url: creds.url, token: creds.token, scope, onRetry }));
   console.log(`Downloaded ${count} settings file(s) → ${dir}`);
   bindAfterPull(target, dir);
 }

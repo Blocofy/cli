@@ -39,7 +39,7 @@ const pageV2 = (label) => JSON.stringify({ format_version: 2, slug: "/", locale:
 
 function fakeSite(key, { id, slug, name }) {
   const s = SECRETS[key];
-  const state = { requests: [], mutations: 0, whoami: "ok", ping: "ok", platformOrigin: ORIGIN, url: null, themeFiles: null, identitySite: null };
+  const state = { requests: [], mutations: 0, whoami: "ok", ping: "ok", platformOrigin: ORIGIN, url: null, themeFiles: null, identitySite: null, whoamiDelayMs: 0 };
   const json = (res, status, body, headers = {}) => {
     res.writeHead(status, { "content-type": "application/json", ...headers });
     res.end(typeof body === "string" ? body : JSON.stringify(body));
@@ -57,6 +57,7 @@ function fakeSite(key, { id, slug, name }) {
     const site = { id, slug, name, domain: `${slug}.myblocofy.test` };
     const identity = state.identitySite ?? site;
     if (url.pathname === "/api/dev/whoami") {
+      if (state.whoamiDelayMs) await new Promise((r) => setTimeout(r, state.whoamiDelayMs));
       if (state.whoami === "down") return json(res, 503, { error: "unavailable" }, { "retry-after": "0" });
       if (state.whoami === "malformed") return json(res, 200, "<html>not json</html>");
       return json(res, 200, { site: identity, liveThemeId: `t${key}live`, platform_origin: state.platformOrigin });
@@ -112,6 +113,7 @@ function fakeSite(key, { id, slug, name }) {
       state.ping = "ok";
       state.themeFiles = null;
       state.identitySite = null;
+      state.whoamiDelayMs = 0;
     },
     async start() {
       server.listen(0, "127.0.0.1");
@@ -730,6 +732,22 @@ test("[27] review M3: `link --adopt` with env credentials removes a stale local.
   assert.equal(r.code, 0, r.stderr);
   assert.equal(JSON.parse(readFileSync(join(dir, ".blocofy", "project.json"), "utf8")).site_id, "sA1");
   assert.equal(existsSync(join(dir, ".blocofy", "local.json")), false, "stale local.json (context beta) survived");
+});
+
+test("[28] review M4: two pulls into the same empty dir for different sites — the later one refuses on the claimed binding, zero writes of its own", async () => {
+  const { home } = await world();
+  const fresh = join(tmp("bcf-mx-race-"), "site");
+  B.state.whoamiDelayMs = 1500; // B passes the empty-dir check, then stalls on its identity read
+  const slow = run(home, ["theme", "pull", fresh, "--context", "beta", "--json"]);
+  while (count(B, "GET", "/api/dev/whoami") === 0) await new Promise((r) => setTimeout(r, 20));
+  const fast = await run(home, ["theme", "pull", fresh, "--context", "alpha"]);
+  const late = await slow;
+  assert.equal(fast.code, 0, fast.stderr);
+  assert.equal(late.code, 3, late.stderr);
+  assert.equal(jsonError(late).code, "TARGET_SITE_MISMATCH");
+  assert.equal(JSON.parse(readFileSync(join(fresh, ".blocofy", "project.json"), "utf8")).site_id, "sA1");
+  assert.equal(readFileSync(join(fresh, "layout", "theme.liquid"), "utf8"), "<html>A</html>");
+  assert.equal(count(B, "GET", "/api/dev/theme"), 0, "the refused pull fetched nothing");
 });
 
 test("[18] secret leakage scan: every captured stdout/stderr and every file written outside the secret stores", () => {
