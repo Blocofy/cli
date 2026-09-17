@@ -193,3 +193,35 @@ test("F2: pages pull against an incomplete export prints every diagnostic, exits
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("CF-T3: pages push against 4 consecutive 503 → exit 1; every POST attempt carries the same x-idempotency-key and identical body; retries announced", async () => {
+  const posts = [];
+  const server = createServer(async (req, res) => {
+    if (whoami(req, res)) return;
+    let raw = "";
+    for await (const c of req) raw += c;
+    if (req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ protocol_version: 2, page_layout_version: 2, default_locale: "en-US", supported_locales: ["en-US"], files: {}, diagnostics: [] }));
+      return;
+    }
+    posts.push({ key: req.headers["x-idempotency-key"], body: raw });
+    res.writeHead(503, { "content-type": "application/json", "retry-after": "0" });
+    res.end(JSON.stringify({ error: "busy" }));
+  });
+  server.listen(0);
+  await once(server, "listening");
+  const dir = site({ "pages/en-US/index.json": v2("en-US", "/") });
+  bind(dir);
+  try {
+    const r = await runAsync(["pages", "push", dir], { BLOCOFY_URL: `http://127.0.0.1:${server.address().port}`, BLOCOFY_TOKEN: "bcf_" + "x".repeat(30) });
+    assert.equal(r.status, 1, r.stderr);
+    assert.equal(posts.length, 4, "1 attempt + 3 retries, no more");
+    assert.match(posts[0].key, /^cli-[0-9a-f-]{36}$/);
+    assert.ok(posts.every((p) => p.key === posts[0].key && p.body === posts[0].body), "a retry must resend the identical request");
+    assert.equal((r.stderr.match(/retrying/g) ?? []).length, 3);
+  } finally {
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

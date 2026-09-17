@@ -211,8 +211,10 @@ Usage
       decorative?, idempotency_key?, witness? } ] } (max 20). Without the two --expected-*
       flags the CLI first GETs the draft and uses its current revision id/version; items
       without an idempotency_key get a random UUID.
+      Transient failures (429/502/503/504, network) are retried: every item carries an
+      idempotency key before the first attempt, so a retry replays the same batch.
       Exit codes: 0 applied (or "No changes" when every item was already recorded);
-      1 usage/auth/network/5xx (no retry); 2 the server refused (4xx) — the {error} JSON
+      1 usage/auth/network/5xx; 2 the server refused (4xx) — the {error} JSON
       is printed to stderr.
 
   blocofy settings pull [dir] / settings push [dir]
@@ -244,6 +246,9 @@ Targets (which site a command talks to)
   serve a binding that records one (TARGET_UNVERIFIED).
   Exit codes: 0 ok · 1 usage/network/5xx · 2 server refusal (4xx) · 3 target/binding refusal.
   --json prints refusals as {"error":{"code","message","details"}}.
+  Retries: network errors and HTTP 429/502/503/504 are retried up to 3 times (Retry-After honoured,
+  max 30s per wait; else 0.3s/0.9s/2s), resending the identical request (pages push carries one
+  x-idempotency-key per push). HTTP 500 is never retried. Each retry prints a notice on stderr.
 
 Auth: ~/.blocofy/credentials.json (contexts, no secrets) + ~/.blocofy/secrets.json (0600) or the
 macOS keychain. A pre-0.10 credentials file is migrated on first use (backup:
@@ -266,6 +271,9 @@ async function promptValid(rl, question, normalize, valid, hint, tries = 3) {
 // ── contexts, login, binding (CF-T1/T2, contract C1/C2) ─────────────────────────────────────────────────────
 
 const JSON_MODE = args.includes("--json");
+/** CF-T3: every retried request (lib/http.mjs) announces itself on stderr — never silent. */
+const onRetry = (info) => console.error(retryNotice(info));
+const retry = { onRetry };
 
 /** Refusals (TargetError / CredentialsError) → envelope on stderr + their exit code; anything else → null. */
 function exitForTargetError(error) {
@@ -307,11 +315,11 @@ async function assertPairFitsContext(name, existing, identity, otherKind) {
   const secrets = readSecrets(name, existing);
   if (otherKind === "dev" && secrets.devToken) {
     registerSecret(secrets.devToken);
-    const other = await verifyDev({ url: existing.dev.url, token: secrets.devToken });
+    const other = await verifyDev({ url: existing.dev.url, token: secrets.devToken, retry });
     if (String(other.site.id) !== String(identity.site.id) || other.platformOrigin !== identity.platformOrigin) mismatch(other.site);
   } else if (otherKind === "api" && secrets.apiKey) {
     registerSecret(secrets.apiKey);
-    const other = await verifyApi({ url: existing.api.url, apiKey: secrets.apiKey });
+    const other = await verifyApi({ url: existing.api.url, apiKey: secrets.apiKey, retry });
     if (String(other.site.id) !== String(identity.site.id) || other.platformOrigin !== identity.platformOrigin) mismatch(other.site);
   }
 }
@@ -380,7 +388,7 @@ async function loginApiKey(flags, positionals) {
   registerSecret(apiKey);
   const storeName = defaultSecretStoreName({ keychain: Boolean(flags.keychain) });
 
-  const identity = await verifyApi({ url: apiUrl, apiKey });
+  const identity = await verifyApi({ url: apiUrl, apiKey, retry });
   const name = contextNameOrExit(typeof flags.context === "string" ? flags.context : identity.site.slug ?? "");
   await assertPairFitsContext(name, loadStore().contexts[name], identity, "dev");
   saveVerifiedPair(name, "api", { url: apiUrl, secret: apiKey, identity, storeName });
@@ -444,7 +452,7 @@ async function login(rest) {
 
   // CF-T1: the token's REAL site (resolved server-side from the token) must be verified BEFORE saving — a
   // wrong-tenant token or an unreachable platform saves nothing (TARGET_UNVERIFIED, exit 3).
-  const identity = await verifyDev({ url, token });
+  const identity = await verifyDev({ url, token, retry });
   const name = contextNameOrExit(typeof flags.context === "string" ? flags.context : identity.site.slug);
   await assertPairFitsContext(name, loadStore().contexts[name], identity, "api");
   saveVerifiedPair(name, "dev", { url, secret: token, identity, storeName });
@@ -520,7 +528,7 @@ async function linkCommand(rest) {
   const secrets = resolved.env ? resolved.env.secrets : readSecrets(resolved.name, resolved.context);
   registerSecret(secrets.devToken);
   registerSecret(secrets.apiKey);
-  const identity = await verifyTarget({ resolved, secrets, binding: null });
+  const identity = await verifyTarget({ resolved, secrets, binding: null, retry });
   for (const w of identity.warnings ?? []) printWarning(w, { json: JSON_MODE });
 
   const own = existsSync(join(dir, ".blocofy", "project.json")) ? findBinding(dir) : null;
@@ -610,7 +618,7 @@ async function prepareTarget({ command, commandClass, dir, flags, needs, mode, r
     }
   }
 
-  const identity = await verifyTarget({ resolved, secrets, binding });
+  const identity = await verifyTarget({ resolved, secrets, binding, retry });
   for (const w of identity.warnings ?? []) printWarning(w, { json: JSON_MODE });
   if (record) recordVerifiedSite(resolved, identity);
 
@@ -644,7 +652,7 @@ async function themePull(rest) {
   const instance = typeof flags.instance === "string" ? flags.instance : null;
   const what = instance ? `instance ${instance}` : draft ? "draft" : "live";
   const target = await prepareTarget({ command: "theme pull", commandClass: "local-write", dir, flags, needs: "dev", mode: what });
-  const { count } = await pullTheme({ dir, url: target.dev.url, token: target.dev.token, draft, instance });
+  const { count } = await pullTheme({ dir, url: target.dev.url, token: target.dev.token, draft, instance, onRetry });
   console.log(`Downloaded ${count} ${what} theme files → ${dir}`);
   bindAfterPull(target, dir);
 }
@@ -685,7 +693,7 @@ async function themePush(rest) {
   // diffable (a draft GET would PROVISION the draft server-side — a read-only command must not mutate).
   if (flags.diff) {
     const diffTarget = ` of ${siteLabel(target.identity.site)}`;
-    const d = await diffTheme({ dir, url: creds.url, token: creds.token, instance: instanceFlag });
+    const d = await diffTheme({ dir, url: creds.url, token: creds.token, instance: instanceFlag, onRetry });
     console.log(instanceFlag ? `Diff vs theme ${instanceFlag}${diffTarget}:` : `Diff vs the LIVE theme${diffTarget} (push default writes to a DRAFT):`);
     const total = d.added.length + d.changed.length + d.removed.length;
     if (total === 0) {
@@ -776,7 +784,7 @@ async function themePush(rest) {
   // 0.5.0: eski (protokolsüz) bir sunucu `dryRun` alanını bilmez ve SESSİZCE GERÇEK YAZIM yapardı —
   // dry-run yalnız sunucu kanonik protokolü beyan ediyorsa koşar (sorgusuz, mutasyonsuz GET ön kontrolü).
   if (dryRun) {
-    const { supported } = await fetchCanonicalSupport({ url: creds.url, token: creds.token });
+    const { supported } = await fetchCanonicalSupport({ url: creds.url, token: creds.token, onRetry });
     if (!supported) {
       console.error("✗ --dry-run needs a server that speaks the canonical protocol; this one does not.");
       console.error("  An old server would IGNORE dryRun and write for real. Nothing was sent.");
@@ -795,7 +803,7 @@ async function themePush(rest) {
       name: mode === "draft" ? name : null,
       dryRun,
       idempotencyKey,
-      onRetry: (info) => console.error(retryNotice(info)),
+      onRetry,
       prune,
       confirmPrune,
     });
@@ -902,7 +910,7 @@ async function pagesPush(rest) {
   const dryRun = Boolean(flags["dry-run"]);
   const target = await prepareTarget({ command: "pages push", commandClass: dryRun ? "read" : "remote-mutation", dir, flags, needs: "dev", mode: dryRun ? "read · dry run" : "live" });
   const creds = target.dev;
-  const result = await pushContent({ dir, url: creds.url, token: creds.token, scope: "pages", dryRun });
+  const result = await pushContent({ dir, url: creds.url, token: creds.token, scope: "pages", dryRun, onRetry });
   const code = reportPageDiagnostics(result.diagnostics ?? [], { strict: Boolean(flags.strict) });
   const pages = result.pages ?? [];
   const count = (k, v) => pages.filter((p) => p[k] === v).length;
@@ -925,7 +933,7 @@ async function pagesPull(rest) {
   const dir = resolve(positionals[0] ?? process.cwd());
   const target = await prepareTarget({ command: "pages pull", commandClass: "local-write", dir, flags, needs: "dev", mode: "published pages" });
   const creds = target.dev;
-  const { count, diagnostics } = await pullContent({ dir, url: creds.url, token: creds.token, scope: "pages" });
+  const { count, diagnostics } = await pullContent({ dir, url: creds.url, token: creds.token, scope: "pages", onRetry });
   const code = reportPageDiagnostics(diagnostics, { strict: Boolean(flags.strict) });
   console.log(`Downloaded ${count} page file(s) → ${dir}`);
   bindAfterPull(target, dir);
@@ -941,7 +949,7 @@ async function pagesCheck(rest) {
   }
   const creds = (await optionalTarget({ command: "pages check", dir, flags }))?.dev;
   const online = Boolean(creds);
-  const r = await checkPages({ dir, ...(online ? { url: creds.url, token: creds.token } : {}) });
+  const r = await checkPages({ dir, onRetry, ...(online ? { url: creds.url, token: creds.token } : {}) });
   const code = reportPageDiagnostics(r.diagnostics, { strict: Boolean(flags.strict) });
   const errors = r.diagnostics.filter((d) => d.level === "error").length;
   console.log(`Checked ${r.fileCount} page file(s) ${r.online ? "(with the site's languages and a server dry run)" : "(offline — log in to also check against the site)"}: ${errors} error(s), ${r.diagnostics.length - errors} warning(s).`);
@@ -962,7 +970,7 @@ async function pagesMigrate(rest) {
   const creds = (await optionalTarget({ command: "pages migrate-layout", dir, flags }))?.dev;
   const online = Boolean(creds);
   const write = Boolean(flags.write);
-  const r = await migrateLayout({ dir, write, ...(online ? { url: creds.url, token: creds.token } : {}) });
+  const r = await migrateLayout({ dir, write, onRetry, ...(online ? { url: creds.url, token: creds.token } : {}) });
   const code = reportPageDiagnostics(r.diagnostics, { strict: Boolean(flags.strict) });
   for (const m of r.moves) console.log(`  ${write && !r.refused ? "moved" : "move"}  ${m.from} → ${m.to}`);
   if (r.refused) console.error(`Migration refused; no files were moved.`);
@@ -980,7 +988,7 @@ async function contentPush(scope, rest) {
   }
   const target = await prepareTarget({ command: `${scope} push`, commandClass: "remote-mutation", dir, flags, needs: "dev", mode: "live" });
   const creds = target.dev;
-  const result = await pushContent({ dir, url: creds.url, token: creds.token, scope });
+  const result = await pushContent({ dir, url: creds.url, token: creds.token, scope, onRetry });
   console.log(
     `Settings push: ${result.settingsUpdated ? "theme settings updated" : "theme settings unchanged"}, ` +
       `${result.schemesUpserted} color scheme(s) upserted (${result.fileCount} file).`,
@@ -992,7 +1000,7 @@ async function contentPull(scope, rest) {
   const dir = resolve(positionals[0] ?? process.cwd());
   const target = await prepareTarget({ command: `${scope} pull`, commandClass: "local-write", dir, flags, needs: "dev", mode: "live" });
   const creds = target.dev;
-  const { count } = await pullContent({ dir, url: creds.url, token: creds.token, scope });
+  const { count } = await pullContent({ dir, url: creds.url, token: creds.token, scope, onRetry });
   console.log(`Downloaded ${count} settings file(s) → ${dir}`);
   bindAfterPull(target, dir);
 }
@@ -1044,7 +1052,7 @@ async function pagesMediaUses(rest) {
     process.exit(1);
   }
   const { apiUrl, apiKey } = (await prepareTarget({ command: "pages media-uses", commandClass: "read", dir: process.cwd(), flags, needs: "api", mode: `read · page ${page}` })).api;
-  const view = await fetchPageMediaUses({ apiUrl, apiKey, page });
+  const view = await fetchPageMediaUses({ apiUrl, apiKey, page, onRetry });
   if (flags.json) console.log(JSON.stringify(view, null, 2));
   else printMediaUsesView(view);
 }
@@ -1088,7 +1096,7 @@ async function pagesMediaDecide(rest) {
 
   const { apiUrl, apiKey } = (await prepareTarget({ command: "pages media-decide", commandClass: "remote-mutation", dir: process.cwd(), flags, needs: "api", mode: `draft · page ${page}` })).api;
   if (expectedRevisionId === null) {
-    const view = await fetchPageMediaUses({ apiUrl, apiKey, page });
+    const view = await fetchPageMediaUses({ apiUrl, apiKey, page, onRetry });
     if (view.applicable === false) {
       console.error(`Page ${page}: media decisions not applicable (${view.reason}). Nothing was written.`);
       process.exit(1);
@@ -1100,7 +1108,7 @@ async function pagesMediaDecide(rest) {
     item && typeof item === "object" && typeof item.idempotency_key !== "string" ? { ...item, idempotency_key: randomUUID() } : item,
   );
 
-  const out = await decidePageMediaUses({ apiUrl, apiKey, page, expectedRevisionId, expectedVersion, decisions });
+  const out = await decidePageMediaUses({ apiUrl, apiKey, page, expectedRevisionId, expectedVersion, decisions, onRetry });
   if (flags.json) {
     console.log(JSON.stringify(out, null, 2));
     return;
@@ -1135,7 +1143,7 @@ async function themeDev(rest) {
   if (!flags["no-sync"]) {
     try {
       const name = typeof flags.name === "string" ? flags.name : null;
-      session = await fetchDevSession({ url: creds.url, token: creds.token, name });
+      session = await fetchDevSession({ url: creds.url, token: creds.token, name, onRetry });
     } catch (error) {
       console.warn(
         `Warning: dev session unavailable (${error?.message || error}). ` +
@@ -1275,7 +1283,7 @@ async function themePublish(rest) {
     // `drafts` canlı OLMAYAN HER instance'ı içerir; sunucunun `ensureDraftInstance`'ı ise
     // `source === "import"` olanı seçer (yayınlanan taslak import'tan çıkarılır). Aynı seçimi
     // burada tekrarla — yoksa bir kez yayın yapmış her sitede iki taslak görünür ve komut takılır.
-    const status = await fetchSiteStatus({ url: creds.url, token: creds.token });
+    const status = await fetchSiteStatus({ url: creds.url, token: creds.token, onRetry });
     const drafts = status?.drafts ?? [];
     const cliDrafts = drafts.filter((d) => d.source === "import");
     if (cliDrafts.length === 1) {
@@ -1289,7 +1297,7 @@ async function themePublish(rest) {
       process.exit(1);
     }
   }
-  const result = await publishInstance({ url: creds.url, token: creds.token, instanceId: instance });
+  const result = await publishInstance({ url: creds.url, token: creds.token, instanceId: instance, onRetry });
   console.log(
     `✓ Theme ${result.published} is now LIVE${result.cloned ? " (pages cloned from the previous live theme)" : ""}.`,
   );
@@ -1305,14 +1313,14 @@ async function themeRename(rest) {
     process.exit(1);
   }
   const creds = (await prepareTarget({ command: "theme rename", commandClass: "remote-mutation", dir: process.cwd(), flags, needs: "dev", mode: `instance ${handle}` })).dev;
-  const result = await renameInstance({ url: creds.url, token: creds.token, instance: handle, name });
+  const result = await renameInstance({ url: creds.url, token: creds.token, instance: handle, name, onRetry });
   console.log(`✓ Renamed to "${result.name}" (${result.id}).`);
 }
 
 async function status(rest) {
   const { flags } = parseArgsOrExit(rest, []);
   const creds = (await prepareTarget({ command: "status", commandClass: "read", dir: process.cwd(), flags, needs: "dev", mode: "read" })).dev;
-  const s = await fetchSiteStatus({ url: creds.url, token: creds.token });
+  const s = await fetchSiteStatus({ url: creds.url, token: creds.token, onRetry });
   const live = s.live_theme_instance;
   console.log(`\nSite: ${s.site.slug}${s.url ? ` · ${s.url}` : ""}`);
   console.log(

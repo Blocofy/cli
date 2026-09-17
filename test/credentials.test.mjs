@@ -241,7 +241,8 @@ test("--help and an unreachable identity endpoint never print the key (unreachab
   assert.ok(!(help.stdout + help.stderr).includes(CANARY));
   const err = await runCli(["pages", "media-uses", "pg_1", "--json"], { BLOCOFY_API_KEY: CANARY, BLOCOFY_API_URL: "http://127.0.0.1:9" });
   assert.equal(err.code, 3);
-  assert.equal(JSON.parse(err.stderr.trim()).error.code, "TARGET_UNVERIFIED");
+  assert.equal(JSON.parse(err.stderr.trim().split("\n").pop()).error.code, "TARGET_UNVERIFIED");
+  assert.match(err.stderr, /Network error .* retrying .*\(3\/3\)/, "the unreachable identity endpoint was retried (CF-T3)");
   assert.ok(!(err.stdout + err.stderr).includes(CANARY), "canary leaked on network error");
 });
 

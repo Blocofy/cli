@@ -17,6 +17,9 @@ const store = (contexts, current = null) => ({ schema_version: 2, current_contex
 const bindingFor = (site, localContext = null) => ({ root: "/p", projectPath: "/p/.blocofy/project.json", project: { schema_version: 1, site_id: site.id, site_slug: site.slug, platform_origin: ORIGIN }, localContext });
 const envCtx = { name: "env", source: "env", context: { platform_origin: null, site: null, dev: { url: "https://env.test" } }, secrets: { devToken: "bcf_env", apiKey: null } };
 
+/** CF-T3: identity reads retry transient failures; tests skip the real backoff. */
+const NO_WAIT = { sleep: async () => {} };
+
 const code = async (promise) => {
   try {
     await promise;
@@ -153,23 +156,32 @@ test("verifyTarget: both pairs verified and compared (TARGET_CREDENTIAL_MISMATCH
   const pingA = { body: { ok: true, site: siteA, platform_origin: ORIGIN } };
   const pingB = { body: { ok: true, site: siteB, platform_origin: ORIGIN } };
 
-  const id = await verifyTarget({ resolved: both, secrets, binding: bindingFor(siteA), fetchImpl: fakeFetch({ "/api/dev/whoami": whoamiA, "/api/v1/ping": pingA }) });
+  const id = await verifyTarget({ retry: NO_WAIT, resolved: both, secrets, binding: bindingFor(siteA), fetchImpl: fakeFetch({ "/api/dev/whoami": whoamiA, "/api/v1/ping": pingA }) });
   assert.equal(id.site.id, "sA1");
   assert.equal(id.liveThemeId, "t1");
-  assert.equal(await code(verifyTarget({ resolved: both, secrets, binding: null, fetchImpl: fakeFetch({ "/api/dev/whoami": whoamiA, "/api/v1/ping": pingB }) })), "TARGET_CREDENTIAL_MISMATCH");
-  assert.equal(await code(verifyTarget({ resolved: both, secrets, binding: bindingFor(siteB), fetchImpl: fakeFetch({ "/api/dev/whoami": whoamiA, "/api/v1/ping": pingA }) })), "TARGET_SITE_MISMATCH");
-  assert.equal(await code(verifyTarget({ resolved: both, secrets, binding: null, fetchImpl: fakeFetch({ "/api/dev/whoami": { status: 503, body: {} }, "/api/v1/ping": pingA }) })), "TARGET_UNVERIFIED");
-  assert.equal(await code(verifyTarget({ resolved: both, secrets, binding: null, fetchImpl: fakeFetch({ "/api/dev/whoami": { body: "<html>" }, "/api/v1/ping": pingA }) })), "TARGET_UNVERIFIED");
-  assert.equal(await code(verifyTarget({ resolved: both, secrets, binding: null, fetchImpl: fakeFetch({ "/api/dev/whoami": { body: { site: {} } }, "/api/v1/ping": pingA }) })), "TARGET_UNVERIFIED");
-  assert.equal(await code(verifyTarget({ resolved: both, secrets, binding: null, fetchImpl: fakeFetch({}) })), "TARGET_UNVERIFIED");
+  assert.equal(await code(verifyTarget({ retry: NO_WAIT, resolved: both, secrets, binding: null, fetchImpl: fakeFetch({ "/api/dev/whoami": whoamiA, "/api/v1/ping": pingB }) })), "TARGET_CREDENTIAL_MISMATCH");
+  assert.equal(await code(verifyTarget({ retry: NO_WAIT, resolved: both, secrets, binding: bindingFor(siteB), fetchImpl: fakeFetch({ "/api/dev/whoami": whoamiA, "/api/v1/ping": pingA }) })), "TARGET_SITE_MISMATCH");
+  assert.equal(await code(verifyTarget({ retry: NO_WAIT, resolved: both, secrets, binding: null, fetchImpl: fakeFetch({ "/api/dev/whoami": { status: 503, body: {} }, "/api/v1/ping": pingA }) })), "TARGET_UNVERIFIED");
+  // CF-T3: a transient identity failure is retried (503 then 200 → verified); a 500 is not.
+  let n = 0;
+  const flaky = async (url) => (new URL(url).pathname === "/api/dev/whoami" && ++n === 1 ? new Response("{}", { status: 503 }) : fakeFetch({ "/api/dev/whoami": whoamiA, "/api/v1/ping": pingA })(url));
+  assert.equal(await code(verifyTarget({ retry: NO_WAIT, resolved: both, secrets, binding: null, fetchImpl: flaky })), "ok");
+  assert.equal(n, 2);
+  let m = 0;
+  const hard = async (url) => (new URL(url).pathname === "/api/dev/whoami" ? (m++, new Response("{}", { status: 500 })) : fakeFetch({ "/api/v1/ping": pingA })(url));
+  assert.equal(await code(verifyTarget({ retry: NO_WAIT, resolved: both, secrets, binding: null, fetchImpl: hard })), "TARGET_UNVERIFIED");
+  assert.equal(m, 1, "500 is not retried");
+  assert.equal(await code(verifyTarget({ retry: NO_WAIT, resolved: both, secrets, binding: null, fetchImpl: fakeFetch({ "/api/dev/whoami": { body: "<html>" }, "/api/v1/ping": pingA }) })), "TARGET_UNVERIFIED");
+  assert.equal(await code(verifyTarget({ retry: NO_WAIT, resolved: both, secrets, binding: null, fetchImpl: fakeFetch({ "/api/dev/whoami": { body: { site: {} } }, "/api/v1/ping": pingA }) })), "TARGET_UNVERIFIED");
+  assert.equal(await code(verifyTarget({ retry: NO_WAIT, resolved: both, secrets, binding: null, fetchImpl: fakeFetch({}) })), "TARGET_UNVERIFIED");
   // Old server (no platform_origin) + a binding that records one: the platform cannot be proven (four-way rule below).
   const oldServer = fakeFetch({ "/api/dev/whoami": { body: { site: siteA } } });
   const devOnly = { name: "a", context: ctx(null) };
-  assert.equal(await code(verifyTarget({ resolved: devOnly, secrets, binding: bindingFor(siteA), fetchImpl: oldServer })), "TARGET_UNVERIFIED");
+  assert.equal(await code(verifyTarget({ retry: NO_WAIT, resolved: devOnly, secrets, binding: bindingFor(siteA), fetchImpl: oldServer })), "TARGET_UNVERIFIED");
   const nullBinding = { ...bindingFor(siteA), project: { ...bindingFor(siteA).project, platform_origin: null } };
-  assert.equal(await code(verifyTarget({ resolved: devOnly, secrets, binding: nullBinding, fetchImpl: oldServer })), "ok");
+  assert.equal(await code(verifyTarget({ retry: NO_WAIT, resolved: devOnly, secrets, binding: nullBinding, fetchImpl: oldServer })), "ok");
   // A context recorded for A whose token now resolves to B.
-  assert.equal(await code(verifyTarget({ resolved: { name: "a", context: ctx(siteA) }, secrets, binding: null, fetchImpl: fakeFetch({ "/api/dev/whoami": { body: { site: siteB, platform_origin: ORIGIN } } }) })), "TARGET_SITE_MISMATCH");
+  assert.equal(await code(verifyTarget({ retry: NO_WAIT, resolved: { name: "a", context: ctx(siteA) }, secrets, binding: null, fetchImpl: fakeFetch({ "/api/dev/whoami": { body: { site: siteB, platform_origin: ORIGIN } } }) })), "TARGET_SITE_MISMATCH");
 });
 
 test("null platform origin rule: binding × server origin, all four combinations (+ the context record)", async () => {
@@ -179,7 +191,7 @@ test("null platform origin rule: binding × server origin, all four combinations
   const withOrigin = (site, o) => ({ ...bindingFor(site), project: { ...bindingFor(site).project, platform_origin: o } });
   const outcome = async (binding, fetchImpl, resolved = devOnly) => {
     try {
-      const id = await verifyTarget({ resolved, secrets, binding, fetchImpl });
+      const id = await verifyTarget({ retry: NO_WAIT, resolved, secrets, binding, fetchImpl });
       return { code: "ok", warnings: (id.warnings ?? []).map((w) => w.code), messages: (id.warnings ?? []).map((w) => w.message) };
     } catch (e) {
       return { code: e.code, message: e.message };

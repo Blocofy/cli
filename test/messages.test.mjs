@@ -33,4 +33,6 @@ test("retryNotice: attempt/retries + sebep içeren tek satır", () => {
     "Network error (fetch failed) — retrying (1/2)…",
   );
   assert.equal(retryNotice({ attempt: 2, retries: 2 }), "Network error — retrying (2/2)…");
+  assert.equal(retryNotice({ attempt: 1, retries: 3, reason: "HTTP 429", waitMs: 1000 }), "Server temporarily unavailable (HTTP 429) — retrying in 1s (1/3)…");
+  assert.equal(retryNotice({ attempt: 2, retries: 3, reason: "fetch failed", waitMs: 900 }), "Network error (fetch failed) — retrying in 0.9s (2/3)…");
 });

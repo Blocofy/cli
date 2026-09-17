@@ -81,7 +81,7 @@ async function fakeV1(route) {
     const rec = { method: req.method, url: req.url, headers: req.headers, body: raw ? JSON.parse(raw) : null };
     reqs.push(rec);
     const out = route(rec, reqs.length);
-    res.writeHead(out.status, { "content-type": "application/json" });
+    res.writeHead(out.status, { "content-type": "application/json", ...(out.headers ?? {}) });
     res.end(JSON.stringify(out.body));
   });
   server.listen(0, "127.0.0.1");
@@ -203,20 +203,43 @@ test("[L3b] 404 not_found → exit 2, stderr {error}", async () => {
   }
 });
 
-test("[L4] 5xx → retry YOK (tek istek); lib düz hata, komut exit 1", async () => {
-  const s = await fakeV1(() => ({ status: 503, body: { error: { code: "resource_busy", message: "busy" } } }));
+test("[L4] 503: GET always retried; POST retried ONLY when every item carries an idempotency_key (same body each attempt); unkeyed batch sent once; CLI keys every item → exit 1 after 4 identical attempts", async () => {
+  const busy = { status: 503, headers: { "retry-after": "0" }, body: { error: { code: "resource_busy", message: "busy" } } };
+  const s = await fakeV1(() => busy);
   try {
+    // Keyed batch (DECISIONS all carry keys) → 4 attempts, byte-identical bodies.
     await assert.rejects(
       decidePageMediaUses({ apiUrl: s.apiUrl, apiKey: KEY, page: "pg_1", expectedRevisionId: 41, expectedVersion: 3, decisions: DECISIONS }),
       (e) => !(e instanceof CliRefusal) && /503/.test(e.message),
     );
-    assert.equal(s.reqs.length, 1, "lib retried a 5xx");
+    assert.equal(s.reqs.length, 4, "a keyed batch is retried 3 times");
+    assert.ok(s.reqs.every((r) => JSON.stringify(r.body) === JSON.stringify(s.reqs[0].body)), "identical body on every attempt");
+
+    // A batch with an unkeyed item → exactly one POST (a replay would not be idempotent).
+    s.reqs.length = 0;
+    await assert.rejects(
+      decidePageMediaUses({ apiUrl: s.apiUrl, apiKey: KEY, page: "pg_1", expectedRevisionId: 41, expectedVersion: 3, decisions: [{ path: "p", facet: "target", decision: "inherit" }] }),
+      /503/,
+    );
+    assert.equal(s.reqs.length, 1, "an unkeyed batch must not be retried");
+
+    // GET: always retried.
+    s.reqs.length = 0;
+    await assert.rejects(fetchPageMediaUses({ apiUrl: s.apiUrl, apiKey: KEY, page: "pg_1" }), /503/);
+    assert.equal(s.reqs.length, 4);
+
+    // CLI: the decisions file has an unkeyed item; the CLI adds a UUID before the FIRST attempt, so it retries and
+    // every attempt carries the same keys.
+    s.reqs.length = 0;
     const r = await runCli(
-      ["pages", "media-decide", "pg_1", "--decisions", decisionsFile(DECISIONS), "--expected-revision-id", "41", "--expected-version", "3"],
+      ["pages", "media-decide", "pg_1", "--decisions", decisionsFile([{ path: "p", facet: "target", decision: "inherit" }]), "--expected-revision-id", "41", "--expected-version", "3"],
       { BLOCOFY_API_KEY: KEY, BLOCOFY_API_URL: s.apiUrl },
     );
     assert.equal(r.code, 1, r.stderr);
-    assert.equal(s.reqs.length, 2, "CLI retried a 5xx");
+    assert.equal(s.reqs.length, 4, "CLI retried the keyed batch");
+    assert.match(s.reqs[0].body.decisions[0].idempotency_key, UUID_RE);
+    assert.ok(s.reqs.every((q) => JSON.stringify(q.body) === JSON.stringify(s.reqs[0].body)), "same generated key + body on every attempt");
+    assert.equal((r.stderr.match(/retrying/g) ?? []).length, 3, "each retry announced on stderr");
     assert.match(r.stderr, /503/);
   } finally {
     await s.close();

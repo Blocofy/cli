@@ -121,19 +121,19 @@ test("the key is stable ACROSS transport retries of one push (5xx converges on t
     await withFake(
       {
         postResponder: (res, n) => {
-          // n=1 preflight (dry) OK; n=2 real push 500 -> retry; n=3 real push OK.
+          // n=1 preflight (dry) OK; n=2 real push 503 -> retry (500 is never retried, CF-T3); n=3 real push OK.
           if (n === 1) {
             res.writeHead(200, { "content-type": "application/json" });
             return res.end(JSON.stringify({ ok: true, dryRun: true, warnings: [] }));
           }
-          if (n === 2) return res.writeHead(500, { "content-type": "application/json" }).end("{}");
+          if (n === 2) return res.writeHead(503, { "content-type": "application/json", "retry-after": "0" }).end("{}");
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ ok: true, created: 1, updated: 0 }));
         },
       },
       async (url, seen) => {
         await pushTheme({ dir, url, token: TOKEN, draft: true, idempotencyKey: "cli-fixed-for-retry" });
-        assert.equal(seen.posts.length, 3, "preflight + one retry after the 500");
+        assert.equal(seen.posts.length, 3, "preflight + one retry after the 503");
         assert.deepEqual(
           seen.posts.map((p) => p.headers["x-idempotency-key"]),
           ["cli-fixed-for-retry", "cli-fixed-for-retry", "cli-fixed-for-retry"],

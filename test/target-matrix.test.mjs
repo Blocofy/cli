@@ -40,8 +40,8 @@ const pageV2 = (label) => JSON.stringify({ format_version: 2, slug: "/", locale:
 function fakeSite(key, { id, slug, name }) {
   const s = SECRETS[key];
   const state = { requests: [], mutations: 0, whoami: "ok", ping: "ok", platformOrigin: ORIGIN, url: null };
-  const json = (res, status, body) => {
-    res.writeHead(status, { "content-type": "application/json" });
+  const json = (res, status, body, headers = {}) => {
+    res.writeHead(status, { "content-type": "application/json", ...headers });
     res.end(typeof body === "string" ? body : JSON.stringify(body));
   };
   const server = createServer(async (req, res) => {
@@ -55,12 +55,12 @@ function fakeSite(key, { id, slug, name }) {
     if (auth !== `Bearer ${isV1 ? s.apiKey : s.token}`) return json(res, 401, isV1 ? { error: { code: "unauthorized", message: "bad key" } } : { error: "Unknown token." });
     const site = { id, slug, name, domain: `${slug}.myblocofy.test` };
     if (url.pathname === "/api/dev/whoami") {
-      if (state.whoami === "down") return json(res, 503, { error: "unavailable" });
+      if (state.whoami === "down") return json(res, 503, { error: "unavailable" }, { "retry-after": "0" });
       if (state.whoami === "malformed") return json(res, 200, "<html>not json</html>");
       return json(res, 200, { site, liveThemeId: `t${key}live`, platform_origin: state.platformOrigin });
     }
     if (url.pathname === "/api/v1/ping") {
-      if (state.ping === "down") return json(res, 503, { error: { code: "unavailable" } });
+      if (state.ping === "down") return json(res, 503, { error: { code: "unavailable" } }, { "retry-after": "0" });
       return json(res, 200, { ok: true, site, platform_origin: state.platformOrigin });
     }
     if (url.pathname === "/api/dev/theme" && req.method === "GET") {
@@ -510,6 +510,7 @@ test("[14] identity endpoint down → TARGET_UNVERIFIED (exit 3), no mutation", 
     assert.equal(jsonError(r).code, "TARGET_UNVERIFIED");
     assert.equal(A.state.mutations + B.state.mutations, 0);
     assert.ok(A.state.requests.every((q) => q.url === "/api/dev/whoami" || q.url === "/api/v1/ping"), "a non-identity request was sent");
+    assert.equal(A.state.requests.filter((q) => q.url === (knob === "whoami" ? "/api/dev/whoami" : "/api/v1/ping")).length, 4, "CF-T3: the identity read is retried 3 times before TARGET_UNVERIFIED");
     assert.equal(treeHash(projA), before);
     noSecrets(r);
   }
