@@ -29,7 +29,7 @@ import {
   saveStore,
   writeSecret,
 } from "../lib/credentials.mjs";
-import { printError, printTarget, printWarning, registerSecret, targetData } from "../lib/output.mjs";
+import { printError, printTarget, printWarning, redact, registerSecret, targetData } from "../lib/output.mjs";
 import {
   CONTEXT_NAME_RE,
   TargetError,
@@ -80,7 +80,7 @@ const KNOWN = {
 function parseArgsOrExit(rest, known) {
   const parsed = parseArgs(rest, new Set([...known, "context", "json", "help", "version"]));
   if (parsed.unknownFlag) {
-    console.error(`Unknown flag ${parsed.unknownFlag}. Nothing was written. See \`blocofy --help\`.`);
+    printError({ code: "USAGE_UNKNOWN_FLAG", message: `Unknown flag ${parsed.unknownFlag}. Nothing was written. See \`blocofy --help\`.`, details: { flag: parsed.unknownFlag } }, { json: args.includes("--json") });
     process.exit(1);
   }
   if (parsed.flags.context !== undefined && (typeof parsed.flags.context !== "string" || !CONTEXT_NAME_RE.test(parsed.flags.context))) {
@@ -180,7 +180,7 @@ Usage
         pages/<locale>/routes/<path>/index.json   every other page ("/about" → routes/about/index.json)
       Files from the old layout (pages/<slug>.json) are reported, never deleted or overwritten.
       If the site cannot export every published page, nothing is written, every reason is
-      printed (PAGES_EXPORT_INCOMPLETE) and the exit code is 1 (--strict: warnings also exit 1).
+      printed (PAGES_EXPORT_INCOMPLETE) and the exit code is 2 (--strict: warnings exit 1).
 
   blocofy pages push [dir] [--dry-run] [--strict]
       Write pages/**.json to the site. Updates EXISTING pages only — never creates or
@@ -188,7 +188,7 @@ Usage
       file is invalid, two files point at the same page, or a folder's language does not
       match the file's "locale", NO page is changed. If publishing then stops unexpectedly
       (PAGES_APPLY_FAILED or another publish error), some pages may already be applied: the per-file
-      result printed is authoritative, the exit code is 1, and running the push again is safe.
+      result printed is authoritative, the exit code is non-zero, and running the push again is safe.
       --dry-run: check on the server, write nothing.
       Needs a platform that supports language folders (else PAGES_SERVER_UPGRADE_REQUIRED).
 
@@ -245,8 +245,10 @@ Targets (which site a command talks to)
   A binding made against an older server has no platform origin: it still matches the same site
   (one warning; run \`blocofy link --adopt\` to record it). A server that reports no origin cannot
   serve a binding that records one (TARGET_UNVERIFIED).
-  Exit codes: 0 ok · 1 usage/network/5xx · 2 server refusal (4xx) · 3 target/binding refusal.
-  --json prints refusals as {"error":{"code","message","details"}}.
+  Exit codes (every command): 0 ok · 1 usage/network/5xx/local check · 2 server refusal (HTTP 4xx)
+  · 3 target/binding refusal.
+  --json: every failure prints {"error":{"code","message","details"}} as the LAST stderr line; the
+  target block ({"target":…}) and any warning lines are printed on stderr before it.
   Retries: network errors and HTTP 429/502/503/504 are retried up to 3 times (Retry-After honoured,
   max 30s per wait; else 0.3s/0.9s/2s), resending the identical request (pages push carries one
   x-idempotency-key per push). HTTP 500 is never retried. Each retry prints a notice on stderr.
@@ -276,13 +278,55 @@ const JSON_MODE = args.includes("--json");
 const onRetry = (info) => console.error(retryNotice(info));
 const retry = { onRetry };
 
-/** Refusals (TargetError / CredentialsError) → envelope on stderr + their exit code; anything else → null. */
-function exitForTargetError(error) {
-  if (error instanceof TargetError || error instanceof CredentialsError) {
-    printError(error, { json: JSON_MODE });
-    process.exit(error.exitCode ?? 1);
+/**
+ * CF-T9 — the one failure exit (contract C2). Exit codes: 0 ok · 1 usage/network/5xx/local validation · 2 server
+ * refusal (HTTP 4xx) · 3 target/binding refusal. Human output goes first (page diagnostics, per-file results); the
+ * shared, redacted `printError` line is always LAST on stderr — under --json it is the `{"error":{code,message,details}}`
+ * envelope (the target block, a `{"target":…}` line, was printed before it).
+ */
+function exitCodeFor(error) {
+  if (error instanceof TargetError || error instanceof CredentialsError) return error.exitCode ?? 1;
+  if (error instanceof CliRefusal) return 2;
+  const status = Number(error?.status);
+  return status >= 400 && status < 500 ? 2 : 1;
+}
+
+function envelopeFor(error) {
+  if (error instanceof CliRefusal) {
+    const e = error.error ?? {};
+    return { code: e.code ?? `http_${error.status}`, message: e.message ?? error.message, details: e.details ?? {} };
   }
-  return null;
+  const status = Number.isFinite(Number(error?.status)) && error?.status != null ? Number(error.status) : null;
+  const code = typeof error?.code === "string" && error.code ? error.code : status ? `HTTP_${status}` : error instanceof TypeError ? "NETWORK_ERROR" : "ERROR";
+  const details = { ...(error?.details ?? {}) };
+  if (status) details.status = status;
+  if (error instanceof PagesCliError) {
+    if (error.diagnostics?.length) details.diagnostics = error.diagnostics;
+    if (Array.isArray(error.pages)) details.pages = error.pages;
+  }
+  return { code, message: error?.message || String(error), details };
+}
+
+function failAndExit(error) {
+  const code = exitCodeFor(error);
+  if (error instanceof PagesCliError && !JSON_MODE) {
+    if (error.diagnostics?.length) reportPageDiagnostics(error.diagnostics);
+  }
+  if (error instanceof PagesCliError && Array.isArray(error.pages) && error.pages.length && !JSON_MODE) {
+    console.error("Per-file result:");
+    for (const p of error.pages) console.error(`  ${p.outcome ?? p.action}  ${p.path}`);
+  }
+  if (error instanceof CliRefusal && !JSON_MODE) {
+    // Existing media-* contract: the server's {error} JSON verbatim on stderr.
+    process.stderr.write(redact(JSON.stringify({ error: error.error })) + "\n");
+  } else if (error instanceof PagesCliError && !JSON_MODE) {
+    process.stderr.write(redact(`${error.diagnostics?.length ? "\n" : ""}error [${error.code}]:\n    ${error.message}`) + "\n");
+  } else if (!JSON_MODE && !(error instanceof TargetError || error instanceof CredentialsError) && !(typeof error?.code === "string" && error.code)) {
+    process.stderr.write(redact(error?.message || String(error)) + "\n");
+  } else {
+    printError(envelopeFor(error), { json: JSON_MODE });
+  }
+  process.exit(code);
 }
 
 function contextNameOrExit(name) {
@@ -810,15 +854,19 @@ async function themePush(rest) {
     });
   } catch (error) {
     if (error?.code === "cli_upgrade_required") {
-      const missing = Array.isArray(error?.body?.fence?.missing) ? error.body.fence.missing.join(", ") : "";
-      console.error("✗ Sunucu bu CLI sürümünü reddetti (cli_upgrade_required).");
-      console.error(`  Güncelle:  npm i -g @blocofy/cli@latest${missing ? `\n  Sunucunun istediği eksik yetenekler: ${missing}` : ""}`);
-      process.exit(1);
+      const missing = Array.isArray(error?.body?.fence?.missing) ? error.body.fence.missing : [];
+      if (!JSON_MODE) {
+        console.error("✗ Sunucu bu CLI sürümünü reddetti (cli_upgrade_required).");
+        console.error(`  Güncelle:  npm i -g @blocofy/cli@latest${missing.length ? `\n  Sunucunun istediği eksik yetenekler: ${missing.join(", ")}` : ""}`);
+      }
+      failAndExit({ code: "cli_upgrade_required", status: error.status, message: "The server refused this CLI version; update it: npm i -g @blocofy/cli@latest", details: { missing } });
     }
     if (error?.code === "idempotency_conflict") {
-      console.error("✗ Idempotency çakışması: aynı anahtar daha önce FARKLI içerikle kullanılmış (409).");
-      console.error("  `--idempotency-key` verdiysen yeni bir anahtarla dene; vermediysen tekrar `blocofy theme push` yeterli (her koşu taze anahtar üretir).");
-      process.exit(1);
+      if (!JSON_MODE) {
+        console.error("✗ Idempotency çakışması: aynı anahtar daha önce FARKLI içerikle kullanılmış (409).");
+        console.error("  `--idempotency-key` verdiysen yeni bir anahtarla dene; vermediysen tekrar `blocofy theme push` yeterli (her koşu taze anahtar üretir).");
+      }
+      failAndExit({ code: "idempotency_conflict", status: error.status, message: "The idempotency key was already used with different content. Retry with a new key (or omit --idempotency-key).", details: {} });
     }
     throw error;
   }
@@ -879,22 +927,6 @@ function reportPageDiagnostics(diagnostics, { strict = false } = {}) {
   const errors = diagnostics.filter((d) => d.level === "error").length;
   const warnings = diagnostics.length - errors;
   return errors > 0 || (strict && warnings > 0) ? 1 : 0;
-}
-
-function exitForPagesError(error) {
-  if (error instanceof PagesCliError) {
-    if (error.diagnostics?.length) reportPageDiagnostics(error.diagnostics);
-    else console.error(`error [${error.code}]:\n    ${error.message}`);
-    // The stable top code always prints, after the individual findings it summarises.
-    if (error.diagnostics?.length) console.error(`\nerror [${error.code}]:\n    ${error.message}`);
-    if (Array.isArray(error.pages) && error.pages.length) {
-      console.error("Per-file result:");
-      for (const p of error.pages) console.error(`  ${p.outcome ?? p.action}  ${p.path}`);
-    }
-    process.exit(1);
-  }
-  console.error(error?.message ?? error);
-  process.exit(1);
 }
 
 function localeLabel(p) {
@@ -1017,16 +1049,6 @@ async function optionalTarget({ command, dir, flags }) {
     if (error instanceof TargetError && (error.code === "LOGIN_REQUIRED" || (error.code === "TARGET_CONTEXT_REQUIRED" && !findBinding(dir)))) return null;
     throw error;
   }
-}
-
-/** v1 refusal (4xx) → {error} JSON on stderr, exit 2; anything else → message, exit 1. */
-function exitForApiError(error) {
-  if (error instanceof CliRefusal) {
-    console.error(JSON.stringify({ error: error.error }));
-    process.exit(2);
-  }
-  console.error(error?.message ?? error);
-  process.exit(1);
 }
 
 function printMediaUsesView(view) {
@@ -1340,39 +1362,32 @@ async function status(rest) {
 
 const [first, ...rest] = args;
 
-/** Generic failure: PS-19 page errors keep their coded output; anything else → message, exit 1. */
-function exitForGenericError(error) {
-  if (error instanceof PagesCliError) exitForPagesError(error);
-  console.error(error?.message ?? error);
-  process.exit(1);
-}
-
 function commandKey(a, b) {
   return `${a} ${b ?? ""}`;
 }
 
-// command → [handler, error handler]. Target/binding refusals are handled first for every command (exit 3).
+// command → handler. Every failure exits through failAndExit (exit codes 1/2/3, --json envelope last).
 const COMMANDS = {
-  login: [login, exitForGenericError],
-  contexts: [contextsCommand, exitForGenericError],
-  use: [useCommand, exitForGenericError],
-  logout: [logoutCommand, exitForGenericError],
-  link: [linkCommand, exitForGenericError],
-  target: [targetCommand, exitForGenericError],
-  status: [status, exitForGenericError],
-  "theme dev": [themeDev, exitForGenericError],
-  "theme pull": [themePull, exitForGenericError],
-  "theme push": [themePush, exitForGenericError],
-  "theme publish": [themePublish, exitForGenericError],
-  "theme rename": [themeRename, exitForGenericError],
-  "pages media-uses": [pagesMediaUses, exitForApiError],
-  "pages media-decide": [pagesMediaDecide, exitForApiError],
-  "pages pull": [pagesPull, exitForPagesError],
-  "pages push": [pagesPush, exitForPagesError],
-  "pages check": [pagesCheck, exitForPagesError],
-  "pages migrate-layout": [pagesMigrate, exitForPagesError],
-  "settings pull": [(r) => contentPull("settings", r), exitForGenericError],
-  "settings push": [(r) => contentPush("settings", r), exitForGenericError],
+  login: login,
+  contexts: contextsCommand,
+  use: useCommand,
+  logout: logoutCommand,
+  link: linkCommand,
+  target: targetCommand,
+  status: status,
+  "theme dev": themeDev,
+  "theme pull": themePull,
+  "theme push": themePush,
+  "theme publish": themePublish,
+  "theme rename": themeRename,
+  "pages media-uses": pagesMediaUses,
+  "pages media-decide": pagesMediaDecide,
+  "pages pull": pagesPull,
+  "pages push": pagesPush,
+  "pages check": pagesCheck,
+  "pages migrate-layout": pagesMigrate,
+  "settings pull": (r) => contentPull("settings", r),
+  "settings push": (r) => contentPush("settings", r),
 };
 
 if (first === "--version" || first === "-v") {
@@ -1388,11 +1403,8 @@ if (first === "--version" || first === "-v") {
   console.log(VERSION);
 } else if (COMMANDS[commandKey(first, rest[0])] || COMMANDS[first]) {
   const keyed = COMMANDS[commandKey(first, rest[0])];
-  const [handler, onError] = keyed ?? COMMANDS[first];
-  handler(keyed ? rest.slice(1) : rest).catch((error) => {
-    exitForTargetError(error);
-    onError(error);
-  });
+  const handler = keyed ?? COMMANDS[first];
+  handler(keyed ? rest.slice(1) : rest).catch(failAndExit);
 } else {
   console.error(`Unknown command: ${args.join(" ")}\n`);
   printHelp();

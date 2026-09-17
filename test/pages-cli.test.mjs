@@ -167,7 +167,7 @@ test("unknown flag on a pages command is refused without writing", () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("F2: pages pull against an incomplete export prints every diagnostic, exits 1 and writes nothing", async () => {
+test("F2: pages pull against an incomplete export prints every diagnostic, exits 2 (server refusal) and writes nothing", async () => {
   const server = createServer((req, res) => {
     if (whoami(req, res)) return;
     res.writeHead(422, { "content-type": "application/json" });
@@ -181,13 +181,19 @@ test("F2: pages pull against an incomplete export prints every diagnostic, exits
   const dir = site({});
   try {
     const r = await runAsync(["pages", "pull", dir], { BLOCOFY_URL: `http://127.0.0.1:${server.address().port}`, BLOCOFY_TOKEN: "bcf_" + "x".repeat(30) });
-    assert.equal(r.status, 1);
+    assert.equal(r.status, 2, r.stderr);
     assert.match(r.stderr, /PAGES_INVALID_LOCALE/);
     assert.match(r.stderr, /PAGES_INVALID_SLUG/);
     assert.match(r.stderr, /error \[PAGES_EXPORT_INCOMPLETE\]/);
     assert.match(r.stderr, /nothing was exported/);
     assert.ok(!existsSync(join(dir, "pages")));
     assert.ok(!existsSync(join(dir, ".blocofy")), "a failed pull records no binding");
+    const j = await runAsync(["pages", "pull", dir, "--json"], { BLOCOFY_URL: `http://127.0.0.1:${server.address().port}`, BLOCOFY_TOKEN: "bcf_" + "x".repeat(30) });
+    assert.equal(j.status, 2);
+    const env = JSON.parse(j.stderr.trim().split("\n").pop()).error;
+    assert.equal(env.code, "PAGES_EXPORT_INCOMPLETE");
+    assert.equal(env.details.status, 422);
+    assert.deepEqual(env.details.diagnostics.map((d) => d.code), ["PAGES_INVALID_LOCALE", "PAGES_INVALID_SLUG"]);
   } finally {
     server.close();
     rmSync(dir, { recursive: true, force: true });

@@ -197,9 +197,14 @@ test("426 cli_upgrade_required becomes a human upgrade message (with the server'
       },
       async (url) => {
         const r = await runBin(url, ["theme", "push", dir, "--draft"]);
-        assert.equal(r.code, 1);
+        assert.equal(r.code, 2, "a server refusal (4xx) exits 2 (contract C2)");
         assert.match(r.stderr, /npm i -g @blocofy\/cli@latest/);
         assert.match(r.stderr, /diff, target-instance/);
+        const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+        assert.equal(j.code, 2);
+        const last = JSON.parse(j.stderr.trim().split("\n").pop());
+        assert.equal(last.error.code, "cli_upgrade_required");
+        assert.deepEqual(last.error.details.missing, ["diff", "target-instance"]);
       },
     );
   } finally {
@@ -219,8 +224,11 @@ test("409 idempotency_conflict becomes a human message pointing at a fresh key",
       },
       async (url) => {
         const r = await runBin(url, ["theme", "push", dir, "--draft"]);
-        assert.equal(r.code, 1);
+        assert.equal(r.code, 2, "a server refusal (4xx) exits 2 (contract C2)");
         assert.match(r.stderr, /Idempotency çakışması/);
+        const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+        assert.equal(j.code, 2);
+        assert.equal(JSON.parse(j.stderr.trim().split("\n").pop()).error.code, "idempotency_conflict");
       },
     );
   } finally {

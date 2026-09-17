@@ -385,17 +385,18 @@ test("[7] dev token A + API key B in one context → TARGET_CREDENTIAL_MISMATCH 
   }
 });
 
-test("[8] site A credentials + a site B theme handle: requests go only to A; A's 404 → non-zero exit, no local write", async () => {
+test("[8] site A credentials + a site B theme handle: requests go only to A; A's 404 → exit 2 (server refusal), no local write", async () => {
   const { home, projA } = await world();
   const before = treeHash(projA);
   const pull = await run(home, ["theme", "pull", projA, "--instance", "tBlive"]);
-  assert.equal(pull.code, 1, pull.stderr);
+  assert.equal(pull.code, 2, pull.stderr);
   assert.equal(count(A, "GET", "/api/dev/theme?instance=tBlive"), 1);
   assert.equal(B.state.requests.length, 0);
   assert.equal(treeHash(projA), before);
   resetSites();
-  const push = await run(home, ["theme", "push", projA, "--instance", "tBlive"]);
-  assert.notEqual(push.code, 0);
+  const push = await run(home, ["theme", "push", projA, "--instance", "tBlive", "--json"]);
+  assert.equal(push.code, 2, push.stderr);
+  assert.deepEqual(JSON.parse(push.stderr.trim().split("\n").pop()).error, { code: "not_found", message: "not_found", details: { status: 404 } }, "--json: the envelope is the last stderr line");
   assert.equal(B.state.requests.length, 0);
   assert.equal(treeHash(projA), before);
   noSecrets(pull);
