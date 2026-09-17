@@ -135,13 +135,17 @@ Usage
         pages/<locale>/index.json                 the home page ("/")
         pages/<locale>/routes/<path>/index.json   every other page ("/about" → routes/about/index.json)
       Files from the old layout (pages/<slug>.json) are reported, never deleted or overwritten.
-      Exit 1 when the site reports pages it could not export (--strict: also on warnings).
+      If the site cannot export every published page, nothing is written, every reason is
+      printed (PAGES_EXPORT_INCOMPLETE) and the exit code is 1 (--strict: warnings also exit 1).
 
   blocofy pages push [dir] [--dry-run] [--strict]
       Write pages/**.json to the site. Updates EXISTING pages only — never creates or
       deletes a page; unchanged pages are skipped. Every file is checked first: if any
       file is invalid, two files point at the same page, or a folder's language does not
-      match the file's "locale", NO page is changed. --dry-run: check on the server, write nothing.
+      match the file's "locale", NO page is changed. If publishing then stops unexpectedly
+      (PAGES_APPLY_FAILED or a busy site), some pages may already be applied: the per-file
+      result printed is authoritative, the exit code is 1, and running the push again is safe.
+      --dry-run: check on the server, write nothing.
       Needs a platform that supports language folders (else PAGES_SERVER_UPGRADE_REQUIRED).
 
   blocofy pages check [dir] [--strict]
