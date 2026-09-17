@@ -133,6 +133,8 @@ Usage
       Preview, and the theme Editor. Press l / p / e to open each, q to quit.
       Edit a file and save → every open view reloads. Saves sync to a DRAFT theme
       only (never the live site). (dir defaults to cwd)
+      The target site is verified ONCE at start; a long session keeps that target (restart
+      it after changing credentials, context or the project binding).
         --port <n>   local port (default 3030)
         --no-sync    local preview only (skip draft sync + remote views)
         --name <name>  name the draft when it is first created (ignored if it already exists)
