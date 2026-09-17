@@ -11,8 +11,8 @@ import { fileURLToPath } from "node:url";
 
 /**
  * CF-T1/T2 — multi-site target matrix (contract C1/C2). Every scenario spawns the real bin against TWO fake
- * sites on 127.0.0.1. Each fake site counts mutating requests (any non-GET, plus `GET /api/dev/theme?draft=1`,
- * which provisions a draft server-side). Directory trees are hashed before/after to prove "zero writes".
+ * sites on 127.0.0.1. Each fake site counts mutating requests (any non-GET, plus `GET /api/dev/theme?draft=1` and
+ * `GET /api/dev/session`, which provision a draft server-side). Directory trees are hashed before/after to prove "zero writes".
  */
 
 const BIN = fileURLToPath(new URL("../bin/blocofy.mjs", import.meta.url));
@@ -39,7 +39,7 @@ const pageV2 = (label) => JSON.stringify({ format_version: 2, slug: "/", locale:
 
 function fakeSite(key, { id, slug, name }) {
   const s = SECRETS[key];
-  const state = { requests: [], mutations: 0, whoami: "ok", ping: "ok", platformOrigin: ORIGIN, url: null, themeFiles: null };
+  const state = { requests: [], mutations: 0, whoami: "ok", ping: "ok", platformOrigin: ORIGIN, url: null, themeFiles: null, identitySite: null };
   const json = (res, status, body, headers = {}) => {
     res.writeHead(status, { "content-type": "application/json", ...headers });
     res.end(typeof body === "string" ? body : JSON.stringify(body));
@@ -49,19 +49,21 @@ function fakeSite(key, { id, slug, name }) {
     for await (const chunk of req) raw += chunk;
     const url = new URL(req.url, "http://x");
     state.requests.push({ method: req.method, url: req.url });
-    if (req.method !== "GET" || url.searchParams.get("draft") === "1") state.mutations += 1;
+    if (req.method !== "GET" || url.searchParams.get("draft") === "1" || url.pathname === "/api/dev/session") state.mutations += 1;
     const isV1 = url.pathname.startsWith("/api/v1/");
     const auth = req.headers.authorization;
     if (auth !== `Bearer ${isV1 ? s.apiKey : s.token}`) return json(res, 401, isV1 ? { error: { code: "unauthorized", message: "bad key" } } : { error: "Unknown token." });
+    // `identitySite` simulates a token that now resolves to another site (identity endpoints only).
     const site = { id, slug, name, domain: `${slug}.myblocofy.test` };
+    const identity = state.identitySite ?? site;
     if (url.pathname === "/api/dev/whoami") {
       if (state.whoami === "down") return json(res, 503, { error: "unavailable" }, { "retry-after": "0" });
       if (state.whoami === "malformed") return json(res, 200, "<html>not json</html>");
-      return json(res, 200, { site, liveThemeId: `t${key}live`, platform_origin: state.platformOrigin });
+      return json(res, 200, { site: identity, liveThemeId: `t${key}live`, platform_origin: state.platformOrigin });
     }
     if (url.pathname === "/api/v1/ping") {
       if (state.ping === "down") return json(res, 503, { error: { code: "unavailable" } }, { "retry-after": "0" });
-      return json(res, 200, { ok: true, site, platform_origin: state.platformOrigin });
+      return json(res, 200, { ok: true, site: identity, platform_origin: state.platformOrigin });
     }
     if (url.pathname === "/api/dev/theme" && req.method === "GET") {
       const instance = url.searchParams.get("instance");
@@ -109,6 +111,7 @@ function fakeSite(key, { id, slug, name }) {
       state.whoami = "ok";
       state.ping = "ok";
       state.themeFiles = null;
+      state.identitySite = null;
     },
     async start() {
       server.listen(0, "127.0.0.1");
@@ -643,6 +646,52 @@ test("[21] review I3: `pages migrate-layout --write` outside a binding never use
   assert.equal(explicit.code, 0, explicit.stderr);
   assert.ok(count(A, "GET", "/api/dev/whoami") >= 1, "an explicit --context is honoured");
   assert.equal(B.state.requests.length, 0);
+});
+
+test("[22] review I4a: project bound to A + env credentials for B → every command refused (exit 3) by the binding-vs-remote check, zero mutations, no writes", async () => {
+  const { home, projA } = await world();
+  const env = { BLOCOFY_URL: B.url, BLOCOFY_TOKEN: SECRETS.B.token };
+  const before = treeHash(projA);
+  for (const args of [["theme", "push", projA], ["pages", "push", projA], ["theme", "pull", projA], ["theme", "dev", projA, "--dry"], ["status"], ["target", projA]]) {
+    resetSites();
+    const r = await run(home, [...args, "--json"], { env, cwd: projA });
+    assert.equal(r.code, 3, `${args.join(" ")}: ${r.stderr}`);
+    assert.equal(jsonError(r).code, "TARGET_SITE_MISMATCH", args.join(" "));
+    assert.equal(A.state.mutations + B.state.mutations, 0, args.join(" "));
+    assert.deepEqual(B.state.requests.map((q) => q.url), ["/api/dev/whoami"], `${args.join(" ")}: only B's identity endpoint`);
+    assert.equal(A.state.requests.length, 0);
+    assert.equal(treeHash(projA), before);
+    noSecrets(r);
+  }
+});
+
+test("[23] review I4b: a context recorded for A whose token now resolves to B → refused (exit 3) by the recorded-site check, even outside a project", async () => {
+  const { home } = await world();
+  const loose = tmp("bcf-mx-swap-");
+  const bSite = { id: "sB2", slug: "beta", name: "Beta Metal", domain: "beta.myblocofy.test" };
+  for (const args of [["target", loose, "--context", "alpha"], ["status", "--context", "alpha"], ["pages", "media-uses", "pgA", "--context", "alpha"]]) {
+    resetSites();
+    A.state.identitySite = bSite;
+    const r = await run(home, [...args, "--json"], { cwd: loose });
+    assert.equal(r.code, 3, `${args.join(" ")}: ${r.stderr}`);
+    assert.equal(jsonError(r).code, "TARGET_SITE_MISMATCH", args.join(" "));
+    assert.ok(A.state.requests.every((q) => q.url === "/api/dev/whoami" || q.url === "/api/v1/ping"), "only identity endpoints were called");
+    assert.equal(A.state.mutations + B.state.mutations, 0);
+    assert.deepEqual(readdirSync(loose), []);
+  }
+});
+
+test("[24] review I4c: `status` and `target` refuse a mismatch end-to-end inside a bound project (context for B via BLOCOFY_CONTEXT)", async () => {
+  const { home, projA } = await world();
+  for (const args of [["status"], ["target"]]) {
+    resetSites();
+    const r = await run(home, [...args, "--json"], { cwd: projA, env: { BLOCOFY_CONTEXT: "beta" } });
+    assert.equal(r.code, 3, r.stderr);
+    assert.equal(jsonError(r).code, "TARGET_SITE_MISMATCH");
+    assert.equal(count(B, "GET", "/api/dev/site"), 0, "status must not read the other site");
+    assert.equal(A.state.requests.length + B.state.mutations, 0);
+    assert.equal(r.stdout, "");
+  }
 });
 
 test("[18] secret leakage scan: every captured stdout/stderr and every file written outside the secret stores", () => {
