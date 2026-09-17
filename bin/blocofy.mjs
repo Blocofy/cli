@@ -199,7 +199,8 @@ Usage
   blocofy pages migrate-layout [dir] [--dry-run | --write] [--strict]
       Move old-layout files (pages/<slug>.json) to language folders. --dry-run (default)
       prints the plan; --write moves only proven files. Any ambiguity or conflict: nothing
-      is moved, exit 1. Files without "locale" use the site's default language (login needed).
+      is moved, exit 1. Files without "locale" use the site's default language (login needed;
+      with --write outside a bound project only an explicit --context/env credentials are used).
 
   blocofy pages media-uses <page-handle> [--json]
       List a page's localized-media decisions on its newest DRAFT (v1 API, pages:read).
@@ -629,7 +630,7 @@ async function promptContext(candidates) {
  *
  * `needs`: "dev" | "api" | "any". Returns `{ name, dev, api, identity, binding, newBinding, display }`.
  */
-async function prepareTarget({ command, commandClass, dir, flags, needs, mode, record = true, quiet = false }) {
+async function prepareTarget({ command, commandClass, dir, flags, needs, mode, record = true, quiet = false, resolveClass = commandClass }) {
   const binding = findBinding(dir);
   const { newBinding } = enforceBindingPolicy({ commandClass, binding, dir, command });
   const envCtx = envContext();
@@ -640,7 +641,7 @@ async function prepareTarget({ command, commandClass, dir, flags, needs, mode, r
     envCtx,
     getStore: () => (cachedStore ??= loadStore()),
     binding,
-    commandClass,
+    commandClass: resolveClass,
     isTTY: Boolean(process.stdin.isTTY && process.stderr.isTTY),
     prompt: promptContext,
   });
@@ -1000,7 +1001,7 @@ async function pagesMigrate(rest) {
     console.error(`Directory not found: ${dir}`);
     process.exit(1);
   }
-  const creds = (await optionalTarget({ command: "pages migrate-layout", dir, flags }))?.dev;
+  const creds = (await optionalTarget({ command: "pages migrate-layout", dir, flags, localWrite: Boolean(flags.write) }))?.dev;
   const online = Boolean(creds);
   const write = Boolean(flags.write);
   const r = await migrateLayout({ dir, write, onRetry, ...(online ? { url: creds.url, token: creds.token } : {}) });
@@ -1042,9 +1043,11 @@ async function contentPull(scope, rest) {
  * Optional online mode for offline-capable reads (`pages check`, `pages migrate-layout`): no credentials at all, or
  * no context choosable outside a project → offline. Inside a bound project every other refusal still applies.
  */
-async function optionalTarget({ command, dir, flags }) {
+async function optionalTarget({ command, dir, flags, localWrite = false }) {
   try {
-    return await prepareTarget({ command, commandClass: "read", dir, flags, needs: "dev", mode: "read" });
+    // Review I3: a command that writes local files (migrate-layout --write) never borrows the global default
+    // context — outside a binding it needs an explicit --context/env, else it runs offline.
+    return await prepareTarget({ command, commandClass: "read", resolveClass: localWrite ? "local-write" : "read", dir, flags, needs: "dev", mode: localWrite ? "read · local write" : "read" });
   } catch (error) {
     if (error instanceof TargetError && (error.code === "LOGIN_REQUIRED" || (error.code === "TARGET_CONTEXT_REQUIRED" && !findBinding(dir)))) return null;
     throw error;

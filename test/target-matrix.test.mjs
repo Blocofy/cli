@@ -625,6 +625,26 @@ test("[20] review I1: theme pull refuses any key the push would not read back (c
   assert.equal(readFileSync(join(projA, "config", "settings_schema.json"), "utf8"), "[]");
 });
 
+test("[21] review I3: `pages migrate-layout --write` outside a binding never uses the default context (offline); an explicit --context goes online", async () => {
+  const { home } = await world(); // world() leaves current_context = alpha
+  const loose = tmp("bcf-mx-migrate-");
+  mkdirSync(join(loose, "pages"), { recursive: true });
+  writeFileSync(join(loose, "pages", "about.json"), JSON.stringify({ slug: "/about", locale: "en-US", data: { version: 2, sections: [] } }));
+  resetSites();
+  const r = await run(home, ["pages", "migrate-layout", loose, "--write"]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(A.state.requests.length + B.state.requests.length, 0, "a local write used the global default context");
+  assert.ok(existsSync(join(loose, "pages", "en-US", "routes", "about", "index.json")));
+  const again = tmp("bcf-mx-migrate-");
+  mkdirSync(join(again, "pages"), { recursive: true });
+  writeFileSync(join(again, "pages", "about.json"), JSON.stringify({ slug: "/about", locale: "en-US", data: { version: 2, sections: [] } }));
+  resetSites();
+  const explicit = await run(home, ["pages", "migrate-layout", again, "--write", "--context", "alpha"]);
+  assert.equal(explicit.code, 0, explicit.stderr);
+  assert.ok(count(A, "GET", "/api/dev/whoami") >= 1, "an explicit --context is honoured");
+  assert.equal(B.state.requests.length, 0);
+});
+
 test("[18] secret leakage scan: every captured stdout/stderr and every file written outside the secret stores", () => {
   assert.ok(OUTPUTS.length > 50, `only ${OUTPUTS.length} outputs captured`);
   for (const o of OUTPUTS) {
