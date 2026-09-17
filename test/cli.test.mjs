@@ -18,10 +18,12 @@ function themeFixture() {
   const dir = mkdtempSync(join(tmpdir(), "blocofy-cli-"));
   mkdirSync(join(dir, "section"), { recursive: true });
   mkdirSync(join(dir, "asset"), { recursive: true });
+  mkdirSync(join(dir, "locales"), { recursive: true });
   mkdirSync(join(dir, "node_modules"), { recursive: true });
   writeFileSync(join(dir, "section", "Hero.liquid"), "HERO");
   writeFileSync(join(dir, "asset", "theme.css"), ".x{}");
   writeFileSync(join(dir, "asset", "logo.svg"), "<svg/>");
+  writeFileSync(join(dir, "locales", "en-US.json"), '{"hello":"world"}');
   writeFileSync(join(dir, "node_modules", "junk.js"), "ignored");
   writeFileSync(join(dir, "README.md"), "ignored");
   mkdirSync(join(dir, "config"), { recursive: true });
@@ -37,10 +39,12 @@ test("readLocalTemplates: THEME_DIRS + config/settings_schema.json, .liquid stri
     "asset/logo.svg",
     "asset/theme.css",
     "config/settings_schema.json",
+    "locales/en-US.json",
     "section/Hero",
   ]);
   assert.equal(t["section/Hero"], "HERO");
   assert.equal(t["asset/theme.css"], ".x{}");
+  assert.equal(t["locales/en-US.json"], '{"hello":"world"}');
   assert.equal(t["config/settings_schema.json"], "[]");
   // diger config/* sync DISI (color_schemes/theme.json kendi sistemi)
   assert.equal(t["config/color_schemes.json"], undefined);

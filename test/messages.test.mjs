@@ -5,7 +5,7 @@ import { healthAdvice, retryNotice, statusLine, syncScopeNote } from "../lib/mes
 
 test("syncScopeNote: tema dizinleri + config/settings_schema.json synced, pages not-synced", () => {
   const [synced, notSynced] = syncScopeNote();
-  for (const d of ["layout/", "section/", "block/", "partial/", "asset/", "template/"]) {
+  for (const d of ["layout/", "section/", "block/", "partial/", "asset/", "template/", "locales/"]) {
     assert.ok(synced.includes(d), `synced ${d} icermeli`);
   }
   assert.ok(synced.includes("config/settings_schema.json"));

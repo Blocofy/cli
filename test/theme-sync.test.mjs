@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -458,4 +458,107 @@ test("fetchDevSession: 410 gövdeli ise SUNUCUNUN mesajı gösterilir (otorite s
       return true;
     },
   );
+});
+
+// CF-T5: the platform accepts legacy theme locale files at `locales/<tag>.json` /
+// `locales/<tag>.default.json`. `locales` is a plain THEME_DIRS entry (not a Liquid kind), so
+// push/pull/diff treat it exactly like `asset`: raw content, no `.liquid` stripped/re-added.
+
+test("pushTheme: readLocalTemplates picks up locales/ (legacy locale files) and sends them", async () => {
+  let received = null;
+  const fake = createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      received = JSON.parse(body);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, created: 2, updated: 0 }));
+    });
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  const dir = mkdtempSync(join(tmpdir(), "blocofy-locales-push-"));
+  mkdirSync(join(dir, "locales"), { recursive: true });
+  writeFileSync(join(dir, "locales", "en-US.json"), '{"hello":"world"}');
+  writeFileSync(join(dir, "locales", "en-US.default.json"), '{"hello":"world"}');
+  after(() => {
+    fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  await pushTheme({ dir, url: `http://localhost:${fake.address().port}`, token: "bcf_t" });
+  assert.equal(received.files["locales/en-US.json"], '{"hello":"world"}');
+  assert.equal(received.files["locales/en-US.default.json"], '{"hello":"world"}');
+});
+
+test("pullTheme: writes locales/<tag>.json to disk raw (no .liquid re-added, unlike Liquid kinds)", async () => {
+  const fake = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ files: { "locales/en-US.json": '{"hello":"world"}' } }));
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  const dir = mkdtempSync(join(tmpdir(), "blocofy-locales-pull-"));
+  after(() => {
+    fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const { count } = await pullTheme({ dir, url: `http://localhost:${fake.address().port}`, token: "bcf_t" });
+  assert.equal(count, 1);
+  assert.equal(readFileSync(join(dir, "locales", "en-US.json"), "utf8"), '{"hello":"world"}');
+});
+
+test("pullTheme: a locales/ file among the response does not weaken the path-escape gate — `locales/../x.json` and `.BLOCOFY/…` are still refused (all-or-nothing)", async () => {
+  const fake = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      files: {
+        "locales/en-US.json": "{}",
+        "locales/../x.json": "escape",
+        ".BLOCOFY/project.json": "binding",
+      },
+    }));
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  const dir = mkdtempSync(join(tmpdir(), "blocofy-locales-escape-"));
+  after(() => {
+    fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  await assert.rejects(
+    pullTheme({ dir, url: `http://localhost:${fake.address().port}`, token: "bcf_t" }),
+    (err) => {
+      assert.equal(err.code, "PAGES_PATH_ESCAPE");
+      return true;
+    },
+  );
+  assert.equal(existsSync(join(dir, "locales", "en-US.json")), false, "all-or-nothing: even the valid file is not written");
+});
+
+test("pushTheme: a non-JSON filename under locales/ (e.g. locales/readme.md) is sent as-is — the CLI does not duplicate the server's tag/extension validation", async () => {
+  let received = null;
+  const fake = createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      received = JSON.parse(body);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, created: 1, updated: 0 }));
+    });
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  const dir = mkdtempSync(join(tmpdir(), "blocofy-locales-nonjson-"));
+  mkdirSync(join(dir, "locales"), { recursive: true });
+  writeFileSync(join(dir, "locales", "readme.md"), "not a locale file");
+  after(() => {
+    fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  await pushTheme({ dir, url: `http://localhost:${fake.address().port}`, token: "bcf_t" });
+  assert.equal(received.files["locales/readme.md"], "not a locale file");
 });
