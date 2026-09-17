@@ -63,3 +63,12 @@ test("keychain adapter: a failed write throws without the secret; a missing item
   assert.throws(() => linux.get("a", "dev"), (e) => e.code === "SECRET_STORE_UNAVAILABLE");
   assert.equal(called, false);
 });
+
+test("review M6: keychain set refuses a secret containing CR, LF or NUL before running `security -i` (no command injection); message has no secret", () => {
+  for (const bad of ["bcf_abc\ndelete-generic-password -s blocofy-cli", "bcf_abc\rx", "bcf_abc\0x"]) {
+    const calls = [];
+    const store = createKeychainSecretStore({ platform: "darwin", exec: (command, args, opts) => (calls.push({ command, args, opts }), { status: 0, stdout: "", stderr: "" }) });
+    assert.throws(() => store.set("ctx", "dev", bad), (e) => e.code === "SECRET_STORE_INVALID_SECRET" && !e.message.includes("bcf_abc"));
+    assert.equal(calls.length, 0, "security was invoked with a multi-line secret");
+  }
+});
