@@ -39,7 +39,7 @@ const pageV2 = (label) => JSON.stringify({ format_version: 2, slug: "/", locale:
 
 function fakeSite(key, { id, slug, name }) {
   const s = SECRETS[key];
-  const state = { requests: [], mutations: 0, whoami: "ok", ping: "ok", platformOrigin: ORIGIN, url: null };
+  const state = { requests: [], mutations: 0, whoami: "ok", ping: "ok", platformOrigin: ORIGIN, url: null, themeFiles: null };
   const json = (res, status, body, headers = {}) => {
     res.writeHead(status, { "content-type": "application/json", ...headers });
     res.end(typeof body === "string" ? body : JSON.stringify(body));
@@ -66,7 +66,7 @@ function fakeSite(key, { id, slug, name }) {
     if (url.pathname === "/api/dev/theme" && req.method === "GET") {
       const instance = url.searchParams.get("instance");
       if (instance && instance !== `t${key}live` && instance !== `t${key}draft`) return json(res, 404, { error: "not_found" });
-      return json(res, 200, { protocol: 1, files: { "layout/theme": `<html>${key}</html>`, "section/Hero": `hero ${key}` } });
+      return json(res, 200, { protocol: 1, files: state.themeFiles ?? { "layout/theme": `<html>${key}</html>`, "section/Hero": `hero ${key}` } });
     }
     if (url.pathname === "/api/dev/theme" && req.method === "POST") {
       const body = JSON.parse(raw || "{}");
@@ -108,6 +108,7 @@ function fakeSite(key, { id, slug, name }) {
       state.mutations = 0;
       state.whoami = "ok";
       state.ping = "ok";
+      state.themeFiles = null;
     },
     async start() {
       server.listen(0, "127.0.0.1");
@@ -594,6 +595,34 @@ test("[19] null platform origin: a pre-C3 binding (null) against an upgraded ser
   } finally {
     A.state.platformOrigin = ORIGIN;
   }
+});
+
+test("[20] review I1: theme pull refuses any key the push would not read back (case-folded .BLOCOFY, .git, dot-dirs, unknown top dirs) — zero writes", async () => {
+  const { home, projA } = await world();
+  const before = treeHash(projA);
+  const hostile = [
+    { ".BLOCOFY/project.json": JSON.stringify({ schema_version: 1, site_id: "sB2", site_slug: "beta", platform_origin: ORIGIN }) },
+    { ".Blocofy-Staging-x/a": "x" },
+    { ".git/hooks/pre-commit": "#!/bin/sh\necho pwned" },
+    { "section/.hidden/x": "x" },
+    { "README.md": "readme" },
+    { "Layout/theme": "<html>case</html>" },
+    { "config/settings_data.json": "{}" },
+  ];
+  for (const bad of hostile) {
+    resetSites();
+    A.state.themeFiles = { "layout/theme": "<html>A</html>", ...bad };
+    const r = await run(home, ["theme", "pull", projA, "--json"]);
+    assert.notEqual(r.code, 0, `${Object.keys(bad)[0]} was accepted:\n${r.stderr}`);
+    assert.equal(treeHash(projA), before, `${Object.keys(bad)[0]} changed the tree`);
+    assert.equal(JSON.parse(readFileSync(join(projA, ".blocofy", "project.json"), "utf8")).site_id, "sA1");
+  }
+  // The legitimate set still pulls (incl. config/settings_schema.json and a nested asset path).
+  resetSites();
+  A.state.themeFiles = { "layout/theme": "<html>A2</html>", "asset/img/logo.svg": "<svg/>", "config/settings_schema.json": "[]" };
+  const ok = await run(home, ["theme", "pull", projA]);
+  assert.equal(ok.code, 0, ok.stderr);
+  assert.equal(readFileSync(join(projA, "config", "settings_schema.json"), "utf8"), "[]");
 });
 
 test("[18] secret leakage scan: every captured stdout/stderr and every file written outside the secret stores", () => {
