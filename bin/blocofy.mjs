@@ -27,6 +27,7 @@ import {
   readSecrets,
   removeSecrets,
   saveStore,
+  withStoreLock,
   writeSecret,
 } from "../lib/credentials.mjs";
 import { printError, printTarget, printWarning, redact, registerSecret, targetData } from "../lib/output.mjs";
@@ -373,7 +374,11 @@ async function assertPairFitsContext(name, existing, identity, otherKind) {
 }
 
 /** Save one verified pair into a context (secret first, then the context file). */
-function saveVerifiedPair(name, kind, { url, secret, identity, storeName }) {
+function saveVerifiedPair(name, kind, args) {
+  withStoreLock(() => saveVerifiedPairLocked(name, kind, args));
+}
+
+function saveVerifiedPairLocked(name, kind, { url, secret, identity, storeName }) {
   const store = loadStore();
   const existing = store.contexts[name];
   writeSecret(name, kind, storeName, secret);
@@ -541,10 +546,12 @@ async function useCommand(rest) {
   const { positionals } = parseArgsOrExit(rest, []);
   const name = positionals[0];
   if (!name || positionals.length > 1) throw new TargetError("USAGE", "Usage: blocofy use <context>", {}, 1);
-  const store = loadStore();
-  if (!store.contexts[name]) throw new TargetError("TARGET_CONTEXT_UNKNOWN", `No context named "${name}". List them with \`blocofy contexts\`.`, { context: name });
-  store.current_context = name;
-  saveStore(store);
+  withStoreLock(() => {
+    const store = loadStore();
+    if (!store.contexts[name]) throw new TargetError("TARGET_CONTEXT_UNKNOWN", `No context named "${name}". List them with \`blocofy contexts\`.`, { context: name });
+    store.current_context = name;
+    saveStore(store);
+  });
   console.log(`✓ Default context for read-only commands outside a project: ${name}`);
   console.log("  (Inside a bound project the project's site decides; `use` never retargets it.)");
 }
@@ -553,13 +560,15 @@ async function logoutCommand(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, []);
   const name = typeof flags.context === "string" ? flags.context : null;
   if (!name || positionals.length) throw new TargetError("USAGE", "Usage: blocofy logout --context <name>", {}, 1);
-  const store = loadStore();
-  const ctx = store.contexts[name];
-  if (!ctx) throw new TargetError("TARGET_CONTEXT_UNKNOWN", `No context named "${name}".`, { context: name });
-  removeSecrets(name, ctx);
-  delete store.contexts[name];
-  if (store.current_context === name) store.current_context = null;
-  saveStore(store);
+  withStoreLock(() => {
+    const store = loadStore();
+    const ctx = store.contexts[name];
+    if (!ctx) throw new TargetError("TARGET_CONTEXT_UNKNOWN", `No context named "${name}".`, { context: name });
+    removeSecrets(name, ctx);
+    delete store.contexts[name];
+    if (store.current_context === name) store.current_context = null;
+    saveStore(store);
+  });
   console.log(`✓ Removed context "${name}" and its secrets.`);
 }
 
@@ -614,13 +623,15 @@ async function targetCommand(rest) {
 /** An unverified (migrated) named context gets the verified site recorded once. */
 function recordVerifiedSite(resolved, identity) {
   if (resolved.env || resolved.context.site) return;
-  const store = loadStore();
-  const ctx = store.contexts[resolved.name];
-  if (!ctx || ctx.site) return;
-  ctx.site = { id: identity.site.id, slug: identity.site.slug ?? null, name: identity.site.name ?? null, domain: identity.site.domain ?? null };
-  ctx.platform_origin = identity.platformOrigin;
-  ctx.verified_at = new Date().toISOString();
-  saveStore(store);
+  withStoreLock(() => {
+    const store = loadStore();
+    const ctx = store.contexts[resolved.name];
+    if (!ctx || ctx.site) return;
+    ctx.site = { id: identity.site.id, slug: identity.site.slug ?? null, name: identity.site.name ?? null, domain: identity.site.domain ?? null };
+    ctx.platform_origin = identity.platformOrigin;
+    ctx.verified_at = new Date().toISOString();
+    saveStore(store);
+  });
 }
 
 async function promptContext(candidates) {

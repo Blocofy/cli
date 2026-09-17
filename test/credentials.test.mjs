@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { CredentialsError, backupPath, credentialsPath, envContext, loadStore, readSecrets, saveStore, secretsPath, writeSecret } from "../lib/credentials.mjs";
+import { CredentialsError, backupPath, credentialsPath, envContext, loadStore, lockPath, readSecrets, saveStore, secretsPath, withStoreLock, writeSecret } from "../lib/credentials.mjs";
 import { promptSecret } from "../lib/secret-prompt.mjs";
 
 /**
@@ -336,4 +336,29 @@ test("promptSecret: Ctrl-C → null (kayıt yok), raw mode geri alınır", async
   input.emit("data", "abc");
   assert.equal(await p, null);
   assert.deepEqual(input.rawModes, [true, false]);
+});
+
+test("review M5: concurrent logins into one HOME (different contexts) — every context and secret is saved (store lock)", async () => {
+  const s = await fakeSite();
+  try {
+    const names = ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"];
+    const results = await Promise.all(names.map((n) => runCli(["login", "--url", s.url, "--token", DEV.token, "--context", n])));
+    for (const r of results) assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(Object.keys(loadStore().contexts).sort(), names, "a concurrent login lost another login's context");
+    assert.deepEqual(Object.keys(readJson(secretsPath())).sort(), names, "a concurrent login lost another login's secret");
+    assert.equal(existsSync(join(home, ".blocofy", ".lock")), false, "the lock is released");
+  } finally {
+    await s.close();
+  }
+});
+
+test("review M5: a stale lock (crashed process, > 10 s old) is taken over; the lock is released after the callback, even on throw", () => {
+  mkdirSync(dirname(lockPath()), { recursive: true });
+  writeFileSync(lockPath(), "99999");
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(lockPath(), old, old);
+  assert.equal(withStoreLock(() => "ran"), "ran");
+  assert.equal(existsSync(lockPath()), false);
+  assert.throws(() => withStoreLock(() => { throw new Error("boom"); }), /boom/);
+  assert.equal(existsSync(lockPath()), false);
 });
