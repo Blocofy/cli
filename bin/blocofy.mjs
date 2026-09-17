@@ -15,7 +15,7 @@ import { join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 
 import { parseArgs } from "../lib/args.mjs";
-import { checkPages, migrateLayout, pullContent, pushContent } from "../lib/content-sync.mjs";
+import { FORCE_REASON_MAX, checkPages, forcedPaths, migrateLayout, pullContent, pushContent } from "../lib/content-sync.mjs";
 import { PagesCliError, formatDiagnostic } from "../lib/page-files.mjs";
 import {
   CredentialsError,
@@ -74,7 +74,7 @@ const KNOWN = {
   themeRename: ["name"],
   content: [],
   pagesPull: ["strict"],
-  pagesPush: ["dry-run", "strict"],
+  pagesPush: ["dry-run", "strict", "force", "reason"],
   pagesCheck: ["strict"],
   pagesMigrate: ["dry-run", "write", "strict"],
 };
@@ -974,6 +974,26 @@ function localeLabel(p) {
   return `${p.locale} ${p.slug}`;
 }
 
+/** CF-T3 — plan totals, as the target block's operation and the table footer show them. */
+function planTotals(pages) {
+  const count = (action) => pages.filter((p) => p.action === action).length;
+  return { live: count("publish"), draft: count("draft"), unchanged: count("unchanged"), conflicts: pages.filter((p) => p.conflict === true).length };
+}
+
+/** CF-T3 — the per-page plan a revision-checking server returned (stdout). */
+function printPlanTable(plan) {
+  const pages = plan.pages ?? [];
+  const rows = pages.map((p) => [p.action ?? "", p.target ?? "", p.locale ?? "", p.path ?? "", (p.changed_fields ?? []).join(", ") || "-", p.conflict ? "[conflict]" : ""]);
+  const header = ["ACTION", "TARGET", "LOCALE", "PATH", "CHANGED", ""];
+  const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
+  const line = (r) => "  " + r.map((c, i) => c.padEnd(widths[i])).join("  ").trimEnd();
+  console.log("Plan:");
+  console.log(line(header));
+  for (const r of rows) console.log(line(r));
+  const t = planTotals(pages);
+  console.log(`Totals: live ${t.live} · draft ${t.draft} · unchanged ${t.unchanged} · conflicts ${t.conflicts}`);
+}
+
 async function pagesPush(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, KNOWN.pagesPush);
   const dir = resolve(positionals[0] ?? process.cwd());
@@ -982,15 +1002,65 @@ async function pagesPush(rest) {
     process.exit(1);
   }
   const dryRun = Boolean(flags["dry-run"]);
-  const target = await prepareTarget({ command: "pages push", commandClass: dryRun ? "read" : "remote-mutation", dir, flags, needs: "dev", mode: dryRun ? "read · dry run" : "live" });
+  const force = Boolean(flags.force);
+  const reason = typeof flags.reason === "string" ? flags.reason : null;
+  // CF-T3 — force always carries a reason (1–500 characters); a reason without force is a mistake, not a no-op.
+  if (flags.reason !== undefined && !force) {
+    printError({ code: "USAGE_REASON_WITHOUT_FORCE", message: "--reason is only used with --force. Nothing was sent." }, { json: JSON_MODE });
+    process.exit(1);
+  }
+  if (force && (reason === null || reason.trim() === "" || reason.length > FORCE_REASON_MAX)) {
+    printError({ code: "USAGE_FORCE_REASON_REQUIRED", message: `--force needs --reason <text> (1-${FORCE_REASON_MAX} characters): why newer content on the site may be overwritten. Nothing was sent.` }, { json: JSON_MODE });
+    process.exit(1);
+  }
+  const baseMode = `${dryRun ? "read · dry run" : "live"}${force ? " · FORCE" : ""}`;
+  const target = await prepareTarget({ command: "pages push", commandClass: dryRun ? "read" : "remote-mutation", dir, flags, needs: "dev", mode: baseMode, quiet: true });
+  // The target block is printed once: with the plan totals when the server returns a plan, else as soon as it is known.
+  let shown = false;
+  const showTarget = (operation = target.display.operation) => {
+    if (shown) return;
+    shown = true;
+    printTarget({ ...target.display, operation }, { json: JSON_MODE });
+  };
   const creds = target.dev;
-  const result = await pushContent({ dir, url: creds.url, token: creds.token, scope: "pages", dryRun, onRetry });
+  let result;
+  try {
+    result = await pushContent({
+      dir,
+      url: creds.url,
+      token: creds.token,
+      scope: "pages",
+      dryRun,
+      force,
+      forceReason: reason,
+      onRetry,
+      onServer: (server) => {
+        if (server.revisionCas) return;
+        showTarget();
+        printWarning({ code: "PAGES_REVISION_CAS_UNAVAILABLE", message: "stale-file protection is not available on this server: a page file pulled before someone else's edit can overwrite it. Pull right before you push." }, { json: JSON_MODE });
+      },
+      onPlan: (plan) => {
+        const t = planTotals(plan.pages ?? []);
+        showTarget(`pages push · ${dryRun ? "dry run · " : ""}${force ? "FORCE · " : ""}live ${t.live} · draft ${t.draft} · unchanged ${t.unchanged}`);
+        if (!JSON_MODE) printPlanTable(plan);
+      },
+    });
+  } catch (error) {
+    showTarget();
+    throw error;
+  }
+  showTarget();
   const code = reportPageDiagnostics(result.diagnostics ?? [], { strict: Boolean(flags.strict) });
+  if (JSON_MODE) {
+    const { fileCount: _f, revisionCas: _r, ...body } = result;
+    console.log(JSON.stringify(body, null, 2));
+    process.exit(code);
+  }
   const pages = result.pages ?? [];
   const count = (k, v) => pages.filter((p) => p[k] === v).length;
   const warnings = (result.diagnostics ?? []).filter((d) => d.level === "warning").length;
   if (dryRun) {
-    console.log(`Preflight passed: ${count("action", "publish")} updates, ${count("action", "draft")} drafts, ${count("action", "unchanged")} unchanged, 0 conflicts, ${warnings} warning(s).`);
+    console.log(`Preflight passed: ${count("action", "publish")} updates, ${count("action", "draft")} drafts, ${count("action", "unchanged")} unchanged, ${count("conflict", true)} conflicts, ${warnings} warning(s).`);
     console.log("Dry run only; no pages were changed.");
   } else {
     for (const p of pages) if (p.outcome !== "unchanged") console.log(`  ${p.outcome}  ${localeLabel(p)}  (${p.path})`);
@@ -998,6 +1068,11 @@ async function pagesPush(rest) {
       `Pages push: ${result.pagesUpdated} updated, ${result.pagesSkipped} skipped, ${warnings} warning(s) ` +
         `(only existing pages are updated — none created or deleted).`,
     );
+  }
+  const forced = forcedPaths(result.forced);
+  if (forced.length) {
+    console.log(dryRun ? "Forced (would overwrite without a base check):" : "Forced:");
+    for (const path of forced) console.log(`  ${path}`);
   }
   process.exit(code);
 }
