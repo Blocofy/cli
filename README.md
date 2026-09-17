@@ -46,12 +46,37 @@ blocofy pages media-decide <page-handle> --decisions <file.json>
                           # items without idempotency_key get a random UUID. Exit 0 applied
                           # (or "No changes" when already recorded), 1 usage/auth/network/5xx
                           # (no retry), 2 server refusal (4xx) — {error} JSON on stderr.
+blocofy pages pull [dir] [--strict]
+                          # Download published pages, one folder per language:
+                          # pages/<locale>/index.json and pages/<locale>/routes/<path>/index.json.
+                          # Old-layout files are reported, never deleted or overwritten. If the site
+                          # cannot export every page, nothing is written (PAGES_EXPORT_INCOMPLETE).
+blocofy pages push [dir] [--dry-run] [--strict]
+                          # Update EXISTING pages only. Every file is checked first; any invalid file,
+                          # duplicate target or folder/locale mismatch changes NO page. An error after
+                          # that check may leave some pages applied: the per-file result is printed,
+                          # exit 1, and re-running is safe. --dry-run checks on the server, writes nothing.
+blocofy pages check [dir] [--strict]
+                          # Offline file/path/layout checks; with login also the server dry run.
+blocofy pages migrate-layout [dir] [--dry-run | --write] [--strict]
+                          # Move old-layout files (pages/<slug>.json) to language folders. Any
+                          # ambiguity or conflict moves nothing (exit 1).
 blocofy --version
 blocofy --help
 ```
 
 ## Changelog
 
+- **0.9.0** — Locale-aware page files for multilingual sites (needs a platform with page file protocol 2;
+  against an older server page commands stop with `PAGES_SERVER_UPGRADE_REQUIRED` and write nothing).
+  `pages pull` writes `pages/<locale>/index.json` and `pages/<locale>/routes/<path>/index.json`, so the same
+  URL in two languages no longer shares one file. `pages push` preflights the whole directory and the server
+  refuses the batch before any write on an invalid file, duplicate target or folder/locale mismatch; a
+  failure after preflight prints the per-file result. New `pages check`, `pages push --dry-run` and
+  `pages migrate-layout [--dry-run | --write]`. Pull validates every server path, never follows symlinks,
+  never writes outside the target directory and stages its writes (0.8.0 could write a server-supplied
+  `../` path outside it). An incomplete export prints every reason with `PAGES_EXPORT_INCOMPLETE` and writes
+  nothing. Limits: 500 page files, 2 MiB per file, 4 MiB total.
 - **0.8.0** — Page media decisions over the public v1 API: `pages media-uses <page-handle>` lists a
   page's localized-media decisions on its newest draft, and `pages media-decide <page-handle>
   --decisions <file.json>` applies a batch of decisions to that draft atomically (all or nothing;
