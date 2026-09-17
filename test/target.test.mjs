@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -249,4 +249,37 @@ test("output: the target block format, the error envelope, and secret redaction"
   out = "";
   printError(new TargetError("TARGET_UNVERIFIED", "down"), { stream });
   assert.equal(out, "error [TARGET_UNVERIFIED]: down\n");
+});
+
+test("review I2: writeBinding never follows symlinks (the .blocofy dir or any of its three files); outside files untouched", () => {
+  const outside = mkdtempSync(join(tmpdir(), "bcf-outside-"));
+  dirs.push(outside);
+  const victim = join(outside, "victim.txt");
+  const site = { id: "sA1", slug: "alpha" };
+
+  // .blocofy itself is a symlink to another directory.
+  const r1 = mkdtempSync(join(tmpdir(), "bcf-link-"));
+  dirs.push(r1);
+  symlinkSync(outside, join(r1, ".blocofy"));
+  assert.throws(() => writeBinding(r1, { site, platformOrigin: ORIGIN, contextName: "alpha" }), (e) => e.code === "TARGET_BINDING_INVALID");
+  assert.equal(existsSync(join(outside, "project.json")), false, "wrote through a symlinked .blocofy");
+
+  for (const name of ["project.json", "local.json", ".gitignore"]) {
+    writeFileSync(victim, "ORIGINAL");
+    const r = mkdtempSync(join(tmpdir(), "bcf-link-"));
+    dirs.push(r);
+    mkdirSync(join(r, ".blocofy"));
+    symlinkSync(victim, join(r, ".blocofy", name));
+    assert.throws(() => writeBinding(r, { site, platformOrigin: ORIGIN, contextName: "alpha" }), (e) => e.code === "TARGET_BINDING_INVALID", name);
+    assert.equal(readFileSync(victim, "utf8"), "ORIGINAL", `${name}: a symlink target outside the project was overwritten`);
+    assert.equal(existsSync(join(r, ".blocofy", "project.json")) && name !== "project.json", false, `${name}: nothing is written when any file is a symlink`);
+  }
+
+  // Normal case still works, atomically (no temp leftovers), and re-writing replaces the files.
+  const ok = mkdtempSync(join(tmpdir(), "bcf-link-"));
+  dirs.push(ok);
+  writeBinding(ok, { site, platformOrigin: ORIGIN, contextName: "alpha" });
+  writeBinding(ok, { site, platformOrigin: null, contextName: "alpha" });
+  assert.deepEqual(JSON.parse(readFileSync(join(ok, ".blocofy", "project.json"), "utf8")).platform_origin, null);
+  assert.deepEqual(readdirSync(join(ok, ".blocofy")).sort(), [".gitignore", "local.json", "project.json"]);
 });
