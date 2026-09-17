@@ -187,19 +187,29 @@ Usage
       If the site cannot export every published page, nothing is written, every reason is
       printed (PAGES_EXPORT_INCOMPLETE) and the exit code is 2 (--strict: warnings exit 1).
 
-  blocofy pages push [dir] [--dry-run] [--strict]
+  blocofy pages push [dir] [--dry-run] [--strict] [--force --reason <text>]
       Write pages/**.json to the site. Updates EXISTING pages only — never creates or
       deletes a page; unchanged pages are skipped. Every file is checked first: if any
       file is invalid, two files point at the same page, or a folder's language does not
       match the file's "locale", NO page is changed. If publishing then stops unexpectedly
       (PAGES_APPLY_FAILED or another publish error), some pages may already be applied: the per-file
       result printed is authoritative, the exit code is non-zero, and running the push again is safe.
-      --dry-run: check on the server, write nothing.
+      Stale files: every pulled file carries "base_revision" (the page as you pulled it). The push
+      first asks for a plan (per page: action, live/draft, changed fields), prints it, then pushes
+      exactly that plan. If a page changed on the site since you pulled it (PAGES_REVISION_CONFLICT)
+      or a file has no base_revision (PAGES_BASE_REVISION_REQUIRED), nothing is changed (exit 2):
+      run \`blocofy pages pull\`, merge your edits, push again. If the site changes between the plan
+      and the push, nothing is changed either (PAGES_PLAN_STALE, exit 2) — run the push again.
+      --force --reason <text>: overwrite anyway (reason: 1-500 characters); the
+      forced pages are listed. An older server cannot check revisions: the push runs
+      as before with a warning.
+      --dry-run: print the plan, write nothing. --json: the server's plan/result JSON on stdout.
       Needs a platform that supports language folders (else PAGES_SERVER_UPGRADE_REQUIRED).
 
   blocofy pages check [dir] [--strict]
-      Check page files. Offline: paths, JSON, layout, duplicates. Logged in: also the
-      site's languages and the server-side dry run. Exit 1 on errors (--strict: warnings too).
+      Check page files. Offline: paths, JSON, layout, duplicates, missing base_revision
+      (PAGES_BASE_REVISION_MISSING warning). Logged in: also the site's languages and the
+      server-side dry run. Exit 1 on errors (--strict: warnings too).
 
   blocofy pages migrate-layout [dir] [--dry-run | --write] [--strict]
       Move old-layout files (pages/<slug>.json) to language folders. --dry-run (default)

@@ -446,3 +446,9 @@ test("old server (no page_revision_cas): push proceeds as before with one warnin
     fake.close();
   }
 });
+
+test("help explains base_revision, conflict recovery and --force --reason", async () => {
+  const r = await run(["--help"], "http://127.0.0.1:9");
+  assert.match(r.stdout, /base_revision/);
+  assert.match(r.stdout, /--force --reason <text>/);
+});
