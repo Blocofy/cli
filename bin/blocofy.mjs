@@ -143,7 +143,7 @@ Usage
       deletes a page; unchanged pages are skipped. Every file is checked first: if any
       file is invalid, two files point at the same page, or a folder's language does not
       match the file's "locale", NO page is changed. If publishing then stops unexpectedly
-      (PAGES_APPLY_FAILED or a busy site), some pages may already be applied: the per-file
+      (PAGES_APPLY_FAILED or another publish error), some pages may already be applied: the per-file
       result printed is authoritative, the exit code is 1, and running the push again is safe.
       --dry-run: check on the server, write nothing.
       Needs a platform that supports language folders (else PAGES_SERVER_UPGRADE_REQUIRED).
