@@ -137,3 +137,31 @@ test("status shows the site URL, not an opaque site id", async () => {
     server.close();
   }
 });
+
+test("CF-T9: `blocofy status` on pages_split prints the holding theme, missing pages and preview-first steps — never a one-line publish fix", async () => {
+  const server = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    if (req.url.endsWith("/api/dev/whoami")) return res.end(JSON.stringify({ site: { id: 14, slug: "ksc", name: "Ksc Metal" }, liveThemeId: "t2live" }));
+    res.end(JSON.stringify({
+      site: { slug: "ksc" }, url: "https://ksc.myblocofy.com",
+      live_theme_instance: { id: "t2live", name: "Live", template_count: 12 }, pages_on_live: 3,
+      pages_by_instance: [{ theme_instance: "t2live", count: 3 }, { theme_instance: "t8dpkn1", count: 1 }],
+      orphaned_pages: 1, orphan_missing_slugs: ["/team"], drafts: [{ id: "t8dpkn1", name: "CLI Draft", source: "import" }], health: "pages_split",
+    }));
+  });
+  server.listen(0);
+  await once(server, "listening");
+  const home = mkdtempSync(join(tmpdir(), "blocofy-home-"));
+  try {
+    const { stdout, stderr } = await execFileP("node", [BIN, "status"], { cwd: home, env: { PATH: process.env.PATH, HOME: home, BLOCOFY_URL: `http://localhost:${server.address().port}`, BLOCOFY_TOKEN: "bcf_t" } });
+    assert.match(stdout, /Health: pages_split/);
+    assert.match(stderr, /Missing on the live theme: \/team/);
+    assert.match(stderr, /not live: t8dpkn1 "CLI Draft"/);
+    assert.match(stderr, /theme pull <empty-dir> --instance t8dpkn1/);
+    assert.doesNotMatch(stderr + stdout, /Fix:/);
+    for (const line of (stderr + stdout).split("\n")) if (/theme publish/.test(line)) assert.match(line, /REPLACES the live theme/);
+  } finally {
+    server.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});

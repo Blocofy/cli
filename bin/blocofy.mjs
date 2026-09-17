@@ -46,7 +46,7 @@ import {
 import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
 import { CliRefusal, DEFAULT_API_URL, decidePageMediaUses, fetchPageMediaUses, isValidApiKey } from "../lib/media-uses.mjs";
-import { githubNote, retryNotice, statusLine, syncScopeNote } from "../lib/messages.mjs";
+import { githubNote, healthAdvice, retryNotice, statusLine, syncScopeNote } from "../lib/messages.mjs";
 import { promptSecret } from "../lib/secret-prompt.mjs";
 import { diffTheme, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
 import { isAffirmative, livePushDecision, resolvePushMode } from "../lib/confirm.mjs";
@@ -164,14 +164,15 @@ Usage
       including the live one. Handle comes from the panel theme card or 'blocofy status'.
 
   blocofy theme publish [--instance <handle>]
-      Publish a draft theme to the LIVE site. With no flag, publishes the draft that
-      'theme dev' / 'theme push --draft' writes into. The server refuses to publish a
-      theme that has no pages (it would 404) — so publishing is always safe.
+      Publish a draft theme to the LIVE site: it REPLACES the live theme for every visitor.
+      With no flag, publishes the draft that 'theme dev' / 'theme push --draft' writes into.
+      The server refuses to publish a theme that has no pages (it would 404); preview first.
         --instance <handle>  publish a specific theme (handle from the panel / status)
 
   blocofy status
       Show the live theme, page distribution per instance, drafts, and a health flag
-      (ok / live_instance_empty / pages_split). Run before/after publishing.
+      (ok / live_instance_empty / pages_split). For a problem it names the theme holding the
+      pages, the missing pages, why, and safe preview-first next steps — never a one-line fix.
 
   blocofy pages pull [dir] [--strict]
       Download published pages, one folder per language:
@@ -1329,24 +1330,8 @@ async function status(rest) {
       : `Live theme: none`,
   );
   console.log(`Health: ${s.health}`);
-  // orphan_missing_slugs yeni sunucu alanı (PR #661). Eski/deploy-edilmemiş sunucuda
-  // yok → null; o durumda eski (yumuşatılmış) sayaç satırına düş.
-  const missing = Array.isArray(s.orphan_missing_slugs) ? s.orphan_missing_slugs : null;
-  if (s.health === "live_instance_empty") {
-    console.error(
-      `  ⚠ The live theme has no pages — the site will 404. Publish a theme with content:  blocofy theme publish`,
-    );
-  } else if (s.health === "pages_split") {
-    if (missing && missing.length) {
-      console.warn(
-        `  ⚠ These pages are published only on a non-live theme, so visitors can't reach them (404 risk): ` +
-          `${missing.join(", ")}\n` +
-          `  Fix: publish the theme that has them —  blocofy theme publish`,
-      );
-    } else {
-      console.warn(`  ⚠ ${s.orphaned_pages} page(s) published on a non-live theme.`);
-    }
-  }
+  // CF-T9: no imperative one-line fix — which theme holds the pages, why, and safe (preview-first) next steps.
+  for (const line of healthAdvice(s)) console.error(line);
   if (Array.isArray(s.drafts) && s.drafts.length > 0) {
     console.log(`Drafts: ${s.drafts.map((d) => `${d.id}${d.name ? ` ${d.name}` : ""}`).join(", ")}`);
   }
