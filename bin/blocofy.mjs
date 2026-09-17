@@ -29,10 +29,11 @@ import {
   saveStore,
   writeSecret,
 } from "../lib/credentials.mjs";
-import { printError, printTarget, registerSecret, targetData } from "../lib/output.mjs";
+import { printError, printTarget, printWarning, registerSecret, targetData } from "../lib/output.mjs";
 import {
   CONTEXT_NAME_RE,
   TargetError,
+  compareOrigin,
   enforceBindingPolicy,
   findBinding,
   precheckContext,
@@ -238,6 +239,9 @@ Targets (which site a command talks to)
   Inside a bound project \`use\` is ignored. Commands that change a site (theme push/publish/
   rename/dev sync, pages push, settings push, pages media-decide) need a bound project;
   pulls into a new empty directory bind it. A wrong project/site pairing changes nothing.
+  A binding made against an older server has no platform origin: it still matches the same site
+  (one warning; run \`blocofy link --adopt\` to record it). A server that reports no origin cannot
+  serve a binding that records one (TARGET_UNVERIFIED).
   Exit codes: 0 ok · 1 usage/network/5xx · 2 server refusal (4xx) · 3 target/binding refusal.
   --json prints refusals as {"error":{"code","message","details"}}.
 
@@ -294,7 +298,9 @@ async function assertPairFitsContext(name, existing, identity, otherKind) {
     );
   };
   if (existing.site) {
-    if (String(existing.site.id) !== String(identity.site.id) || (existing.platform_origin ?? null) !== identity.platformOrigin) mismatch(existing.site);
+    const o = compareOrigin(existing.platform_origin, identity.platformOrigin);
+    // "upgrade" (recorded null, server now reports one): this login records it.
+    if (String(existing.site.id) !== String(identity.site.id) || o === "mismatch" || o === "unproven") mismatch(existing.site);
     return;
   }
   if (!existing[otherKind]) return;
@@ -515,9 +521,11 @@ async function linkCommand(rest) {
   registerSecret(secrets.devToken);
   registerSecret(secrets.apiKey);
   const identity = await verifyTarget({ resolved, secrets, binding: null });
+  for (const w of identity.warnings ?? []) printWarning(w, { json: JSON_MODE });
 
   const own = existsSync(join(dir, ".blocofy", "project.json")) ? findBinding(dir) : null;
-  if (own && (String(own.project.site_id) !== String(identity.site.id) || (own.project.platform_origin ?? null) !== identity.platformOrigin) && !flags.adopt) {
+  const ownOrigin = own ? compareOrigin(own.project.platform_origin, identity.platformOrigin) : "match";
+  if (own && (String(own.project.site_id) !== String(identity.site.id) || (ownOrigin !== "match" && ownOrigin !== "upgrade")) && !flags.adopt) {
     throw new TargetError(
       "TARGET_SITE_MISMATCH",
       `${dir} is already bound to site ${own.project.site_slug ?? own.project.site_id}; context "${resolved.name}" is for ${identity.site.slug ?? identity.site.id}. Nothing was written. Pass --adopt to rebind it.`,
@@ -603,6 +611,7 @@ async function prepareTarget({ command, commandClass, dir, flags, needs, mode, r
   }
 
   const identity = await verifyTarget({ resolved, secrets, binding });
+  for (const w of identity.warnings ?? []) printWarning(w, { json: JSON_MODE });
   if (record) recordVerifiedSite(resolved, identity);
 
   const url = needs === "api" ? resolved.context.api?.url : resolved.context.dev?.url ?? resolved.context.api?.url;

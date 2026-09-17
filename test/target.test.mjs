@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 
 import { registerSecret, formatTargetBlock, printError, redact, targetData } from "../lib/output.mjs";
-import { TargetError, enforceBindingPolicy, findBinding, precheckContext, resolveContext, verifyTarget, writeBinding } from "../lib/target.mjs";
+import { TargetError, compareOrigin, enforceBindingPolicy, findBinding, precheckContext, resolveContext, verifyTarget, writeBinding } from "../lib/target.mjs";
 
 /** CF-T1/T2 (contract C2) — the pure resolver order, binding policy, identity comparison and output format. */
 
@@ -162,14 +162,63 @@ test("verifyTarget: both pairs verified and compared (TARGET_CREDENTIAL_MISMATCH
   assert.equal(await code(verifyTarget({ resolved: both, secrets, binding: null, fetchImpl: fakeFetch({ "/api/dev/whoami": { body: "<html>" }, "/api/v1/ping": pingA }) })), "TARGET_UNVERIFIED");
   assert.equal(await code(verifyTarget({ resolved: both, secrets, binding: null, fetchImpl: fakeFetch({ "/api/dev/whoami": { body: { site: {} } }, "/api/v1/ping": pingA }) })), "TARGET_UNVERIFIED");
   assert.equal(await code(verifyTarget({ resolved: both, secrets, binding: null, fetchImpl: fakeFetch({}) })), "TARGET_UNVERIFIED");
-  // An old server without platform_origin → null, which only matches a binding whose platform_origin is null.
+  // Old server (no platform_origin) + a binding that records one: the platform cannot be proven (four-way rule below).
   const oldServer = fakeFetch({ "/api/dev/whoami": { body: { site: siteA } } });
   const devOnly = { name: "a", context: ctx(null) };
-  assert.equal(await code(verifyTarget({ resolved: devOnly, secrets, binding: bindingFor(siteA), fetchImpl: oldServer })), "TARGET_SITE_MISMATCH");
+  assert.equal(await code(verifyTarget({ resolved: devOnly, secrets, binding: bindingFor(siteA), fetchImpl: oldServer })), "TARGET_UNVERIFIED");
   const nullBinding = { ...bindingFor(siteA), project: { ...bindingFor(siteA).project, platform_origin: null } };
   assert.equal(await code(verifyTarget({ resolved: devOnly, secrets, binding: nullBinding, fetchImpl: oldServer })), "ok");
   // A context recorded for A whose token now resolves to B.
   assert.equal(await code(verifyTarget({ resolved: { name: "a", context: ctx(siteA) }, secrets, binding: null, fetchImpl: fakeFetch({ "/api/dev/whoami": { body: { site: siteB, platform_origin: ORIGIN } } }) })), "TARGET_SITE_MISMATCH");
+});
+
+test("null platform origin rule: binding × server origin, all four combinations (+ the context record)", async () => {
+  const secrets = { devToken: "bcf_x", apiKey: null };
+  const devOnly = { name: "a", context: ctx(null) };
+  const server = (platform_origin, site = siteA) => fakeFetch({ "/api/dev/whoami": { body: { site, ...(platform_origin === undefined ? {} : { platform_origin }) } } });
+  const withOrigin = (site, o) => ({ ...bindingFor(site), project: { ...bindingFor(site).project, platform_origin: o } });
+  const outcome = async (binding, fetchImpl, resolved = devOnly) => {
+    try {
+      const id = await verifyTarget({ resolved, secrets, binding, fetchImpl });
+      return { code: "ok", warnings: (id.warnings ?? []).map((w) => w.code), messages: (id.warnings ?? []).map((w) => w.message) };
+    } catch (e) {
+      return { code: e.code, message: e.message };
+    }
+  };
+
+  assert.deepEqual(["match", "upgrade", "unproven", "mismatch"], [compareOrigin(ORIGIN, ORIGIN), compareOrigin(null, ORIGIN), compareOrigin(ORIGIN, null), compareOrigin(ORIGIN, "https://other.test")]);
+  assert.equal(compareOrigin(null, null), "match");
+
+  // 1. binding null × server non-null, same site → proceeds with ONE warning naming `link --adopt` and the origin.
+  const up = await outcome(withOrigin(siteA, null), server(ORIGIN));
+  assert.equal(up.code, "ok");
+  assert.deepEqual(up.warnings, ["TARGET_BINDING_ORIGIN_MISSING"]);
+  assert.match(up.messages[0], /blocofy link --adopt/);
+  assert.ok(up.messages[0].includes(ORIGIN));
+  //    …but a different site id is still a mismatch.
+  assert.equal((await outcome(withOrigin(siteA, null), server(ORIGIN, siteB))).code, "TARGET_SITE_MISMATCH");
+  // 2. binding non-null × server null → TARGET_UNVERIFIED, message says the server does not report its origin.
+  const unproven = await outcome(withOrigin(siteA, ORIGIN), server(undefined));
+  assert.equal(unproven.code, "TARGET_UNVERIFIED");
+  assert.match(unproven.message, /does not report its platform origin/);
+  // 3. both non-null: exactly equal → ok without warning; different → mismatch.
+  assert.deepEqual(await outcome(withOrigin(siteA, ORIGIN), server(ORIGIN)), { code: "ok", warnings: [], messages: [] });
+  assert.equal((await outcome(withOrigin(siteA, ORIGIN), server("https://app.blocofy.other"))).code, "TARGET_SITE_MISMATCH");
+  assert.equal((await outcome(withOrigin(siteA, "https://app.blocofy.test/"), server(ORIGIN))).code, "TARGET_SITE_MISMATCH", "no normalisation: exact equality");
+  // 4. both null → ok, no warning.
+  assert.deepEqual(await outcome(withOrigin(siteA, null), server(null)), { code: "ok", warnings: [], messages: [] });
+
+  // The context record follows the same rule (a context verified against an old server, server upgraded since).
+  const oldCtx = { name: "a", context: { ...ctx(siteA), platform_origin: null } };
+  const ctxUp = await outcome(null, server(ORIGIN), oldCtx);
+  assert.equal(ctxUp.code, "ok");
+  assert.deepEqual(ctxUp.warnings, ["TARGET_CONTEXT_ORIGIN_MISSING"]);
+  assert.equal((await outcome(null, server(undefined), { name: "a", context: ctx(siteA) })).code, "TARGET_UNVERIFIED");
+
+  // Offline pre-check / resolution: a null on either record is not a mismatch (the remote check decides).
+  assert.doesNotThrow(() => precheckContext({ binding: withOrigin(siteA, null), resolved: { name: "a", context: ctx(siteA) } }));
+  const s = store({ a: ctx(siteA) });
+  assert.equal((await resolveContext({ getStore: () => s, binding: withOrigin(siteA, null), commandClass: "remote-mutation" })).name, "a");
 });
 
 test("output: the target block format, the error envelope, and secret redaction", () => {

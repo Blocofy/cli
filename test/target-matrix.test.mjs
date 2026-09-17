@@ -558,6 +558,42 @@ test("[17] two processes, different project contexts, concurrently: each pulls o
   assert.equal(JSON.parse(readFileSync(join(outB, ".blocofy", "project.json"), "utf8")).site_id, "sB2");
 });
 
+test("[19] null platform origin: a pre-C3 binding (null) against an upgraded server proceeds with one warning, never rewritten; a recorded origin against a server that reports none → TARGET_UNVERIFIED", async () => {
+  const { home, projA } = await world();
+  const projectPath = join(projA, ".blocofy", "project.json");
+  const legacy = JSON.stringify({ schema_version: 1, site_id: "sA1", site_slug: "alpha", platform_origin: null }, null, 2) + "\n";
+  writeFileSync(projectPath, legacy);
+  const r = await run(home, ["theme", "push", projA]);
+  assert.equal(r.code, 0, r.stderr);
+  const warnings = r.stderr.split("\n").filter((l) => l.startsWith("warning ["));
+  assert.deepEqual(warnings, [`warning [TARGET_BINDING_ORIGIN_MISSING]: The project binding is missing its platform origin; run \`blocofy link --adopt\` to record ${ORIGIN}.`]);
+  assert.ok(A.state.mutations > 0);
+  assert.equal(readFileSync(projectPath, "utf8"), legacy, "project.json is never auto-rewritten");
+  resetSites();
+  const j = await run(home, ["pages", "push", projA, "--dry-run", "--json"]);
+  assert.equal(j.code, 0, j.stderr);
+  assert.equal(JSON.parse(j.stderr.split("\n").find((l) => l.startsWith('{"warning"'))).warning.code, "TARGET_BINDING_ORIGIN_MISSING");
+
+  // Reverse: the binding records an origin, the server stops reporting one.
+  const projB2 = tmp("bcf-mx-projA2-");
+  writeTheme(projB2, "A");
+  writeBinding(projB2, { siteId: "sA1", slug: "alpha", context: "alpha" });
+  const before = treeHash(projB2);
+  resetSites();
+  A.state.platformOrigin = null;
+  try {
+    const u = await run(home, ["theme", "push", projB2, "--json"]);
+    assert.equal(u.code, 3, u.stderr);
+    const err = jsonError(u);
+    assert.equal(err.code, "TARGET_UNVERIFIED");
+    assert.match(err.message, /does not report its platform origin/);
+    assert.equal(A.state.mutations, 0);
+    assert.equal(treeHash(projB2), before);
+  } finally {
+    A.state.platformOrigin = ORIGIN;
+  }
+});
+
 test("[18] secret leakage scan: every captured stdout/stderr and every file written outside the secret stores", () => {
   assert.ok(OUTPUTS.length > 50, `only ${OUTPUTS.length} outputs captured`);
   for (const o of OUTPUTS) {
