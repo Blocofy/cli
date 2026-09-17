@@ -45,6 +45,18 @@ function site(files) {
   }
   return dir;
 }
+/** CF-T2: every remote command verifies its site first (GET /api/dev/whoami) — answered here, not recorded. */
+function whoami(req, res) {
+  if (req.method !== "GET" || !req.url.endsWith("/api/dev/whoami")) return false;
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify({ site: { id: "s1", slug: "site", name: "Site" }, liveThemeId: null }));
+  return true;
+}
+/** CF-T2: a page push is a remote mutation → the directory is bound to the fake site. */
+function bind(dir) {
+  mkdirSync(join(dir, ".blocofy"), { recursive: true });
+  writeFileSync(join(dir, ".blocofy", "project.json"), JSON.stringify({ schema_version: 1, site_id: "s1", site_slug: "site", platform_origin: null }));
+}
 const v2 = (locale, slug) => JSON.stringify({ format_version: 2, slug, locale, data: { version: 2, sections: [] } });
 const legacy = (slug, extra = {}) => JSON.stringify({ slug, data: { version: 2, sections: [] }, ...extra });
 
@@ -102,6 +114,7 @@ test("pages push without login exits 1 and sends nothing", () => {
 test("pages push against an old server: PAGES_SERVER_UPGRADE_REQUIRED, exit 1, no POST", async () => {
   const methods = [];
   const server = createServer((req, res) => {
+    if (whoami(req, res)) return;
     methods.push(req.method);
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ files: {} }));
@@ -109,6 +122,7 @@ test("pages push against an old server: PAGES_SERVER_UPGRADE_REQUIRED, exit 1, n
   server.listen(0);
   await once(server, "listening");
   const dir = site({ "pages/en-US/index.json": v2("en-US", "/") });
+  bind(dir);
   try {
     const r = await runAsync(["pages", "push", dir], { BLOCOFY_URL: `http://127.0.0.1:${server.address().port}`, BLOCOFY_TOKEN: "bcf_" + "x".repeat(30) });
     assert.equal(r.status, 1);
@@ -122,6 +136,7 @@ test("pages push against an old server: PAGES_SERVER_UPGRADE_REQUIRED, exit 1, n
 
 test("pages push --dry-run against a v2 server prints the preflight summary and exits 0", async () => {
   const server = createServer((req, res) => {
+    if (whoami(req, res)) return;
     res.writeHead(200, { "content-type": "application/json" });
     if (req.method === "GET") {
       res.end(JSON.stringify({ protocol_version: 2, page_layout_version: 2, default_locale: "en-US", supported_locales: ["en-US"], files: {}, diagnostics: [] }));
@@ -154,6 +169,7 @@ test("unknown flag on a pages command is refused without writing", () => {
 
 test("F2: pages pull against an incomplete export prints every diagnostic, exits 1 and writes nothing", async () => {
   const server = createServer((req, res) => {
+    if (whoami(req, res)) return;
     res.writeHead(422, { "content-type": "application/json" });
     res.end(JSON.stringify({ protocol_version: 2, code: "PAGES_EXPORT_INCOMPLETE", error: "2 published page(s) cannot be exported; nothing was exported.", diagnostics: [
       { level: "error", code: "PAGES_INVALID_LOCALE", message: "Page /about has no language", slug: "/about" },
@@ -171,6 +187,7 @@ test("F2: pages pull against an incomplete export prints every diagnostic, exits
     assert.match(r.stderr, /error \[PAGES_EXPORT_INCOMPLETE\]/);
     assert.match(r.stderr, /nothing was exported/);
     assert.ok(!existsSync(join(dir, "pages")));
+    assert.ok(!existsSync(join(dir, ".blocofy")), "a failed pull records no binding");
   } finally {
     server.close();
     rmSync(dir, { recursive: true, force: true });

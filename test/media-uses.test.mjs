@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -71,6 +71,13 @@ async function fakeV1(route) {
   const server = createServer(async (req, res) => {
     let raw = "";
     for await (const chunk of req) raw += chunk;
+    // CF-T2: every v1 command first verifies its site via GET /api/v1/ping (not recorded — the assertions below
+    // count media-uses requests only).
+    if (req.url === "/api/v1/ping") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, site: { id: "s1", slug: "site", name: "Site" } }));
+      return;
+    }
     const rec = { method: req.method, url: req.url, headers: req.headers, body: raw ? JSON.parse(raw) : null };
     reqs.push(rec);
     const out = route(rec, reqs.length);
@@ -87,14 +94,20 @@ async function fakeV1(route) {
 }
 
 let home;
+let project;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "blocofy-mu-"));
+  // CF-T2: media-decide is a remote mutation → it runs inside a project bound to the fake site.
+  project = join(home, "project");
+  mkdirSync(join(project, ".blocofy"), { recursive: true });
+  writeFileSync(join(project, ".blocofy", "project.json"), JSON.stringify({ schema_version: 1, site_id: "s1", site_slug: "site", platform_origin: null }));
 });
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 
 function runCli(args, env = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [BIN, ...args], {
+      cwd: project,
       env: { PATH: process.env.PATH, HOME: home, ...env },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -105,6 +118,11 @@ function runCli(args, env = {}) {
     child.stdin.end();
     child.on("close", (code) => resolve({ code, stdout, stderr }));
   });
+}
+
+/** CF-T2: stderr now starts with the verified Target block; the refusal envelope is the last line. */
+function lastJsonLine(stderr) {
+  return JSON.parse(stderr.trim().split("\n").pop());
 }
 
 function decisionsFile(decisions) {
@@ -165,7 +183,7 @@ test("[L3] 409 → CliRefusal{status:409, error}; komut exit 2 ve stderr {error}
       { BLOCOFY_API_KEY: KEY, BLOCOFY_API_URL: s.apiUrl },
     );
     assert.equal(r.code, 2, r.stderr);
-    assert.deepEqual(JSON.parse(r.stderr), CONFLICT);
+    assert.deepEqual(lastJsonLine(r.stderr), CONFLICT);
     assert.equal(s.reqs.length, 2); // lib + CLI: beklenenler verildi → GET yok, tek POST
     assert.equal(s.reqs[1].method, "POST");
   } finally {
@@ -179,7 +197,7 @@ test("[L3b] 404 not_found → exit 2, stderr {error}", async () => {
   try {
     const r = await runCli(["pages", "media-uses", "pg_x"], { BLOCOFY_API_KEY: KEY, BLOCOFY_API_URL: s.apiUrl });
     assert.equal(r.code, 2, r.stderr);
-    assert.deepEqual(JSON.parse(r.stderr), notFound);
+    assert.deepEqual(lastJsonLine(r.stderr), notFound);
   } finally {
     await s.close();
   }

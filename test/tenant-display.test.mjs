@@ -105,6 +105,9 @@ test("theme push --draft names the target tenant before writing", async () => {
   const dir = mkdtempSync(join(tmpdir(), "blocofy-cli-"));
   mkdirSync(join(dir, "layout"), { recursive: true });
   writeFileSync(join(dir, "layout", "theme.liquid"), "<html></html>");
+  // CF-T2: a push needs a project bound to the (verified) site.
+  mkdirSync(join(dir, ".blocofy"), { recursive: true });
+  writeFileSync(join(dir, ".blocofy", "project.json"), JSON.stringify({ schema_version: 1, site_id: 14, site_slug: "ksc", platform_origin: null }));
   try {
     const { stdout } = await execFileP("node", [BIN, "theme", "push", dir, "--draft"], {
       env: { ...process.env, BLOCOFY_URL: url, BLOCOFY_TOKEN: "bcf_t" },

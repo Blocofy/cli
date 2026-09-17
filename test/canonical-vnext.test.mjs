@@ -26,6 +26,10 @@ function themeDir(files) {
     mkdirSync(join(dir, rel.slice(0, rel.lastIndexOf("/"))), { recursive: true });
     writeFileSync(join(dir, rel), content);
   }
+  // CF-T2: `theme push` is a remote mutation → the directory must be bound to the fake site (whoami id 14,
+  // no platform_origin on this old-shaped fake → null).
+  mkdirSync(join(dir, ".blocofy"), { recursive: true });
+  writeFileSync(join(dir, ".blocofy", "project.json"), JSON.stringify({ schema_version: 1, site_id: 14, site_slug: "ksc", platform_origin: null }));
   return dir;
 }
 

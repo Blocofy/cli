@@ -9,21 +9,45 @@
  * livereload. No monorepo required.
  */
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 
 import { parseArgs } from "../lib/args.mjs";
 import { checkPages, migrateLayout, pullContent, pushContent } from "../lib/content-sync.mjs";
 import { PagesCliError, formatDiagnostic } from "../lib/page-files.mjs";
-import { credentialsPath, loadApiCredentials, loadCredentials, saveCredentials } from "../lib/credentials.mjs";
+import {
+  CredentialsError,
+  ENV_CONTEXT,
+  credentialsPath,
+  defaultSecretStoreName,
+  envContext,
+  loadStore,
+  readSecrets,
+  removeSecrets,
+  saveStore,
+  writeSecret,
+} from "../lib/credentials.mjs";
+import { printError, printTarget, registerSecret, targetData } from "../lib/output.mjs";
+import {
+  CONTEXT_NAME_RE,
+  TargetError,
+  enforceBindingPolicy,
+  findBinding,
+  precheckContext,
+  resolveContext,
+  verifyApi,
+  verifyDev,
+  verifyTarget,
+  writeBinding,
+} from "../lib/target.mjs";
 import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
 import { CliRefusal, DEFAULT_API_URL, decidePageMediaUses, fetchPageMediaUses, isValidApiKey } from "../lib/media-uses.mjs";
 import { githubNote, retryNotice, statusLine, syncScopeNote } from "../lib/messages.mjs";
 import { promptSecret } from "../lib/secret-prompt.mjs";
-import { diffTheme, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, fetchWhoami, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
+import { diffTheme, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
 import { isAffirmative, livePushDecision, resolvePushMode } from "../lib/confirm.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
@@ -38,7 +62,7 @@ const args = process.argv.slice(2);
 // 0.8.0: `login --api-key` DEĞERSİZ bayraktır (parser'da boolean) — sır gizli prompt'tan ya da
 // BLOCOFY_API_KEY'den gelir, argv'ye asla girmez. `pages media-uses` / `media-decide` v1 API komutlarıdır.
 const KNOWN = {
-  login: ["url", "token", "api-key", "api-url"],
+  login: ["url", "token", "api-key", "api-url", "keychain"],
   pages: ["decisions", "expected-revision-id", "expected-version", "json"],
   themePull: ["draft", "instance"],
   themePush: ["diff", "draft", "instance", "name", "live", "yes", "confirm", "dry-run", "validate", "idempotency-key", "prune"],
@@ -51,10 +75,15 @@ const KNOWN = {
   pagesCheck: ["strict"],
   pagesMigrate: ["dry-run", "write", "strict"],
 };
+// CF-T1/T2: every command accepts the global `--context <name>` and `--json` (machine-readable refusals).
 function parseArgsOrExit(rest, known) {
-  const parsed = parseArgs(rest, new Set([...known, "help", "version"]));
+  const parsed = parseArgs(rest, new Set([...known, "context", "json", "help", "version"]));
   if (parsed.unknownFlag) {
     console.error(`Unknown flag ${parsed.unknownFlag}. Nothing was written. See \`blocofy --help\`.`);
+    process.exit(1);
+  }
+  if (parsed.flags.context !== undefined && (typeof parsed.flags.context !== "string" || !CONTEXT_NAME_RE.test(parsed.flags.context))) {
+    console.error("--context needs a context name (letters, digits, . _ -). Nothing was written.");
     process.exit(1);
   }
   return parsed;
@@ -72,16 +101,29 @@ function printHelp() {
 Develop your theme locally against live data, preview it three ways, and publish.
 
 Usage
-  blocofy login [--url <url>] [--token <bcf_…>]
-      Save your platform URL + dev token to ~/.blocofy/credentials.json.
+  blocofy login [--context <name>] [--url <url>] [--token <bcf_…>] [--keychain]
+      Verify a dev token against its site (GET /api/dev/whoami) and save it as a named
+      context (default name: the site's slug). Nothing is saved if verification fails.
       Get a token from the admin panel → Settings → Theme CLI tokens.
+        --keychain   keep the secret in the macOS keychain (or BLOCOFY_SECRET_STORE=keychain);
+                     default: ~/.blocofy/secrets.json (0600)
 
-  blocofy login --api-key [--api-url <url>]
-      Save a v1 API key (blcf_live_…) for the \`pages media-*\` commands. The key is read
-      from a HIDDEN prompt — the flag takes no value, so the key never lands in your shell
-      history. Kept alongside the dev token in the same credentials file.
+  blocofy login --api-key [--context <name>] [--api-url <url>]
+      Verify a v1 API key (blcf_live_…, GET /api/v1/ping) and add it to a context. The key is
+      read from a HIDDEN prompt — the flag takes no value. If the context already has a dev
+      token for another site, nothing is saved (TARGET_CREDENTIAL_MISMATCH).
         --api-url <url>  API origin (default https://app.blocofy.com)
       Non-interactive shells: set BLOCOFY_API_KEY + BLOCOFY_API_URL instead.
+
+  blocofy contexts [--json]          list saved contexts (never prints secrets)
+  blocofy use <name>                 default context for read-only commands outside a project
+  blocofy logout --context <name>    remove a context and its secrets
+  blocofy link [dir] --context <name> [--adopt]
+      Bind a project directory to the context's (verified) site: writes .blocofy/project.json
+      (commit it), .blocofy/local.json (your context; git-ignored) and .blocofy/.gitignore.
+      Refuses to rebind a directory bound to another site unless --adopt.
+  blocofy target [dir] [--context <name>] [--json]
+      Show which site a command in [dir] would hit (verified), without writing anything.
 
   blocofy theme dev [dir] [--port <n>] [--no-sync] [--name <name>]
       Start a dev server and print 3 auto-reloading views — Local, live-domain
@@ -179,16 +221,29 @@ Usage
   blocofy --help
 
 Examples
-  blocofy login --url https://store.myblocofy.com --token bcf_xxxxxxxx
-  blocofy theme pull && blocofy theme dev
-  blocofy theme push && blocofy theme publish
-  blocofy status
-  blocofy login --api-key
+  blocofy login --url https://store.myblocofy.com --token bcf_xxxxxxxx     (context "store")
+  blocofy theme pull store-theme --context store && cd store-theme && blocofy theme dev
+  blocofy link ~/code/store-theme --context store     (an existing checkout)
+  blocofy theme push && blocofy theme publish          (inside the bound project)
+  blocofy target && blocofy status
+  blocofy login --api-key --context store
   blocofy pages media-uses pg_abc123 --json
   blocofy pages media-decide pg_abc123 --decisions decisions.json
 
-Auth: ~/.blocofy/credentials.json (from \`login\`), or BLOCOFY_URL + BLOCOFY_TOKEN env vars.
-v1 API (pages media-*): \`login --api-key\`, or BLOCOFY_API_KEY + BLOCOFY_API_URL env vars.
+Targets (which site a command talks to)
+  Every remote command verifies its site first and prints a Target block on stderr.
+  The context is chosen in this order: --context → BLOCOFY_CONTEXT → env credentials
+  (BLOCOFY_URL+BLOCOFY_TOKEN and/or BLOCOFY_API_URL+BLOCOFY_API_KEY) → .blocofy/local.json
+  → the one saved context matching the project's site → (terminal) pick from the matches.
+  Inside a bound project \`use\` is ignored. Commands that change a site (theme push/publish/
+  rename/dev sync, pages push, settings push, pages media-decide) need a bound project;
+  pulls into a new empty directory bind it. A wrong project/site pairing changes nothing.
+  Exit codes: 0 ok · 1 usage/network/5xx · 2 server refusal (4xx) · 3 target/binding refusal.
+  --json prints refusals as {"error":{"code","message","details"}}.
+
+Auth: ~/.blocofy/credentials.json (contexts, no secrets) + ~/.blocofy/secrets.json (0600) or the
+macOS keychain. A pre-0.10 credentials file is migrated on first use (backup:
+~/.blocofy/credentials.v1.bak.json — copy it back to roll back).
 The CLI does not build assets — bring your own (npm/Vite/Tailwind); the platform serves
 plain Liquid + static assets.`);
 }
@@ -204,11 +259,85 @@ async function promptValid(rl, question, normalize, valid, hint, tries = 3) {
   process.exit(1);
 }
 
+// ── contexts, login, binding (CF-T1/T2, contract C1/C2) ─────────────────────────────────────────────────────
+
+const JSON_MODE = args.includes("--json");
+
+/** Refusals (TargetError / CredentialsError) → envelope on stderr + their exit code; anything else → null. */
+function exitForTargetError(error) {
+  if (error instanceof TargetError || error instanceof CredentialsError) {
+    printError(error, { json: JSON_MODE });
+    process.exit(error.exitCode ?? 1);
+  }
+  return null;
+}
+
+function contextNameOrExit(name) {
+  if (name === ENV_CONTEXT || !CONTEXT_NAME_RE.test(name)) {
+    throw new TargetError("TARGET_CONTEXT_INVALID", `"${name}" cannot be used as a context name (letters, digits, . _ -; "env" is reserved).`, { context: name }, 1);
+  }
+  return name;
+}
+
 /**
- * `blocofy login --api-key [--api-url <url>]` — v1 API key login (0.8.0, D3 §4.7).
- * The key is NEVER taken from argv: a hidden prompt on a TTY, BLOCOFY_API_KEY otherwise.
- * Non-TTY without the env var → message + exit 1, nothing written (fail-closed). No message
- * printed by this function ever contains the key (not even a prefix).
+ * A new pair may only join a context whose other pair is for the same site. `existing` is the stored context;
+ * `identity` the freshly verified one. Checks the recorded site, else verifies the other pair live.
+ */
+async function assertPairFitsContext(name, existing, identity, otherKind) {
+  if (!existing) return;
+  const mismatch = (otherSite) => {
+    const code = existing[otherKind] ? "TARGET_CREDENTIAL_MISMATCH" : "TARGET_SITE_MISMATCH";
+    throw new TargetError(
+      code,
+      `Context "${name}" is for site ${otherSite.slug ?? otherSite.id}, but these credentials are for ${identity.site.slug ?? identity.site.id}. Nothing was saved. Use another --context name (or \`blocofy logout --context ${name}\` first).`,
+      { context: name, context_site_id: otherSite.id, new_site_id: identity.site.id },
+    );
+  };
+  if (existing.site) {
+    if (String(existing.site.id) !== String(identity.site.id) || (existing.platform_origin ?? null) !== identity.platformOrigin) mismatch(existing.site);
+    return;
+  }
+  if (!existing[otherKind]) return;
+  const secrets = readSecrets(name, existing);
+  if (otherKind === "dev" && secrets.devToken) {
+    registerSecret(secrets.devToken);
+    const other = await verifyDev({ url: existing.dev.url, token: secrets.devToken });
+    if (String(other.site.id) !== String(identity.site.id) || other.platformOrigin !== identity.platformOrigin) mismatch(other.site);
+  } else if (otherKind === "api" && secrets.apiKey) {
+    registerSecret(secrets.apiKey);
+    const other = await verifyApi({ url: existing.api.url, apiKey: secrets.apiKey });
+    if (String(other.site.id) !== String(identity.site.id) || other.platformOrigin !== identity.platformOrigin) mismatch(other.site);
+  }
+}
+
+/** Save one verified pair into a context (secret first, then the context file). */
+function saveVerifiedPair(name, kind, { url, secret, identity, storeName }) {
+  const store = loadStore();
+  const existing = store.contexts[name];
+  writeSecret(name, kind, storeName, secret);
+  if (existing?.[kind] && existing[kind].secret.store !== storeName) {
+    try {
+      removeSecrets(name, { [kind]: existing[kind] });
+    } catch {
+      /* the old copy stays in the other store; the context now points at the new one */
+    }
+  }
+  const site = { id: identity.site.id, slug: identity.site.slug ?? existing?.site?.slug ?? null, name: identity.site.name ?? existing?.site?.name ?? null, domain: identity.site.domain ?? existing?.site?.domain ?? null };
+  store.contexts[name] = {
+    ...(existing ?? {}),
+    platform_origin: identity.platformOrigin,
+    site,
+    [kind]: { url, secret: { store: storeName } },
+    verified_at: new Date().toISOString(),
+  };
+  if (!store.current_context) store.current_context = name;
+  saveStore(store);
+}
+
+/**
+ * `blocofy login --api-key [--context <n>] [--api-url <url>]` — v1 API key login (0.8.0, D3 §4.7; CF-T1).
+ * The key is NEVER taken from argv: a hidden prompt on a TTY, BLOCOFY_API_KEY otherwise. GET /api/v1/ping must
+ * succeed before anything is saved. No message printed by this function ever contains the key.
  */
 async function loginApiKey(flags, positionals) {
   if (positionals.length > 0 || flags.url !== undefined || flags.token !== undefined) {
@@ -242,9 +371,15 @@ async function loginApiKey(flags, positionals) {
     console.error("Invalid API key — a v1 key starts with blcf_live_ (a bcf_ dev token is not accepted for the v1 API). Nothing was written.");
     process.exit(1);
   }
+  registerSecret(apiKey);
+  const storeName = defaultSecretStoreName({ keychain: Boolean(flags.keychain) });
 
-  saveCredentials({ apiUrl, apiKey });
-  console.log(`✓ API key saved → ${credentialsPath()} (API: ${apiUrl})`);
+  const identity = await verifyApi({ url: apiUrl, apiKey });
+  const name = contextNameOrExit(typeof flags.context === "string" ? flags.context : identity.site.slug ?? "");
+  await assertPairFitsContext(name, loadStore().contexts[name], identity, "dev");
+  saveVerifiedPair(name, "api", { url: apiUrl, secret: apiKey, identity, storeName });
+  console.log(`✓ API key saved to context "${name}" → ${credentialsPath()} (API: ${apiUrl})`);
+  console.log(`  Site: ${siteLabel(identity.site) || identity.site.id}`);
   console.log("Next: blocofy pages media-uses <page-handle>");
 }
 
@@ -298,41 +433,211 @@ async function login(rest) {
       rl.close();
     }
   }
+  registerSecret(token);
+  const storeName = defaultSecretStoreName({ keychain: Boolean(flags.keychain) });
 
-  saveCredentials({ url, token });
-  console.log(`✓ Saved credentials → ${credentialsPath()}`);
+  // CF-T1: the token's REAL site (resolved server-side from the token) must be verified BEFORE saving — a
+  // wrong-tenant token or an unreachable platform saves nothing (TARGET_UNVERIFIED, exit 3).
+  const identity = await verifyDev({ url, token });
+  const name = contextNameOrExit(typeof flags.context === "string" ? flags.context : identity.site.slug);
+  await assertPairFitsContext(name, loadStore().contexts[name], identity, "api");
+  saveVerifiedPair(name, "dev", { url, secret: token, identity, storeName });
+  console.log(`✓ Saved context "${name}" → ${credentialsPath()}`);
+  console.log(`  Site: ${siteLabel(identity.site)} — commands using context "${name}" target this site.`);
+  console.log(`Next: bind a project directory:  blocofy link <dir> --context ${name}   (or pull into an empty one: blocofy theme pull <dir> --context ${name})`);
+}
 
-  // Token'ın GERÇEK site'ını göster — site sunucuda TOKEN'dan çözülür, URL kozmetik.
-  // Yanlış tenant'ın token'ıyla login olduysan ("klarosa URL + ksc token") hemen
-  // görürsün. whoami yoksa/erişilemezse sessiz geç.
+async function contextsCommand(rest) {
+  const { positionals } = parseArgsOrExit(rest, []);
+  if (positionals.length) throw new TargetError("USAGE", "Usage: blocofy contexts [--json]", {}, 1);
+  const store = loadStore();
+  const rows = Object.entries(store.contexts).map(([name, c]) => ({
+    name,
+    current: store.current_context === name,
+    site: c.site ?? null,
+    platform_origin: c.platform_origin ?? null,
+    dev: c.dev ? { url: c.dev.url, store: c.dev.secret.store } : null,
+    api: c.api ? { url: c.api.url, store: c.api.secret.store } : null,
+    verified_at: c.verified_at ?? null,
+  }));
+  if (JSON_MODE) {
+    console.log(JSON.stringify({ current_context: store.current_context, contexts: rows }, null, 2));
+    return;
+  }
+  if (rows.length === 0) {
+    console.log("No saved contexts. Run `blocofy login`.");
+    return;
+  }
+  for (const r of rows) {
+    const site = r.site ? `${siteLabel(r.site)} · ${r.site.id}` : "(not verified yet)";
+    const pairs = [r.dev ? `dev ${r.dev.url} [${r.dev.store}]` : null, r.api ? `api ${r.api.url} [${r.api.store}]` : null].filter(Boolean).join(", ");
+    console.log(`${r.current ? "*" : " "} ${r.name}  ${site}  ${pairs}`);
+  }
+}
+
+async function useCommand(rest) {
+  const { positionals } = parseArgsOrExit(rest, []);
+  const name = positionals[0];
+  if (!name || positionals.length > 1) throw new TargetError("USAGE", "Usage: blocofy use <context>", {}, 1);
+  const store = loadStore();
+  if (!store.contexts[name]) throw new TargetError("TARGET_CONTEXT_UNKNOWN", `No context named "${name}". List them with \`blocofy contexts\`.`, { context: name });
+  store.current_context = name;
+  saveStore(store);
+  console.log(`✓ Default context for read-only commands outside a project: ${name}`);
+  console.log("  (Inside a bound project the project's site decides; `use` never retargets it.)");
+}
+
+async function logoutCommand(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, []);
+  const name = typeof flags.context === "string" ? flags.context : null;
+  if (!name || positionals.length) throw new TargetError("USAGE", "Usage: blocofy logout --context <name>", {}, 1);
+  const store = loadStore();
+  const ctx = store.contexts[name];
+  if (!ctx) throw new TargetError("TARGET_CONTEXT_UNKNOWN", `No context named "${name}".`, { context: name });
+  removeSecrets(name, ctx);
+  delete store.contexts[name];
+  if (store.current_context === name) store.current_context = null;
+  saveStore(store);
+  console.log(`✓ Removed context "${name}" and its secrets.`);
+}
+
+async function linkCommand(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, ["adopt"]);
+  const dir = resolve(positionals[0] ?? process.cwd());
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new TargetError("USAGE", `Directory not found: ${dir}`, { dir }, 1);
+  const envCtx = envContext();
+  const flagContext = typeof flags.context === "string" ? flags.context : null;
+  if (!flagContext && !process.env.BLOCOFY_CONTEXT && !envCtx) {
+    throw new TargetError("TARGET_CONTEXT_REQUIRED", "`blocofy link` needs the context to bind: pass --context <name> (see `blocofy contexts`).", {});
+  }
+  const resolved = await resolveContext({ flagContext, envContextName: process.env.BLOCOFY_CONTEXT || null, envCtx, getStore: () => loadStore(), binding: null, commandClass: "read" });
+  const secrets = resolved.env ? resolved.env.secrets : readSecrets(resolved.name, resolved.context);
+  registerSecret(secrets.devToken);
+  registerSecret(secrets.apiKey);
+  const identity = await verifyTarget({ resolved, secrets, binding: null });
+
+  const own = existsSync(join(dir, ".blocofy", "project.json")) ? findBinding(dir) : null;
+  if (own && (String(own.project.site_id) !== String(identity.site.id) || (own.project.platform_origin ?? null) !== identity.platformOrigin) && !flags.adopt) {
+    throw new TargetError(
+      "TARGET_SITE_MISMATCH",
+      `${dir} is already bound to site ${own.project.site_slug ?? own.project.site_id}; context "${resolved.name}" is for ${identity.site.slug ?? identity.site.id}. Nothing was written. Pass --adopt to rebind it.`,
+      { dir, binding_site_id: own.project.site_id, remote_site_id: identity.site.id },
+    );
+  }
+  const projectPath = writeBinding(dir, { site: identity.site, platformOrigin: identity.platformOrigin, contextName: resolved.name });
+  recordVerifiedSite(resolved, identity);
+  console.log(`✓ Bound ${dir} to ${siteLabel(identity.site) || identity.site.id} (${identity.site.id}) via context "${resolved.name}".`);
+  console.log(`  ${relative(process.cwd(), projectPath) || projectPath} — commit it; .blocofy/local.json stays private (git-ignored).`);
+}
+
+async function targetCommand(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, []);
+  const dir = resolve(positionals[0] ?? process.cwd());
+  const t = await prepareTarget({ command: "target", commandClass: "read", dir, flags, needs: "any", mode: "read", record: false, quiet: true });
+  if (JSON_MODE) console.log(JSON.stringify({ target: t.display }, null, 2));
+  else printTarget(t.display, { stream: process.stdout });
+}
+
+/** An unverified (migrated) named context gets the verified site recorded once. */
+function recordVerifiedSite(resolved, identity) {
+  if (resolved.env || resolved.context.site) return;
+  const store = loadStore();
+  const ctx = store.contexts[resolved.name];
+  if (!ctx || ctx.site) return;
+  ctx.site = { id: identity.site.id, slug: identity.site.slug ?? null, name: identity.site.name ?? null, domain: identity.site.domain ?? null };
+  ctx.platform_origin = identity.platformOrigin;
+  ctx.verified_at = new Date().toISOString();
+  saveStore(store);
+}
+
+async function promptContext(candidates) {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
   try {
-    const who = await fetchWhoami({ url, token });
-    if (who?.site) console.log(`  Site: ${siteLabel(who.site)} — your theme commands target this tenant.`);
-  } catch {
-    /* best-effort */
+    process.stderr.write(`Several saved contexts match this project's site:\n${candidates.map((c, i) => `  ${i + 1}) ${c}`).join("\n")}\n`);
+    const answer = (await rl.question("Use which context? [number] ")).trim();
+    return candidates[Number(answer) - 1] ?? null;
+  } finally {
+    rl.close();
   }
-  console.log(`Next: cd into your theme directory, then run  blocofy theme dev`);
 }
 
-/** Resolve credentials (URL + token) or exit with guidance. */
-function requireCreds() {
-  const creds = loadCredentials();
-  if (!creds || !creds.url || !creds.token) {
-    console.error("Login required: run `blocofy login` (or set BLOCOFY_URL + BLOCOFY_TOKEN).");
-    process.exit(1);
+/**
+ * The one gate every remote command passes BEFORE its first request (contract C2): binding policy → context
+ * resolution → offline precheck → required pair → remote identity (both pairs when present) → binding match →
+ * target block. Throws TargetError / CredentialsError; never returns an unverified target.
+ *
+ * `needs`: "dev" | "api" | "any". Returns `{ name, dev, api, identity, binding, newBinding, display }`.
+ */
+async function prepareTarget({ command, commandClass, dir, flags, needs, mode, record = true, quiet = false }) {
+  const binding = findBinding(dir);
+  const { newBinding } = enforceBindingPolicy({ commandClass, binding, dir, command });
+  const envCtx = envContext();
+  let cachedStore = null;
+  const resolved = await resolveContext({
+    flagContext: typeof flags.context === "string" ? flags.context : null,
+    envContextName: process.env.BLOCOFY_CONTEXT || null,
+    envCtx,
+    getStore: () => (cachedStore ??= loadStore()),
+    binding,
+    commandClass,
+    isTTY: Boolean(process.stdin.isTTY && process.stderr.isTTY),
+    prompt: promptContext,
+  });
+  precheckContext({ binding, resolved });
+  const secrets = resolved.env ? resolved.env.secrets : readSecrets(resolved.name, resolved.context);
+  registerSecret(secrets.devToken);
+  registerSecret(secrets.apiKey);
+
+  const hasDev = Boolean(resolved.context.dev && secrets.devToken);
+  const hasApi = Boolean(resolved.context.api && secrets.apiKey);
+  if (needs === "dev" && !hasDev) {
+    throw new TargetError("LOGIN_REQUIRED", `Login required: context "${resolved.name}" has no dev token. Run \`blocofy login${resolved.env ? "" : ` --context ${resolved.name}`}\` (or set BLOCOFY_URL + BLOCOFY_TOKEN).`, { context: resolved.name }, 1);
   }
-  return creds;
+  if (needs === "api") {
+    if (!hasApi) {
+      throw new TargetError("LOGIN_REQUIRED", `API key required: run \`blocofy login --api-key\` (or set BLOCOFY_API_KEY + BLOCOFY_API_URL). The dev token (bcf_) is not accepted for the v1 API.`, { context: resolved.name }, 1);
+    }
+    if (!isValidApiKey(secrets.apiKey)) {
+      throw new TargetError("LOGIN_REQUIRED", `The API key of context "${resolved.name}" is not a v1 key — it must start with blcf_live_. Run \`blocofy login --api-key\`.`, { context: resolved.name }, 1);
+    }
+  }
+
+  const identity = await verifyTarget({ resolved, secrets, binding });
+  if (record) recordVerifiedSite(resolved, identity);
+
+  const url = needs === "api" ? resolved.context.api?.url : resolved.context.dev?.url ?? resolved.context.api?.url;
+  const bindingLabel = binding ? relative(process.cwd(), binding.projectPath) || binding.projectPath : newBinding ? "none (new pull)" : "none";
+  const display = targetData({ site: identity.site, url, contextName: resolved.name, bindingLabel, operation: `${command} · ${mode}` });
+  if (!quiet) printTarget(display, { json: JSON_MODE });
+  return {
+    name: resolved.name,
+    dev: hasDev ? { url: resolved.context.dev.url, token: secrets.devToken } : null,
+    api: hasApi ? { apiUrl: resolved.context.api.url, apiKey: secrets.apiKey } : null,
+    identity,
+    binding,
+    newBinding,
+    display,
+  };
 }
+
+/** After a successful pull into a new directory: record provenance (project.json + local.json + .gitignore). */
+function bindAfterPull(target, dir) {
+  if (!target.newBinding) return;
+  writeBinding(dir, { site: target.identity.site, platformOrigin: target.identity.platformOrigin, contextName: target.name });
+  console.log(`  Bound ${dir} to ${siteLabel(target.identity.site) || target.identity.site.id} (.blocofy/project.json).`);
+}
+
 
 async function themePull(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, KNOWN.themePull);
   const dir = resolve(positionals[0] ?? process.cwd());
-  const creds = requireCreds();
   const draft = Boolean(flags.draft);
   const instance = typeof flags.instance === "string" ? flags.instance : null;
-  const { count } = await pullTheme({ dir, url: creds.url, token: creds.token, draft, instance });
   const what = instance ? `instance ${instance}` : draft ? "draft" : "live";
+  const target = await prepareTarget({ command: "theme pull", commandClass: "local-write", dir, flags, needs: "dev", mode: what });
+  const { count } = await pullTheme({ dir, url: target.dev.url, token: target.dev.token, draft, instance });
   console.log(`Downloaded ${count} ${what} theme files → ${dir}`);
+  bindAfterPull(target, dir);
 }
 
 async function themePush(rest) {
@@ -342,10 +647,23 @@ async function themePush(rest) {
     console.error(`Theme directory not found: ${dir}`);
     process.exit(1);
   }
-  const creds = requireCreds();
   const instanceFlag = typeof flags.instance === "string" ? flags.instance : null;
   const name = typeof flags.name === "string" ? flags.name : null;
   const dryRun = Boolean(flags["dry-run"] || flags.validate);
+  // Yeni varsayılan hedef: DRAFT (güvenli). `--live` eski anında-canlı davranışını
+  // açıkça geri getirir; `--instance` belirli bir temayı adresler. Sadece "live"
+  // modu canlıya yazar ve onay gerektirir.
+  const { mode, instance } = resolvePushMode({
+    live: Boolean(flags.live),
+    draft: Boolean(flags.draft),
+    instance: instanceFlag,
+  });
+  // CF-T2: `--diff` and `--dry-run` are reads; every other push is a remote mutation (binding required). The
+  // target is verified (whoami, both pairs, binding) before the first theme request — no best-effort swallow.
+  const readOnly = Boolean(flags.diff) || dryRun;
+  const opMode = flags.diff ? `read · diff vs ${instanceFlag ? `instance ${instanceFlag}` : "live"}` : dryRun ? `read · dry run (${mode === "instance" ? `instance ${instance}` : mode})` : mode === "instance" ? `instance ${instance}` : mode;
+  const target = await prepareTarget({ command: "theme push", commandClass: readOnly ? "read" : "remote-mutation", dir, flags, needs: "dev", mode: `${opMode}${flags.prune && !readOnly ? " · prune" : ""}` });
+  const creds = target.dev;
   // 0.5.0: her push'a otomatik idempotency key — kanonik dal (protokol + key) ancak böyle seçilir; key
   // OLMADAN header'lar tek başına legacy writer'a düşer ve --live push pinned render'a YANSIMAZ (M4
   // read cutover'ının ana CLI şikâyeti). Push-OPERASYONU-başına üretilir: fetchWithRetry'nin 5xx/429
@@ -357,13 +675,7 @@ async function themePush(rest) {
   // `--diff`: read-only preview vs the LIVE theme (or --instance). No write; the draft target is not
   // diffable (a draft GET would PROVISION the draft server-side — a read-only command must not mutate).
   if (flags.diff) {
-    let diffSite = null;
-    try {
-      diffSite = (await fetchWhoami({ url: creds.url, token: creds.token })).site;
-    } catch {
-      /* best-effort — etiket kozmetik, diff yine koşar */
-    }
-    const diffTarget = diffSite ? ` of ${siteLabel(diffSite)}` : "";
+    const diffTarget = ` of ${siteLabel(target.identity.site)}`;
     const d = await diffTheme({ dir, url: creds.url, token: creds.token, instance: instanceFlag });
     console.log(instanceFlag ? `Diff vs theme ${instanceFlag}${diffTarget}:` : `Diff vs the LIVE theme${diffTarget} (push default writes to a DRAFT):`);
     const total = d.added.length + d.changed.length + d.removed.length;
@@ -378,33 +690,15 @@ async function themePush(rest) {
     return;
   }
 
-  // Yeni varsayılan hedef: DRAFT (güvenli). `--live` eski anında-canlı davranışını
-  // açıkça geri getirir; `--instance` belirli bir temayı adresler. Sadece "live"
-  // modu canlıya yazar ve onay gerektirir.
-  const { mode, instance } = resolvePushMode({
-    live: Boolean(flags.live),
-    draft: Boolean(flags.draft),
-    instance: instanceFlag,
-  });
-
-  // Hedef tenant'ı çöz ve GÖSTER — site sunucuda TOKEN'dan çözülür (URL kozmetik),
-  // yanlış-tenant'a yazımı görünür kılar ("klarosa sandım, ksc'ye yazdım"). whoami
-  // yoksa/erişilemezse sessiz geç; etiketi confirmation mesajlarında da kullan.
-  let site = null;
-  let whoami = null;
-  try {
-    whoami = await fetchWhoami({ url: creds.url, token: creds.token });
-    site = whoami.site;
-  } catch {
-    /* best-effort */
-  }
-  const target = site ? siteLabel(site) : creds.url;
+  // Hedef tenant'ı GÖSTER — site sunucuda TOKEN'dan çözülür ve prepareTarget'ta DOĞRULANDI (CF-T2).
+  const whoami = target.identity;
+  const siteName = siteLabel(whoami.site) || String(whoami.site.id);
   if (mode === "instance") {
-    console.log(`→ Pushing to theme ${instance}${site ? ` of ${target}` : ""}`);
+    console.log(`→ Pushing to theme ${instance} of ${siteName}`);
   } else if (mode === "live") {
-    console.log(dryRun ? `→ Validating against the LIVE theme of ${target} (dry run — nothing will be written)` : `→ Pushing to the LIVE theme of ${target}`);
+    console.log(dryRun ? `→ Validating against the LIVE theme of ${siteName} (dry run — nothing will be written)` : `→ Pushing to the LIVE theme of ${siteName}`);
   } else {
-    console.log(`→ Pushing to a draft${site ? ` of ${target}` : ""}`);
+    console.log(`→ Pushing to a draft of ${siteName}`);
   }
 
   // Canlı push (`--live`) ANINDA canlı temayı değiştirir (önizleme yok). Agent/CI
@@ -418,7 +712,7 @@ async function themePush(rest) {
     isTTY: Boolean(process.stdin.isTTY),
   });
   if (decision.mustAbort) {
-    console.error(`⚠ 'theme push --live' writes to the LIVE theme of ${target} immediately (no preview).`);
+    console.error(`⚠ 'theme push --live' writes to the LIVE theme of ${siteName} immediately (no preview).`);
     console.error(`  Non-interactive shell: pass --live --yes to confirm, or omit --live to push to a safe draft.`);
     process.exit(1);
   }
@@ -426,7 +720,7 @@ async function themePush(rest) {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     let answer;
     try {
-      answer = await rl.question(`⚠ Push to the LIVE theme of ${target}? Immediate, no preview. [y/N] `);
+      answer = await rl.question(`⚠ Push to the LIVE theme of ${siteName}? Immediate, no preview. [y/N] `);
     } finally {
       rl.close();
     }
@@ -440,7 +734,7 @@ async function themePush(rest) {
   // verilmiş `--instance`; whoami çözülemediyse canlı sayılır) canlı-push onay kuralı aynen uygulanır:
   // `--yes`/`--confirm` → onaylı, TTY → liste basıldıktan sonra y/N, non-TTY → yazımsız çıkış.
   const prune = Boolean(flags.prune) && !dryRun;
-  const liveTarget = mode === "live" || (mode === "instance" && (whoami == null || String(instance) === String(whoami.liveThemeId)));
+  const liveTarget = mode === "live" || (mode === "instance" && (whoami.liveThemeId == null || String(instance) === String(whoami.liveThemeId)));
   const pruneDecision = livePushDecision({
     draft: !prune || !liveTarget,
     yes: Boolean(flags.yes),
@@ -448,7 +742,7 @@ async function themePush(rest) {
     isTTY: Boolean(process.stdin.isTTY),
   });
   if (pruneDecision.mustAbort) {
-    console.error(`⚠ 'theme push --prune' removes files from the LIVE theme of ${target}.`);
+    console.error(`⚠ 'theme push --prune' removes files from the LIVE theme of ${siteName}.`);
     console.error(`  Non-interactive shell: pass --prune --yes to confirm. Nothing was written.`);
     process.exit(1);
   }
@@ -458,7 +752,7 @@ async function themePush(rest) {
     if (!pruneDecision.needsPrompt) return true;
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     try {
-      return isAffirmative(await rl.question(`⚠ Remove these files from the LIVE theme of ${target}? [y/N] `));
+      return isAffirmative(await rl.question(`⚠ Remove these files from the LIVE theme of ${siteName}? [y/N] `));
     } finally {
       rl.close();
     }
@@ -596,8 +890,9 @@ async function pagesPush(rest) {
     console.error(`Directory not found: ${dir}`);
     process.exit(1);
   }
-  const creds = requireCreds();
   const dryRun = Boolean(flags["dry-run"]);
+  const target = await prepareTarget({ command: "pages push", commandClass: dryRun ? "read" : "remote-mutation", dir, flags, needs: "dev", mode: dryRun ? "read · dry run" : "live" });
+  const creds = target.dev;
   const result = await pushContent({ dir, url: creds.url, token: creds.token, scope: "pages", dryRun });
   const code = reportPageDiagnostics(result.diagnostics ?? [], { strict: Boolean(flags.strict) });
   const pages = result.pages ?? [];
@@ -619,10 +914,12 @@ async function pagesPush(rest) {
 async function pagesPull(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, KNOWN.pagesPull);
   const dir = resolve(positionals[0] ?? process.cwd());
-  const creds = requireCreds();
+  const target = await prepareTarget({ command: "pages pull", commandClass: "local-write", dir, flags, needs: "dev", mode: "published pages" });
+  const creds = target.dev;
   const { count, diagnostics } = await pullContent({ dir, url: creds.url, token: creds.token, scope: "pages" });
   const code = reportPageDiagnostics(diagnostics, { strict: Boolean(flags.strict) });
   console.log(`Downloaded ${count} page file(s) → ${dir}`);
+  bindAfterPull(target, dir);
   process.exit(code);
 }
 
@@ -633,8 +930,8 @@ async function pagesCheck(rest) {
     console.error(`Directory not found: ${dir}`);
     process.exit(1);
   }
-  const creds = loadCredentials();
-  const online = Boolean(creds?.url && creds?.token);
+  const creds = (await optionalTarget({ command: "pages check", dir, flags }))?.dev;
+  const online = Boolean(creds);
   const r = await checkPages({ dir, ...(online ? { url: creds.url, token: creds.token } : {}) });
   const code = reportPageDiagnostics(r.diagnostics, { strict: Boolean(flags.strict) });
   const errors = r.diagnostics.filter((d) => d.level === "error").length;
@@ -653,8 +950,8 @@ async function pagesMigrate(rest) {
     console.error(`Directory not found: ${dir}`);
     process.exit(1);
   }
-  const creds = loadCredentials();
-  const online = Boolean(creds?.url && creds?.token);
+  const creds = (await optionalTarget({ command: "pages migrate-layout", dir, flags }))?.dev;
+  const online = Boolean(creds);
   const write = Boolean(flags.write);
   const r = await migrateLayout({ dir, write, ...(online ? { url: creds.url, token: creds.token } : {}) });
   const code = reportPageDiagnostics(r.diagnostics, { strict: Boolean(flags.strict) });
@@ -666,13 +963,14 @@ async function pagesMigrate(rest) {
 }
 
 async function contentPush(scope, rest) {
-  const { positionals } = parseArgsOrExit(rest, KNOWN.content);
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.content);
   const dir = resolve(positionals[0] ?? process.cwd());
   if (!existsSync(dir)) {
     console.error(`Directory not found: ${dir}`);
     process.exit(1);
   }
-  const creds = requireCreds();
+  const target = await prepareTarget({ command: `${scope} push`, commandClass: "remote-mutation", dir, flags, needs: "dev", mode: "live" });
+  const creds = target.dev;
   const result = await pushContent({ dir, url: creds.url, token: creds.token, scope });
   console.log(
     `Settings push: ${result.settingsUpdated ? "theme settings updated" : "theme settings unchanged"}, ` +
@@ -681,31 +979,26 @@ async function contentPush(scope, rest) {
 }
 
 async function contentPull(scope, rest) {
-  const { positionals } = parseArgsOrExit(rest, KNOWN.content);
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.content);
   const dir = resolve(positionals[0] ?? process.cwd());
-  const creds = requireCreds();
+  const target = await prepareTarget({ command: `${scope} pull`, commandClass: "local-write", dir, flags, needs: "dev", mode: "live" });
+  const creds = target.dev;
   const { count } = await pullContent({ dir, url: creds.url, token: creds.token, scope });
   console.log(`Downloaded ${count} settings file(s) → ${dir}`);
+  bindAfterPull(target, dir);
 }
 
-/** Resolve the v1 API pair (blcf_live_ key only) or exit 1 with guidance. Never prints the key. */
-function requireApiCreds() {
-  let creds;
+/**
+ * Optional online mode for offline-capable reads (`pages check`, `pages migrate-layout`): no credentials at all, or
+ * no context choosable outside a project → offline. Inside a bound project every other refusal still applies.
+ */
+async function optionalTarget({ command, dir, flags }) {
   try {
-    creds = loadApiCredentials();
+    return await prepareTarget({ command, commandClass: "read", dir, flags, needs: "dev", mode: "read" });
   } catch (error) {
-    console.error(error?.message ?? error);
-    process.exit(1);
+    if (error instanceof TargetError && (error.code === "LOGIN_REQUIRED" || (error.code === "TARGET_CONTEXT_REQUIRED" && !findBinding(dir)))) return null;
+    throw error;
   }
-  if (!creds) {
-    console.error("API key required: run `blocofy login --api-key` (or set BLOCOFY_API_KEY + BLOCOFY_API_URL). The dev token (bcf_) is not accepted for the v1 API.");
-    process.exit(1);
-  }
-  if (!isValidApiKey(creds.apiKey)) {
-    console.error(`The stored API key (${creds.source}) is not a v1 key — it must start with blcf_live_. Run \`blocofy login --api-key\`.`);
-    process.exit(1);
-  }
-  return creds;
 }
 
 /** v1 refusal (4xx) → {error} JSON on stderr, exit 2; anything else → message, exit 1. */
@@ -741,7 +1034,7 @@ async function pagesMediaUses(rest) {
     console.error("Usage: blocofy pages media-uses <page-handle> [--json]");
     process.exit(1);
   }
-  const { apiUrl, apiKey } = requireApiCreds();
+  const { apiUrl, apiKey } = (await prepareTarget({ command: "pages media-uses", commandClass: "read", dir: process.cwd(), flags, needs: "api", mode: `read · page ${page}` })).api;
   const view = await fetchPageMediaUses({ apiUrl, apiKey, page });
   if (flags.json) console.log(JSON.stringify(view, null, 2));
   else printMediaUsesView(view);
@@ -784,7 +1077,7 @@ async function pagesMediaDecide(rest) {
     process.exit(1);
   }
 
-  const { apiUrl, apiKey } = requireApiCreds();
+  const { apiUrl, apiKey } = (await prepareTarget({ command: "pages media-decide", commandClass: "remote-mutation", dir: process.cwd(), flags, needs: "api", mode: `draft · page ${page}` })).api;
   if (expectedRevisionId === null) {
     const view = await fetchPageMediaUses({ apiUrl, apiKey, page });
     if (view.applicable === false) {
@@ -821,7 +1114,10 @@ async function themeDev(rest) {
     process.exit(1);
   }
 
-  const creds = requireCreds();
+  // CF-T2: draft sync mutates the site (remote-mutation, binding required); `--no-sync` only renders (read).
+  const noSync = Boolean(flags["no-sync"]);
+  const target = await prepareTarget({ command: "theme dev", commandClass: noSync ? "read" : "remote-mutation", dir: themeDir, flags, needs: "dev", mode: noSync ? "read · local preview" : "draft" });
+  const creds = target.dev;
   const port = Number(flags.port) || 3030;
 
   // Dev session: live-domain preview + theme editor URLs (+ a draft to sync into).
@@ -845,7 +1141,7 @@ async function themeDev(rest) {
 
   // Çözülen site'ı göster (session TOKEN'dan çözer) → hangi tenant'ı düzenlediğin belli olsun.
   const siteLine = session?.site ? `${siteLabel(session.site)} · ` : "";
-  console.log(`\nblocofy theme dev — ${siteLine}${creds.url} (token ${creds.token.slice(0, 8)}…)\n`);
+  console.log(`\nblocofy theme dev — ${siteLine}${creds.url} (context ${target.name})\n`);
   console.log(`  (l) Local      ${hyperlink(localUrl)}`);
   if (previewUrl) console.log(`  (p) Preview    ${hyperlink(previewUrl)}`);
   if (editorUrl) console.log(`  (e) Editor     ${hyperlink(editorUrl)}`);
@@ -959,7 +1255,8 @@ async function themeDev(rest) {
 
 async function themePublish(rest) {
   const { flags } = parseArgsOrExit(rest, KNOWN.themePublish);
-  const creds = requireCreds();
+  const target = await prepareTarget({ command: "theme publish", commandClass: "remote-mutation", dir: process.cwd(), flags, needs: "dev", mode: `live${typeof flags.instance === "string" ? ` · instance ${flags.instance}` : " · CLI draft"}` });
+  const creds = target.dev;
   let instance = typeof flags.instance === "string" ? flags.instance : null;
   if (!instance) {
     // Belirtilmediyse: `theme dev` / `theme push --draft`'ın yazdığı taslağı yayınla. Kaynak
@@ -998,13 +1295,14 @@ async function themeRename(rest) {
     console.error("  Rename a theme (handle from the panel theme card or `blocofy status`).");
     process.exit(1);
   }
-  const creds = requireCreds();
+  const creds = (await prepareTarget({ command: "theme rename", commandClass: "remote-mutation", dir: process.cwd(), flags, needs: "dev", mode: `instance ${handle}` })).dev;
   const result = await renameInstance({ url: creds.url, token: creds.token, instance: handle, name });
   console.log(`✓ Renamed to "${result.name}" (${result.id}).`);
 }
 
-async function status() {
-  const creds = requireCreds();
+async function status(rest) {
+  const { flags } = parseArgsOrExit(rest, []);
+  const creds = (await prepareTarget({ command: "status", commandClass: "read", dir: process.cwd(), flags, needs: "dev", mode: "read" })).dev;
   const s = await fetchSiteStatus({ url: creds.url, token: creds.token });
   const live = s.live_theme_instance;
   console.log(`\nSite: ${s.site.slug}${s.url ? ` · ${s.url}` : ""}`);
@@ -1040,6 +1338,41 @@ async function status() {
 
 const [first, ...rest] = args;
 
+/** Generic failure: PS-19 page errors keep their coded output; anything else → message, exit 1. */
+function exitForGenericError(error) {
+  if (error instanceof PagesCliError) exitForPagesError(error);
+  console.error(error?.message ?? error);
+  process.exit(1);
+}
+
+function commandKey(a, b) {
+  return `${a} ${b ?? ""}`;
+}
+
+// command → [handler, error handler]. Target/binding refusals are handled first for every command (exit 3).
+const COMMANDS = {
+  login: [login, exitForGenericError],
+  contexts: [contextsCommand, exitForGenericError],
+  use: [useCommand, exitForGenericError],
+  logout: [logoutCommand, exitForGenericError],
+  link: [linkCommand, exitForGenericError],
+  target: [targetCommand, exitForGenericError],
+  status: [status, exitForGenericError],
+  "theme dev": [themeDev, exitForGenericError],
+  "theme pull": [themePull, exitForGenericError],
+  "theme push": [themePush, exitForGenericError],
+  "theme publish": [themePublish, exitForGenericError],
+  "theme rename": [themeRename, exitForGenericError],
+  "pages media-uses": [pagesMediaUses, exitForApiError],
+  "pages media-decide": [pagesMediaDecide, exitForApiError],
+  "pages pull": [pagesPull, exitForPagesError],
+  "pages push": [pagesPush, exitForPagesError],
+  "pages check": [pagesCheck, exitForPagesError],
+  "pages migrate-layout": [pagesMigrate, exitForPagesError],
+  "settings pull": [(r) => contentPull("settings", r), exitForGenericError],
+  "settings push": [(r) => contentPush("settings", r), exitForGenericError],
+};
+
 if (first === "--version" || first === "-v") {
   console.log(VERSION);
 } else if (!first || first === "--help" || first === "-h" || first === "help") {
@@ -1051,62 +1384,12 @@ if (first === "--version" || first === "-v") {
 } else if (args.includes("--version") || args.includes("-v")) {
   // Aynı simetri: `theme push <dir> --version` da yalnız sürüm basar, asla yazmaz.
   console.log(VERSION);
-} else if (first === "login") {
-  login(rest).catch((error) => {
-    console.error(error?.message ?? error);
-    process.exit(1);
-  });
-} else if (first === "theme" && rest[0] === "dev") {
-  themeDev(rest.slice(1)).catch((error) => {
-    console.error(error?.message ?? error);
-    process.exit(1);
-  });
-} else if (first === "theme" && rest[0] === "pull") {
-  themePull(rest.slice(1)).catch((error) => {
-    console.error(error?.message ?? error);
-    process.exit(1);
-  });
-} else if (first === "theme" && rest[0] === "push") {
-  themePush(rest.slice(1)).catch((error) => {
-    console.error(error?.message ?? error);
-    process.exit(1);
-  });
-} else if (first === "theme" && rest[0] === "publish") {
-  themePublish(rest.slice(1)).catch((error) => {
-    console.error(error?.message ?? error);
-    process.exit(1);
-  });
-} else if (first === "theme" && rest[0] === "rename") {
-  themeRename(rest.slice(1)).catch((error) => {
-    console.error(error?.message ?? error);
-    process.exit(1);
-  });
-} else if (first === "status") {
-  status().catch((error) => {
-    console.error(error?.message ?? error);
-    process.exit(1);
-  });
-} else if (first === "pages" && rest[0] === "media-uses") {
-  pagesMediaUses(rest.slice(1)).catch(exitForApiError);
-} else if (first === "pages" && rest[0] === "media-decide") {
-  pagesMediaDecide(rest.slice(1)).catch(exitForApiError);
-} else if (first === "pages" && rest[0] === "pull") {
-  pagesPull(rest.slice(1)).catch(exitForPagesError);
-} else if (first === "pages" && rest[0] === "push") {
-  pagesPush(rest.slice(1)).catch(exitForPagesError);
-} else if (first === "pages" && rest[0] === "check") {
-  pagesCheck(rest.slice(1)).catch(exitForPagesError);
-} else if (first === "pages" && rest[0] === "migrate-layout") {
-  pagesMigrate(rest.slice(1)).catch(exitForPagesError);
-} else if (first === "settings" && rest[0] === "pull") {
-  contentPull("settings", rest.slice(1)).catch((error) => {
-    console.error(error?.message ?? error);
-    process.exit(1);
-  });
-} else if (first === "settings" && rest[0] === "push") {
-  contentPush("settings", rest.slice(1)).catch((error) => {
-    console.error(error?.message ?? error);
-    process.exit(1);
+} else if (COMMANDS[commandKey(first, rest[0])] || COMMANDS[first]) {
+  const keyed = COMMANDS[commandKey(first, rest[0])];
+  const [handler, onError] = keyed ?? COMMANDS[first];
+  handler(keyed ? rest.slice(1) : rest).catch((error) => {
+    exitForTargetError(error);
+    onError(error);
   });
 } else {
   console.error(`Unknown command: ${args.join(" ")}\n`);
