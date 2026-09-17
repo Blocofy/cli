@@ -161,8 +161,9 @@ Usage
         --validate   alias for --dry-run (validate only, nothing written)
         --diff       show what a push WOULD change vs the target (read-only), then stop
         --idempotency-key <k>  attach an idempotency key so a retried push is not double-applied
-        --prune      also REMOVE target files that no longer exist locally (lists them first;
-                     on the live theme asks to confirm — non-interactive shells must add --yes)
+        --prune      also REMOVE target files that no longer exist locally, locales/ included
+                     (lists them first; on the live theme asks to confirm — non-interactive
+                     shells must add --yes)
 
   blocofy theme rename <handle> <new name>
       Rename a theme (the name is just a label). Works on any of your themes,
