@@ -374,7 +374,7 @@ function envelopeFor(error) {
   const code = typeof error?.code === "string" && error.code ? error.code : status ? `HTTP_${status}` : error instanceof TypeError ? "NETWORK_ERROR" : "ERROR";
   const details = { ...(error?.details ?? {}) };
   if (status) details.status = status;
-  if (error instanceof PagesCliError) {
+  if (error instanceof PagesCliError || error instanceof SiteStateFsError) {
     if (error.diagnostics?.length) details.diagnostics = error.diagnostics;
     if (Array.isArray(error.pages)) details.pages = error.pages;
   }
@@ -383,17 +383,17 @@ function envelopeFor(error) {
 
 function failAndExit(error) {
   const code = exitCodeFor(error);
-  if (error instanceof PagesCliError && !JSON_MODE) {
+  if ((error instanceof PagesCliError || error instanceof SiteStateFsError) && !JSON_MODE) {
     if (error.diagnostics?.length) reportPageDiagnostics(error.diagnostics);
   }
-  if (error instanceof PagesCliError && Array.isArray(error.pages) && error.pages.length && !JSON_MODE) {
+  if ((error instanceof PagesCliError || error instanceof SiteStateFsError) && Array.isArray(error.pages) && error.pages.length && !JSON_MODE) {
     console.error("Per-file result:");
     for (const p of error.pages) console.error(`  ${p.outcome ?? p.action}  ${p.path}`);
   }
   if (error instanceof CliRefusal && !JSON_MODE) {
     // Existing media-* contract: the server's {error} JSON verbatim on stderr.
     process.stderr.write(redact(JSON.stringify({ error: error.error })) + "\n");
-  } else if (error instanceof PagesCliError && !JSON_MODE) {
+  } else if ((error instanceof PagesCliError || error instanceof SiteStateFsError) && !JSON_MODE) {
     process.stderr.write(redact(`${error.diagnostics?.length ? "\n" : ""}error [${error.code}]:\n    ${error.message}`) + "\n");
   } else if (!JSON_MODE && !(error instanceof TargetError || error instanceof CredentialsError) && !(typeof error?.code === "string" && error.code)) {
     process.stderr.write(redact(error?.message || String(error)) + "\n");
@@ -1387,6 +1387,16 @@ async function siteApply(rest) {
   const { apiUrl, apiKey } = target.api;
   const { requestFiles, manifest, tree } = loadSiteStateForRequest(dir, target.identity);
   const assetsBySha = new Map(tree.assets.map((a) => [a.sha256, a]));
+  // media/assets.json carries each asset's real filename + mime; the filesystem entry alone (media/files/<sha256>)
+  // does not, and uploading with the right content-type is what lets the server categorize/reject it correctly.
+  const assetMetaBySha = new Map();
+  try {
+    for (const entry of JSON.parse(requestFiles["media/assets.json"] ?? "[]")) {
+      if (entry && typeof entry.sha256 === "string") assetMetaBySha.set(entry.sha256, entry);
+    }
+  } catch {
+    /* an unparsable media/assets.json is caught by `site validate`; upload falls back to generic metadata */
+  }
   const body = () => siteStateBody({ manifest, requestFiles, opts });
 
   const deployThemeSource = async (themeSource) => {
@@ -1411,8 +1421,16 @@ async function siteApply(rest) {
           console.error(`Asset ${sha} is missing on the site and not found locally at media/files/${sha}. Export the site state again, or add the file. Nothing more was sent.`);
           process.exit(1);
         }
-        console.error(`  uploading ${asset.path}…`);
-        await uploadMediaAsset({ apiUrl, apiKey, filename: asset.path.split("/").pop(), content: readFileSync(asset.abs), onRetry });
+        const meta = assetMetaBySha.get(sha);
+        console.error(`  uploading ${meta?.filename ?? asset.path}…`);
+        await uploadMediaAsset({
+          apiUrl,
+          apiKey,
+          filename: typeof meta?.filename === "string" ? meta.filename : asset.path.split("/").pop(),
+          content: readFileSync(asset.abs),
+          mime: typeof meta?.mime === "string" ? meta.mime : undefined,
+          onRetry,
+        });
       }
       continue;
     }
