@@ -52,6 +52,7 @@ import { githubNote, healthAdvice, retryNotice, statusLine, syncScopeNote } from
 import { promptSecret } from "../lib/secret-prompt.mjs";
 import { MANIFEST_PATH, buildManifest, validateSiteStateTree, verifyManifest } from "../lib/site-state.mjs";
 import { SiteStateFsError, hashBuffer, readSiteStateTree, stagedWriteTree } from "../lib/site-state-fs.mjs";
+import { migrateSiteState } from "../lib/site-migrate.mjs";
 import { applySiteState, downloadAssetBytes, fetchSiteStateExport, planSiteState, publishSiteState, uploadMediaAsset } from "../lib/site-state-client.mjs";
 import { diffTheme, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
 import { isAffirmative, livePushDecision, resolvePushMode } from "../lib/confirm.mjs";
@@ -83,6 +84,7 @@ const KNOWN = {
   pagesMigrate: ["dry-run", "write", "strict"],
   siteExport: [],
   siteValidate: ["strict"],
+  siteMigrate: ["dry-run", "write"],
   sitePlan: ["target", "mode", "accept-live-effects"],
   siteApply: ["target", "mode", "accept-live-effects"],
   sitePublish: ["target", "mode", "yes"],
@@ -264,6 +266,19 @@ Usage
       path↔content binding (a page file's locale/slug must match its folder/name, and so on),
       duplicate identities, the size/count limits, and the tree against its own manifest digest.
       Exit 1 on errors (--strict: warnings too).
+
+  blocofy site migrate [dir] [--dry-run | --write]
+      Turn a directory left by the older separate 'theme pull' / 'pages pull' / 'settings pull'
+      into the site-state v1 tree layout (theme-dirs-at-root → theme/**, config/settings.json →
+      theme/config/settings.json). Purely local: no network request, no target/identity check,
+      '.blocofy/' project binding untouched. 'pages/**' files are never moved (already canonical);
+      a file still at the old flat page layout is left alone with a note to run
+      'blocofy pages migrate-layout' first. --dry-run (default) prints the plan: every move,
+      every file left alone, every conflict. --write performs it. Any ambiguity or conflict (a
+      target already exists with different content, an unreadable or symlinked entry, a path the
+      shared site-state rules refuse): zero moves, exit 1. Never invents the parts a directory of
+      separate pulls never had (blocofy-site.json, site/locales.json, globals, navigation,
+      translations, theme/chrome/**) — says so, and points at 'blocofy site export' for those.
 
   blocofy site plan [dir] [--target new|<handle>] [--mode same_site|restore]
                     [--accept-live-effects locales] [--json]
@@ -1357,6 +1372,49 @@ async function siteValidate(rest) {
   process.exit(code);
 }
 
+/**
+ * `site migrate` — purely local (no `prepareTarget`, no identity call, `.blocofy/` never read): turns a
+ * directory left by the older separate `theme pull` / `pages pull` / `settings pull` into the site-state
+ * v1 tree layout. Always reports the plan first (every move, every file left alone, every conflict), then
+ * with --write performs it.
+ */
+async function siteMigrate(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.siteMigrate);
+  if (flags["dry-run"] && flags.write) {
+    console.error("Use either --dry-run or --write, not both. Nothing was moved.");
+    process.exit(1);
+  }
+  const dir = resolve(positionals[0] ?? process.cwd());
+  if (!existsSync(dir)) {
+    console.error(`Directory not found: ${dir}`);
+    process.exit(1);
+  }
+  const write = Boolean(flags.write);
+  const r = migrateSiteState({ dir, write });
+
+  for (const m of r.moves) console.log(`  ${write && !r.refused ? "moved" : "move "}  ${m.from} → ${m.to}`);
+  for (const u of r.untouched) console.log(`  leave  ${u.path}  (${u.reason})`);
+  for (const d of r.diagnostics) console.error(formatDiagnostic(d));
+
+  if (r.refused) {
+    console.error("Migration refused; nothing was moved.");
+  } else if (r.moves.length === 0) {
+    console.log("Nothing to do: this directory is already in the site-state tree layout.");
+  } else if (write) {
+    console.log(`Moved ${r.moved} file(s) into the site-state tree layout.`);
+  } else {
+    console.log(`${r.moves.length} file(s) would move. Dry run only; run with --write to move them.`);
+  }
+  if (!r.refused && r.needsExport) {
+    console.log(
+      "This tree still has no blocofy-site.json (and none of site/locales.json, globals, media-policy, " +
+        "content-model, translations, navigation, theme/chrome/**): run `blocofy site export` against a live " +
+        "site to complete it before `site plan`/`apply`/`publish`.",
+    );
+  }
+  process.exit(r.refused ? 1 : 0);
+}
+
 async function sitePlan(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, KNOWN.sitePlan);
   const dir = resolve(positionals[0] ?? process.cwd());
@@ -1933,6 +1991,7 @@ const COMMANDS = {
   "settings push": (r) => contentPush("settings", r),
   "site export": siteExport,
   "site validate": siteValidate,
+  "site migrate": siteMigrate,
   "site plan": sitePlan,
   "site apply": siteApply,
   "site publish": sitePublish,
