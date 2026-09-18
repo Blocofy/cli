@@ -612,3 +612,43 @@ test("pullTheme: a nested config path is still refused, and nothing is written",
   );
   assert.equal(existsSync(join(dir, "layout", "theme.liquid")), false);
 });
+
+test("pullTheme: a flat README.md at the theme root comes down; a tooling file and a dot-file do not", async () => {
+  // The starter themes ship `README.md` and the platform serves it on pull. `package.json` belongs to the
+  // developer's own tooling and a pull must never overwrite it.
+  const serve = (files) => {
+    const fake = createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ files }));
+    });
+    return fake;
+  };
+  const okServer = serve({ "layout/theme": "<html></html>", "README.md": "# theme" });
+  okServer.listen(0);
+  await once(okServer, "listening");
+  const okDir = mkdtempSync(join(tmpdir(), "blocofy-root-file-"));
+  after(() => {
+    okServer.close();
+    rmSync(okDir, { recursive: true, force: true });
+  });
+  await pullTheme({ dir: okDir, url: `http://localhost:${okServer.address().port}`, token: "bcf_t" });
+  assert.equal(readFileSync(join(okDir, "README.md"), "utf8"), "# theme");
+
+  for (const hostile of [{ "package.json": "{}" }, { ".env": "SECRET=1" }]) {
+    const bad = serve({ "layout/theme": "<html></html>", ...hostile });
+    bad.listen(0);
+    await once(bad, "listening");
+    const dir = mkdtempSync(join(tmpdir(), "blocofy-root-deny-"));
+    await assert.rejects(
+      pullTheme({ dir, url: `http://localhost:${bad.address().port}`, token: "bcf_t" }),
+      (err) => {
+        assert.equal(err.code, "PAGES_PATH_ESCAPE");
+        return true;
+      },
+      `${Object.keys(hostile)[0]} was accepted`,
+    );
+    assert.equal(existsSync(join(dir, "layout", "theme.liquid")), false, "all-or-nothing");
+    bad.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

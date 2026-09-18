@@ -610,7 +610,9 @@ test("[20] review I1: theme pull refuses any key the push would not read back (c
     { ".Blocofy-Staging-x/a": "x" },
     { ".git/hooks/pre-commit": "#!/bin/sh\necho pwned" },
     { "section/.hidden/x": "x" },
-    { "README.md": "readme" },
+    // (A flat `README.md` IS written: the starter themes ship one and the platform serves it — the
+    //  cross-repo smoke proved a fresh site could not be pulled otherwise. A tooling file is not.)
+    { "package.json": "{}" },
     { "Layout/theme": "<html>case</html>" },
     // `settings pull` owns this name; a theme row must not shadow it. (A theme's OWN config rows — e.g.
     // `config/theme.json` — DO come down: refusing them refused the whole pull on a fresh site, which the
@@ -628,11 +630,12 @@ test("[20] review I1: theme pull refuses any key the push would not read back (c
   }
   // The legitimate set still pulls (incl. config/settings_schema.json and a nested asset path).
   resetSites();
-  A.state.themeFiles = { "layout/theme": "<html>A2</html>", "asset/img/logo.svg": "<svg/>", "config/settings_schema.json": "[]", "config/theme.json": "{}" };
+  A.state.themeFiles = { "layout/theme": "<html>A2</html>", "asset/img/logo.svg": "<svg/>", "config/settings_schema.json": "[]", "config/theme.json": "{}", "README.md": "# theme" };
   const ok = await run(home, ["theme", "pull", projA]);
   assert.equal(ok.code, 0, ok.stderr);
   assert.equal(readFileSync(join(projA, "config", "settings_schema.json"), "utf8"), "[]");
   assert.equal(readFileSync(join(projA, "config", "theme.json"), "utf8"), "{}");
+  assert.equal(readFileSync(join(projA, "README.md"), "utf8"), "# theme");
 });
 
 test("[21] review I3: `pages migrate-layout --write` outside a binding never uses the default context (offline); an explicit --context goes online", async () => {
