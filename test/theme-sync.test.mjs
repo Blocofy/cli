@@ -562,3 +562,53 @@ test("pushTheme: a non-JSON filename under locales/ (e.g. locales/readme.md) is 
   await pushTheme({ dir, url: `http://localhost:${fake.address().port}`, token: "bcf_t" });
   assert.equal(received.files["locales/readme.md"], "not a locale file");
 });
+
+test("pullTheme: the theme's own config rows come down (a starter theme ships config/theme.json), nested config paths do not", async () => {
+  // CROSS-REPO GAP, found by the real-platform smoke: `GET /api/dev/theme` serves every `config`-kind row,
+  // and refusing them refused the WHOLE pull — a freshly provisioned Klaros-themed site could not be pulled.
+  const fake = createServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({
+      files: {
+        "layout/theme": "<html></html>",
+        "config/settings_schema.json": "[]",
+        "config/theme.json": '{"name":"Klaros"}',
+      },
+    }));
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  const dir = mkdtempSync(join(tmpdir(), "blocofy-config-pull-"));
+  after(() => {
+    fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const { count } = await pullTheme({ dir, url: `http://localhost:${fake.address().port}`, token: "bcf_t" });
+  assert.equal(count, 3);
+  assert.equal(readFileSync(join(dir, "config", "theme.json"), "utf8"), '{"name":"Klaros"}');
+  assert.equal(readFileSync(join(dir, "config", "settings_schema.json"), "utf8"), "[]");
+});
+
+test("pullTheme: a nested config path is still refused, and nothing is written", async () => {
+  const fake = createServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ files: { "layout/theme": "<html></html>", "config/nested/evil.json": "{}" } }));
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  const dir = mkdtempSync(join(tmpdir(), "blocofy-config-nested-"));
+  after(() => {
+    fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  await assert.rejects(
+    pullTheme({ dir, url: `http://localhost:${fake.address().port}`, token: "bcf_t" }),
+    (err) => {
+      assert.equal(err.code, "PAGES_PATH_ESCAPE");
+      return true;
+    },
+  );
+  assert.equal(existsSync(join(dir, "layout", "theme.liquid")), false);
+});

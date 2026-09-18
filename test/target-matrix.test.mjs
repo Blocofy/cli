@@ -612,7 +612,11 @@ test("[20] review I1: theme pull refuses any key the push would not read back (c
     { "section/.hidden/x": "x" },
     { "README.md": "readme" },
     { "Layout/theme": "<html>case</html>" },
-    { "config/settings_data.json": "{}" },
+    // `settings pull` owns this name; a theme row must not shadow it. (A theme's OWN config rows — e.g.
+    // `config/theme.json` — DO come down: refusing them refused the whole pull on a fresh site, which the
+    // cross-repo smoke caught. See theme-sync.test.mjs.)
+    { "config/settings.json": "{}" },
+    { "config/nested/evil.json": "{}" },
   ];
   for (const bad of hostile) {
     resetSites();
@@ -624,10 +628,11 @@ test("[20] review I1: theme pull refuses any key the push would not read back (c
   }
   // The legitimate set still pulls (incl. config/settings_schema.json and a nested asset path).
   resetSites();
-  A.state.themeFiles = { "layout/theme": "<html>A2</html>", "asset/img/logo.svg": "<svg/>", "config/settings_schema.json": "[]" };
+  A.state.themeFiles = { "layout/theme": "<html>A2</html>", "asset/img/logo.svg": "<svg/>", "config/settings_schema.json": "[]", "config/theme.json": "{}" };
   const ok = await run(home, ["theme", "pull", projA]);
   assert.equal(ok.code, 0, ok.stderr);
   assert.equal(readFileSync(join(projA, "config", "settings_schema.json"), "utf8"), "[]");
+  assert.equal(readFileSync(join(projA, "config", "theme.json"), "utf8"), "{}");
 });
 
 test("[21] review I3: `pages migrate-layout --write` outside a binding never uses the default context (offline); an explicit --context goes online", async () => {
