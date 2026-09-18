@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { SiteStateFsError, hashFile, readSiteStateTree, stagedWriteTree } from "../lib/site-state-fs.mjs";
+import { SiteStateFsError, hashBuffer, hashFile, readSiteStateTree, stagedWriteTree } from "../lib/site-state-fs.mjs";
 
 const dirs = [];
 after(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
@@ -77,6 +77,7 @@ test("hashFile hashes the actual bytes on disk", () => {
   // sha256("hello")
   assert.equal(got, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
   assert.equal(got, hashFile(join(root, "x")));
+  assert.equal(hashBuffer(Buffer.from("hello")), got);
 });
 
 test("stagedWriteTree writes string AND Buffer content, all-or-nothing", () => {

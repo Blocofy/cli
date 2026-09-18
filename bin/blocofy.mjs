@@ -50,6 +50,9 @@ import { readLocalTemplates } from "../lib/local-theme.mjs";
 import { CliRefusal, DEFAULT_API_URL, decidePageMediaUses, fetchPageMediaUses, isValidApiKey } from "../lib/media-uses.mjs";
 import { githubNote, healthAdvice, retryNotice, statusLine, syncScopeNote } from "../lib/messages.mjs";
 import { promptSecret } from "../lib/secret-prompt.mjs";
+import { MANIFEST_PATH, buildManifest, validateSiteStateTree, verifyManifest } from "../lib/site-state.mjs";
+import { SiteStateFsError, hashBuffer, readSiteStateTree, stagedWriteTree } from "../lib/site-state-fs.mjs";
+import { applySiteState, downloadAssetBytes, fetchSiteStateExport, planSiteState, publishSiteState, uploadMediaAsset } from "../lib/site-state-client.mjs";
 import { diffTheme, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
 import { isAffirmative, livePushDecision, resolvePushMode } from "../lib/confirm.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
@@ -78,6 +81,11 @@ const KNOWN = {
   pagesPush: ["dry-run", "strict", "force", "reason"],
   pagesCheck: ["strict"],
   pagesMigrate: ["dry-run", "write", "strict"],
+  siteExport: [],
+  siteValidate: ["strict"],
+  sitePlan: ["target", "mode", "accept-live-effects"],
+  siteApply: ["target", "mode", "accept-live-effects"],
+  sitePublish: ["target", "mode", "yes"],
 };
 // CF-T1/T2: every command accepts the global `--context <name>` and `--json` (machine-readable refusals).
 function parseArgsOrExit(rest, known) {
@@ -245,6 +253,47 @@ Usage
         --live       write the LIVE theme (asks to confirm; non-interactive shells add --yes)
       After a push the CLI says where it applied (preview now / live now / after deploy).
 
+  blocofy site export [dir]
+      Download the whole site as a declarative tree (pages, navigation, theme source, settings,
+      chrome, translations, media/assets.json) into [dir], plus every media file's bytes at
+      media/files/<sha256> (downloaded and hash-verified). Refuses to overwrite a directory
+      bound to another site (same binding rule as every other pull).
+
+  blocofy site validate [dir]
+      Check an exported (or hand-authored) tree OFFLINE — zero network requests: paths, the
+      path↔content binding (a page file's locale/slug must match its folder/name, and so on),
+      duplicate identities, the size/count limits, and the tree against its own manifest digest.
+      Exit 1 on errors (--strict: warnings too).
+
+  blocofy site plan [dir] [--target new|<handle>] [--mode same_site|restore]
+                    [--accept-live-effects locales] [--json]
+      Ask the site what applying this tree WOULD do — no write. Needs BOTH a dev token and a
+      v1 API key (the dev token is what a theme deploy uses later). Prints the status
+      (planned / awaiting_assets / awaiting_theme_source / draft_complete), the steps, and any
+      missing assets or a differing theme source.
+        --target new|<handle>   a fresh draft theme version (default), or a specific one you
+                                own (from a previous plan/apply's target instance)
+        --mode same_site|restore  same_site refuses a page that changed on this site since the
+                                  tree was exported; restore (default) does not
+        --accept-live-effects locales  required before a state that adds a language may be
+                                       applied (publishing a language prepares its homepage
+                                       LIVE, contract §A3)
+
+  blocofy site apply [dir] [--target new|<handle>] [--mode same_site|restore]
+                     [--accept-live-effects locales] [--json]
+      Build the state into a DRAFT theme version — the live site is never touched. Loops:
+      plan → (upload missing media via the v1 API, or deploy the theme source via the same
+      canonical path 'theme push --instance' uses) → plan → apply, until the target reports
+      draft_complete or 5 passes are used. Safe to re-run: every step is idempotent and a
+      re-plan picks up exactly what is left, so an apply interrupted by anything (network,
+      Ctrl-C, a crash) resumes with the same command.
+      Preview it from the admin panel, then: blocofy site publish.
+
+  blocofy site publish [dir] [--target new|<handle>] [--mode same_site|restore] [--yes]
+      Make an applied state the LIVE site: pointer swap, then navigation, then settings.
+      Refuses (exit 2) if the state is not fully applied yet — run 'site apply' first.
+      Separate live gate: asks to confirm (non-interactive shells must add --yes).
+
   blocofy --version
   blocofy --help
 
@@ -270,7 +319,8 @@ Targets (which site a command talks to)
   (one warning; run \`blocofy link --adopt\` to record it). A server that reports no origin cannot
   serve a binding that records one (TARGET_UNVERIFIED).
   Exit codes (every command): 0 ok · 1 usage/network/5xx/local check · 2 server refusal (HTTP 4xx)
-  · 3 target/binding refusal.
+  · 3 target/binding refusal · 4 'site apply' only: not finished within its bounded pass count —
+  every step already applied is safe, re-run the same command to resume.
   --json: every failure prints {"error":{"code","message","details"}} as the LAST stderr line; the
   target block ({"target":…}) and any warning lines are printed on stderr before it.
   Retries: network errors and HTTP 429/502/503/504 are retried up to 3 times (Retry-After honoured,
@@ -697,13 +747,24 @@ async function prepareTarget({ command, commandClass, dir, flags, needs, mode, r
   if (needs === "dev" && !hasDev) {
     throw new TargetError("LOGIN_REQUIRED", `Login required: context "${resolved.name}" has no dev token. Run \`blocofy login${resolved.env ? "" : ` --context ${resolved.name}`}\` (or set BLOCOFY_URL + BLOCOFY_TOKEN).`, { context: resolved.name }, 1);
   }
-  if (needs === "api") {
+  if (needs === "api" || needs === "both") {
     if (!hasApi) {
       throw new TargetError("LOGIN_REQUIRED", `API key required: run \`blocofy login --api-key\` (or set BLOCOFY_API_KEY + BLOCOFY_API_URL). The dev token (bcf_) is not accepted for the v1 API.`, { context: resolved.name }, 1);
     }
     if (!isValidApiKey(secrets.apiKey)) {
       throw new TargetError("LOGIN_REQUIRED", `The API key of context "${resolved.name}" is not a v1 key — it must start with blcf_live_. Run \`blocofy login --api-key\`.`, { context: resolved.name }, 1);
     }
+  }
+  // CF-T4 — site plan/apply need BOTH pairs: the v1 API for the site-state endpoints, the dev token for the
+  // canonical theme deploy `awaiting_theme_source` asks for. `verifyTarget` below already asserts they
+  // resolve to the same site whenever both are present (dev && api), which "both" makes unconditional.
+  if (needs === "both" && !hasDev) {
+    throw new TargetError(
+      "LOGIN_REQUIRED",
+      `Login required: context "${resolved.name}" has no dev token. Run \`blocofy login${resolved.env ? "" : ` --context ${resolved.name}`}\` (or set BLOCOFY_URL + BLOCOFY_TOKEN). Site plan/apply need both a dev token and a v1 API key.`,
+      { context: resolved.name },
+      1,
+    );
   }
 
   const identity = await verifyTarget({ resolved, secrets, binding, retry });
@@ -1146,6 +1207,287 @@ async function pagesMigrate(rest) {
   process.exit(r.refused ? 1 : code);
 }
 
+// ── site state (CF-T4): export | validate | plan | apply | publish ─────────────────────────────────────────
+
+/**
+ * A site-state tree on disk → what a plan/apply/publish request body needs: `files` (every tree path
+ * EXCEPT `blocofy-site.json` itself and `media/files/<sha256>` bytes — contract §A1, those never travel in
+ * a request) and a freshly recomputed `manifest` (the digest must describe the CURRENT files; a stale
+ * committed one would just be refused). Provenance fields (`platform_origin`, `source_site`, `exported_at`)
+ * are kept from the tree's own `blocofy-site.json` when it parses — that is what `site export` wrote — and
+ * only synthesized from the verified target identity for a tree that never had one.
+ *
+ * Throws `SiteStateFsError` when the tree read found a symlink or other unreadable entry: nothing is sent.
+ */
+function loadSiteStateForRequest(dir, identity) {
+  const tree = readSiteStateTree(dir);
+  if (tree.diagnostics.length > 0) {
+    throw new SiteStateFsError("SITE_STATE_INVALID_PATH", "The local tree has unreadable entries; nothing was sent.", tree.diagnostics);
+  }
+  const requestFiles = { ...tree.files };
+  delete requestFiles[MANIFEST_PATH];
+
+  let provenance = null;
+  if (tree.files[MANIFEST_PATH] !== undefined) {
+    try {
+      const parsed = JSON.parse(tree.files[MANIFEST_PATH]);
+      if (parsed && typeof parsed === "object") {
+        provenance = {
+          platformOrigin: typeof parsed.platform_origin === "string" ? parsed.platform_origin : null,
+          sourceSite: parsed.source_site ?? null,
+          exportedAt: typeof parsed.exported_at === "string" ? parsed.exported_at : null,
+        };
+      }
+    } catch {
+      /* fall back to the verified identity below */
+    }
+  }
+  const manifest = buildManifest({
+    files: requestFiles,
+    platformOrigin: provenance?.platformOrigin ?? identity.platformOrigin ?? null,
+    sourceSite: provenance?.sourceSite ?? { id: identity.site.id, slug: identity.site.slug ?? "" },
+    exportedAt: provenance?.exportedAt ?? new Date().toISOString(),
+  });
+  return { tree, requestFiles, manifest };
+}
+
+/** `--target new|<handle>` (default new), `--mode same_site|restore` (default restore), `--accept-live-effects locales`. */
+function siteStateTargetFlags(flags) {
+  const targetFlag = typeof flags.target === "string" && flags.target ? flags.target : "new";
+  const mode = typeof flags.mode === "string" && flags.mode ? flags.mode : "restore";
+  if (mode !== "same_site" && mode !== "restore") {
+    console.error('--mode must be "same_site" or "restore". Nothing was sent.');
+    process.exit(1);
+  }
+  const acceptLiveEffects =
+    typeof flags["accept-live-effects"] === "string"
+      ? flags["accept-live-effects"].split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+  return { targetFlag, mode, acceptLiveEffects };
+}
+
+function siteStateBody({ manifest, requestFiles, opts }) {
+  return { manifest, files: requestFiles, mode: opts.mode, target: { instance: opts.targetFlag }, accept_live_effects: opts.acceptLiveEffects };
+}
+
+/** CF-T4 — the target block's operation: "plan/apply/publish · <draft instance> · mode <m> [· LIVE EFFECTS: …]". */
+function siteStateOperationLabel(opts, op) {
+  const t = opts.targetFlag === "new" ? "new draft instance" : `instance ${opts.targetFlag}`;
+  const live = opts.acceptLiveEffects.length ? ` · LIVE EFFECTS: ${opts.acceptLiveEffects.join(",")}` : "";
+  return `${op} · ${t} · mode ${opts.mode}${live}`;
+}
+
+function printSiteStatePlan(plan) {
+  console.log(`Status: ${plan.status} (target instance: ${plan.target_instance ?? "not created yet"})`);
+  if (plan.steps.length === 0) {
+    console.log("No steps: this state is already applied to the target.");
+  } else {
+    console.log("Steps:");
+    for (const s of plan.steps) {
+      console.log(`  ${String(s.seq).padStart(2)}  ${s.owner.padEnd(14)} ${s.action.padEnd(16)} ${s.key}${s.live_effect ? "  [LIVE EFFECT]" : ""}`);
+    }
+  }
+  if (plan.assets_missing.length > 0) console.log(`Assets missing on the site: ${plan.assets_missing.join(", ")}`);
+  if (plan.theme_source) {
+    console.log(`Theme source differs (digest ${plan.theme_source.digest.slice(0, 12)}…); deploy it to ${plan.theme_source.instance ?? "the new draft instance"}.`);
+  }
+  for (const p of plan.preconditions ?? []) console.warn(`precondition [${p.code}]: ${p.message}`);
+  for (const d of plan.diagnostics ?? []) console.warn(formatDiagnostic(d));
+}
+
+async function siteExport(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.siteExport);
+  const dir = resolve(positionals[0] ?? process.cwd());
+  const target = await prepareTarget({ command: "site export", commandClass: "local-write", dir, flags, needs: "api", mode: "export" });
+  const { apiUrl, apiKey } = target.api;
+  const { fileCount, assetCount } = await withNewBindingClaim(target, dir, async () => {
+    const data = await fetchSiteStateExport({ apiUrl, apiKey, onRetry });
+    const entries = [[MANIFEST_PATH, JSON.stringify(data.manifest, null, 2) + "\n"]];
+    for (const [path, content] of Object.entries(data.files ?? {})) entries.push([path, content]);
+    const assets = Array.isArray(data.assets) ? data.assets : [];
+    for (const asset of assets) {
+      const buf = await downloadAssetBytes({ url: asset.url, onRetry });
+      const got = hashBuffer(buf);
+      if (got !== asset.sha256) {
+        throw new Error(`Downloaded ${asset.filename ?? asset.sha256} does not match its sha256 (expected ${asset.sha256}, got ${got}); nothing was written.`);
+      }
+      entries.push([`media/files/${asset.sha256}`, buf]);
+    }
+    // Staged, all-or-nothing: nothing lands on disk until every text file AND every downloaded, hash-verified
+    // asset is ready.
+    stagedWriteTree(dir, entries);
+    return { fileCount: entries.length - assets.length, assetCount: assets.length };
+  });
+  console.log(`Exported ${fileCount} file(s) + ${assetCount} asset(s) → ${dir}`);
+  bindAfterPull(target, dir);
+}
+
+async function siteValidate(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.siteValidate);
+  const dir = resolve(positionals[0] ?? process.cwd());
+  if (!existsSync(dir)) {
+    console.error(`Directory not found: ${dir}`);
+    process.exit(1);
+  }
+  const tree = readSiteStateTree(dir);
+  const combined = { ...tree.files };
+  for (const a of tree.assets) combined[a.path] = ""; // content irrelevant to the structural checks below
+  const findings = [...tree.diagnostics, ...validateSiteStateTree(combined)];
+
+  if (tree.files[MANIFEST_PATH] !== undefined) {
+    let manifest = null;
+    try {
+      manifest = JSON.parse(tree.files[MANIFEST_PATH]);
+    } catch {
+      /* reported below */
+    }
+    if (manifest === null) {
+      findings.push({ level: "error", code: "SITE_STATE_INVALID_FILE", message: "blocofy-site.json is not valid JSON", path: MANIFEST_PATH });
+    } else {
+      const withoutManifest = { ...tree.files };
+      delete withoutManifest[MANIFEST_PATH];
+      const refusal = verifyManifest(manifest, withoutManifest);
+      if (refusal) findings.push({ level: "error", code: refusal.code, message: refusal.message, path: MANIFEST_PATH });
+    }
+  }
+
+  const code = reportPageDiagnostics(findings, { strict: Boolean(flags.strict) });
+  const errors = findings.filter((f) => f.level === "error").length;
+  console.log(`Checked ${Object.keys(tree.files).length + tree.assets.length} file(s): ${errors} error(s), ${findings.length - errors} warning(s).`);
+  process.exit(code);
+}
+
+async function sitePlan(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.sitePlan);
+  const dir = resolve(positionals[0] ?? process.cwd());
+  if (!existsSync(dir)) {
+    console.error(`Directory not found: ${dir}`);
+    process.exit(1);
+  }
+  const opts = siteStateTargetFlags(flags);
+  const target = await prepareTarget({ command: "site plan", commandClass: "read", dir, flags, needs: "both", mode: siteStateOperationLabel(opts, "plan") });
+  const { requestFiles, manifest } = loadSiteStateForRequest(dir, target.identity);
+  const plan = await planSiteState({ apiUrl: target.api.apiUrl, apiKey: target.api.apiKey, body: siteStateBody({ manifest, requestFiles, opts }), onRetry });
+  if (JSON_MODE) console.log(JSON.stringify(plan));
+  else printSiteStatePlan(plan);
+}
+
+/** CF-T4 — bounded: plan → (upload assets | deploy theme) → plan → apply, repeated, never more than this many passes. */
+const MAX_APPLY_PASSES = 5;
+
+async function siteApply(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.siteApply);
+  const dir = resolve(positionals[0] ?? process.cwd());
+  if (!existsSync(dir)) {
+    console.error(`Directory not found: ${dir}`);
+    process.exit(1);
+  }
+  const opts = siteStateTargetFlags(flags);
+  const target = await prepareTarget({ command: "site apply", commandClass: "remote-mutation", dir, flags, needs: "both", mode: siteStateOperationLabel(opts, "apply") });
+  const { apiUrl, apiKey } = target.api;
+  const { requestFiles, manifest, tree } = loadSiteStateForRequest(dir, target.identity);
+  const assetsBySha = new Map(tree.assets.map((a) => [a.sha256, a]));
+  const body = () => siteStateBody({ manifest, requestFiles, opts });
+
+  const deployThemeSource = async (themeSource) => {
+    const themeDir = join(tree.root, "theme");
+    if (!existsSync(themeDir)) {
+      console.error(`This state's theme source (theme/) is missing locally at ${themeDir}; nothing was deployed.`);
+      process.exit(1);
+    }
+    console.error(`  deploying theme source to ${themeSource.instance}…`);
+    await pushTheme({ dir: themeDir, url: target.dev.url, token: target.dev.token, instance: themeSource.instance, idempotencyKey: themeSource.idempotency_key, prune: true, onRetry });
+  };
+
+  let last = null;
+  for (let pass = 1; pass <= MAX_APPLY_PASSES; pass++) {
+    const plan = await planSiteState({ apiUrl, apiKey, body: body(), onRetry });
+    last = plan;
+
+    if (plan.status === "awaiting_assets") {
+      for (const sha of plan.assets_missing) {
+        const asset = assetsBySha.get(sha);
+        if (!asset) {
+          console.error(`Asset ${sha} is missing on the site and not found locally at media/files/${sha}. Export the site state again, or add the file. Nothing more was sent.`);
+          process.exit(1);
+        }
+        console.error(`  uploading ${asset.path}…`);
+        await uploadMediaAsset({ apiUrl, apiKey, filename: asset.path.split("/").pop(), content: readFileSync(asset.abs), onRetry });
+      }
+      continue;
+    }
+    if (plan.status === "awaiting_theme_source") {
+      await deployThemeSource(plan.theme_source);
+      continue;
+    }
+    if (plan.steps.length === 0) break; // draft_complete (or published — an apply target is never live)
+
+    const applied = await applySiteState({ apiUrl, apiKey, body: { ...body(), expected_plan_hash: plan.plan_hash }, onRetry });
+    last = applied;
+    if (applied.status === "awaiting_theme_source") {
+      await deployThemeSource(applied.theme_source);
+      continue;
+    }
+    if (applied.status === "draft_complete") break;
+    // else still "planned" (e.g. the server's own bounded per-call convergence left steps): loop, re-plan.
+  }
+
+  const done = last?.status === "draft_complete" || last?.status === "published";
+  if (JSON_MODE) console.log(JSON.stringify(last));
+  if (done) {
+    console.log(`✓ draft_complete — target instance ${last.target_instance}.`);
+    return;
+  }
+  console.log(
+    `Not finished after ${MAX_APPLY_PASSES} pass(es) — target instance ${last?.target_instance ?? "?"}, status ${last?.status ?? "unknown"}. ` +
+      "Run `blocofy site apply` again to continue; every step already applied is safe to resume from.",
+  );
+  process.exit(4);
+}
+
+async function sitePublish(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.sitePublish);
+  const dir = resolve(positionals[0] ?? process.cwd());
+  if (!existsSync(dir)) {
+    console.error(`Directory not found: ${dir}`);
+    process.exit(1);
+  }
+  const opts = siteStateTargetFlags(flags);
+  const target = await prepareTarget({ command: "site publish", commandClass: "remote-mutation", dir, flags, needs: "api", mode: `${siteStateOperationLabel(opts, "publish")} · LIVE` });
+  const { apiUrl, apiKey } = target.api;
+  const siteName = siteLabel(target.identity.site) || String(target.identity.site.id);
+
+  // Separate live gate (contract §A3): TTY asks y/N, a non-interactive shell must pass --yes — same
+  // decision `settings push --live` uses, before ANY site-state request is sent.
+  const decision = livePushDecision({ draft: false, yes: Boolean(flags.yes), confirm: false, isTTY: Boolean(process.stdin.isTTY) });
+  if (decision.mustAbort) {
+    console.error(`⚠ 'site publish' makes this state the LIVE site of ${siteName}.`);
+    console.error("  Non-interactive shell: pass --yes to confirm. Nothing was sent.");
+    process.exit(1);
+  }
+  if (decision.needsPrompt) {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    let answer;
+    try {
+      answer = await rl.question(`⚠ Publish this state as the LIVE site of ${siteName}? [y/N] `);
+    } finally {
+      rl.close();
+    }
+    if (!isAffirmative(answer)) {
+      console.error("Aborted. Nothing was sent.");
+      process.exit(1);
+    }
+  }
+
+  const { requestFiles, manifest } = loadSiteStateForRequest(dir, target.identity);
+  const result = await publishSiteState({ apiUrl, apiKey, body: siteStateBody({ manifest, requestFiles, opts }), onRetry });
+  if (JSON_MODE) console.log(JSON.stringify(result));
+  console.log(
+    `✓ Published — target instance ${result.target_instance}${result.swapped ? " (now live)" : " (already live)"}; ` +
+      `${result.navigation.length} menu(s) written, globals ${result.globals ? "updated" : "unchanged"}.`,
+  );
+}
+
 async function contentPush(scope, rest) {
   const { flags, positionals } = parseArgsOrExit(rest, KNOWN.settingsPush);
   const dir = resolve(positionals[0] ?? process.cwd());
@@ -1571,6 +1913,11 @@ const COMMANDS = {
   "pages migrate-layout": pagesMigrate,
   "settings pull": (r) => contentPull("settings", r),
   "settings push": (r) => contentPush("settings", r),
+  "site export": siteExport,
+  "site validate": siteValidate,
+  "site plan": sitePlan,
+  "site apply": siteApply,
+  "site publish": sitePublish,
 };
 
 if (first === "--version" || first === "-v") {

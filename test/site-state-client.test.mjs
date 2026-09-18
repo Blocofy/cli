@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { createServer } from "node:http";
 import { test } from "node:test";
 
-import { CliRefusal, applySiteState, fetchSiteStateExport, planSiteState, publishSiteState, uploadMediaAsset } from "../lib/site-state-client.mjs";
+import { CliRefusal, applySiteState, downloadAssetBytes, fetchSiteStateExport, planSiteState, publishSiteState, uploadMediaAsset } from "../lib/site-state-client.mjs";
 
 const KEY = "blcf_live_testkey0123456789abcdef";
 
@@ -77,6 +77,38 @@ test("a 4xx is a CliRefusal carrying the server's error envelope", async () => {
     });
   } finally {
     await s.close();
+  }
+});
+
+test("downloadAssetBytes: fetches raw bytes from an arbitrary URL, no auth header", async () => {
+  const reqs = [];
+  const server = createServer((req, res) => {
+    reqs.push({ headers: req.headers });
+    res.writeHead(200, { "content-type": "image/png" });
+    res.end(Buffer.from([1, 2, 3, 4]));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const buf = await downloadAssetBytes({ url: `http://127.0.0.1:${server.address().port}/cdn/x.png` });
+    assert.deepEqual(buf, Buffer.from([1, 2, 3, 4]));
+    assert.equal(reqs[0].headers.authorization, undefined);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test("downloadAssetBytes throws on a non-ok response", async () => {
+  const server = createServer((req, res) => {
+    res.writeHead(404);
+    res.end("nope");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    await assert.rejects(downloadAssetBytes({ url: `http://127.0.0.1:${server.address().port}/gone.png` }));
+  } finally {
+    await new Promise((r) => server.close(r));
   }
 });
 
