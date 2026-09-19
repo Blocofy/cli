@@ -52,4 +52,3 @@ test("migrate-layout keeps base_revision (placed after format_version, value unc
   assert.deepEqual(Object.keys(JSON.parse(out)).slice(0, 2), ["format_version", "base_revision"]);
   assert.equal(JSON.parse(out).base_revision, base);
 });
-
