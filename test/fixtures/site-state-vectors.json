@@ -1,0 +1,358 @@
+{
+  "_comment": "CF-T4 Site State vectors. SHARED CONTRACT: an identical copy lives in Blocofy/cli test/fixtures/site-state-vectors.json. Change both or neither. `files` entries are {json} (serialized as JSON.stringify(value, null, 2) + newline) or {text}.",
+  "ownerOfPath": [
+    ["blocofy-site.json", null],
+    ["site/locales.json", "locales"],
+    ["site/globals.json", "globals"],
+    ["site/media-policy.json", "media_policy"],
+    ["site/content-model.json", "content_model"],
+    ["site/translations.json", "translations"],
+    ["site/navigation/tr-TR/main.json", "navigation"],
+    ["site/navigation/en-US/footer-menu.json", "navigation"],
+    ["theme/sections/Hero/section.liquid", "theme"],
+    ["theme/assets/theme.css", "theme"],
+    ["theme/locales/en-US.json", "theme"],
+    ["theme/config/settings.schema.json", "theme"],
+    ["theme/config/settings.json", "settings"],
+    ["theme/chrome/header_group.json", "chrome"],
+    ["theme/chrome/footer_group.json", "chrome"],
+    ["pages/tr-TR/index.json", "pages"],
+    ["pages/tr-TR/routes/hakkimizda/index.json", "pages"],
+    ["pages/tr-TR/routes/hakkimizda/media-decisions.json", "media_decisions"],
+    ["pages/tr-TR/media-decisions.json", "media_decisions"],
+    ["media/assets.json", "assets"],
+    ["media/files/0000000000000000000000000000000000000000000000000000000000000000", "assets"],
+    ["site/navigation/tr-TR/MAIN.json", null],
+    ["site/navigation/tr-TR/main/extra.json", null],
+    ["theme/chrome/side_group.json", null],
+    ["pages/tr-TR/routes/hakkimizda/notes.json", null],
+    ["pages/tr-TR/routes/Hakkimizda/index.json", null],
+    ["media/files/not-a-sha", null],
+    ["README.md", null],
+    ["config/settings.json", null]
+  ],
+  "refusedPaths": [
+    ["", "SITE_STATE_INVALID_PATH", "empty"],
+    ["../secrets/site/locales.json", "SITE_STATE_INVALID_PATH", "traversal"],
+    ["site/../../etc/passwd", "SITE_STATE_INVALID_PATH", "traversal"],
+    ["/site/locales.json", "SITE_STATE_INVALID_PATH", "absolute"],
+    ["C:/site/locales.json", "SITE_STATE_INVALID_PATH", "windows absolute"],
+    ["site\\locales.json", "SITE_STATE_INVALID_PATH", "backslash"],
+    ["site/./locales.json", "SITE_STATE_INVALID_PATH", "dot segment"],
+    ["site//locales.json", "SITE_STATE_INVALID_PATH", "empty segment"],
+    ["theme/assets/.hidden.css", "SITE_STATE_INVALID_PATH", "leading dot segment"],
+    [".git/config", "SITE_STATE_INVALID_PATH", "leading dot segment"],
+    ["theme/assets/con.css", "SITE_STATE_INVALID_PATH", "windows reserved name"],
+    ["theme/assets/COM1.css", "SITE_STATE_INVALID_PATH", "windows reserved name"],
+    ["theme/assets/nul", "SITE_STATE_INVALID_PATH", "windows reserved name"],
+    ["theme/assets/style.css.", "SITE_STATE_INVALID_PATH", "trailing dot"],
+    ["theme/assets/style.css ", "SITE_STATE_INVALID_PATH", "trailing space"],
+    ["theme/assets/a:b.css", "SITE_STATE_INVALID_PATH", "windows forbidden character"],
+    ["theme/assets/a?b.css", "SITE_STATE_INVALID_PATH", "windows forbidden character"],
+    ["theme/assets/ba\u0308slik.css", "SITE_STATE_INVALID_PATH", "not NFC"],
+    ["theme/assets/tab\there.css", "SITE_STATE_INVALID_PATH", "control character"],
+    ["readme.md", "SITE_STATE_UNKNOWN_PATH", "no owner"],
+    ["site/unknown.json", "SITE_STATE_UNKNOWN_PATH", "no owner"],
+    ["pages/tr-TR/routes/hakkimizda/notes.json", "SITE_STATE_UNKNOWN_PATH", "no owner"]
+  ],
+  "acceptedPaths": [
+    "blocofy-site.json",
+    "site/locales.json",
+    "site/navigation/en-US/main.json",
+    "theme/sections/Hero/section.liquid",
+    "theme/assets/ba\u015flik.css",
+    "pages/en-US/routes/about/index.json",
+    "pages/en-US/routes/about/media-decisions.json",
+    "media/assets.json"
+  ],
+  "casefoldCollision": ["theme/assets/Logo.css", "theme/assets/logo.css"],
+  "fileFolderCollision": ["theme/assets/brand", "theme/assets/brand/logo.css"],
+  "identityOk": {
+    "pages/tr-TR/index.json": {
+      "json": {
+        "format_version": 2,
+        "base_revision": "r1_0123456789abcdef0123456789abcdef",
+        "slug": "/",
+        "title": "Ana Sayfa",
+        "status": "published",
+        "seo_title": null,
+        "seo_description": null,
+        "og_image": null,
+        "canonical_url": null,
+        "locale": "tr-TR",
+        "template": "home",
+        "data": { "version": 2, "sections": [] }
+      }
+    },
+    "pages/en-US/routes/about/index.json": {
+      "json": {
+        "format_version": 2,
+        "base_revision": "r1_0123456789abcdef0123456789abcdef",
+        "slug": "/about",
+        "title": "About",
+        "status": "published",
+        "seo_title": null,
+        "seo_description": null,
+        "og_image": null,
+        "canonical_url": null,
+        "locale": "en-US",
+        "template": null,
+        "data": { "version": 2, "sections": [] }
+      }
+    },
+    "pages/en-US/routes/about/media-decisions.json": {
+      "json": [
+        {
+          "path": "hero",
+          "facet": "reference",
+          "decision": "shared_confirmed",
+          "target_asset": "asset:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "alt": "Bir görsel",
+          "caption": null,
+          "decorative": false
+        }
+      ]
+    },
+    "site/translations.json": {
+      "json": { "groups": [{ "group": "g1", "members": [{ "locale": "en-US", "slug": "/about" }, { "locale": "tr-TR", "slug": "/" }] }] }
+    },
+    "site/navigation/tr-TR/main.json": {
+      "json": {
+        "handle": "main",
+        "locale": "tr-TR",
+        "title": "Ana Menü",
+        "items": [
+          { "id": "n1", "parent": null, "label": "Ana Sayfa", "link": { "type": "page", "locale": "tr-TR", "slug": "/" } },
+          { "id": "n2", "parent": "n1", "label": "Blog", "link": { "type": "custom", "url": "https://example.com/blog" } }
+        ]
+      }
+    },
+    "theme/chrome/header_group.json": { "json": { "area": "header", "document": null } },
+    "media/assets.json": {
+      "json": [{ "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 70, "mime": "image/png", "filename": "pixel.png" }]
+    }
+  },
+  "identityRefusals": [
+    {
+      "why": "a page file whose payload slug is not the one its path encodes",
+      "code": "SITE_STATE_IDENTITY_MISMATCH",
+      "files": {
+        "pages/tr-TR/index.json": {
+          "json": { "format_version": 2, "slug": "/hakkimizda", "locale": "tr-TR", "title": "Yanlış", "data": { "version": 2, "sections": [] } }
+        }
+      }
+    },
+    {
+      "why": "a page file whose payload locale is not its folder",
+      "code": "SITE_STATE_IDENTITY_MISMATCH",
+      "files": {
+        "pages/tr-TR/index.json": {
+          "json": { "format_version": 2, "slug": "/", "locale": "en-US", "title": "Wrong", "data": { "version": 2, "sections": [] } }
+        }
+      }
+    },
+    {
+      "why": "a navigation file whose handle is not its file name",
+      "code": "SITE_STATE_IDENTITY_MISMATCH",
+      "files": {
+        "site/navigation/tr-TR/main.json": { "json": { "handle": "footer", "locale": "tr-TR", "title": "x", "items": [] } }
+      }
+    },
+    {
+      "why": "a navigation file whose locale is not its folder",
+      "code": "SITE_STATE_IDENTITY_MISMATCH",
+      "files": {
+        "site/navigation/tr-TR/main.json": { "json": { "handle": "main", "locale": "en-US", "title": "x", "items": [] } }
+      }
+    },
+    {
+      "why": "the header group file claiming to be the footer",
+      "code": "SITE_STATE_IDENTITY_MISMATCH",
+      "files": { "theme/chrome/header_group.json": { "json": { "area": "footer", "document": null } } }
+    },
+    {
+      "why": "media decisions without their page file",
+      "code": "SITE_STATE_IDENTITY_MISMATCH",
+      "files": { "pages/tr-TR/media-decisions.json": { "json": [] } }
+    },
+    {
+      "why": "an asset file that media/assets.json does not list",
+      "code": "SITE_STATE_IDENTITY_MISMATCH",
+      "files": {
+        "media/assets.json": { "json": [] },
+        "media/files/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": { "text": "not the bytes" }
+      }
+    },
+    {
+      "why": "two navigation items with one id",
+      "code": "SITE_STATE_DUPLICATE_IDENTITY",
+      "files": {
+        "site/navigation/tr-TR/main.json": {
+          "json": {
+            "handle": "main",
+            "locale": "tr-TR",
+            "title": "x",
+            "items": [
+              { "id": "n1", "parent": null, "label": "a", "link": { "type": "custom", "url": "/a" } },
+              { "id": "n1", "parent": null, "label": "b", "link": { "type": "custom", "url": "/b" } }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "why": "one asset listed twice",
+      "code": "SITE_STATE_DUPLICATE_IDENTITY",
+      "files": {
+        "media/assets.json": {
+          "json": [
+            { "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 1, "mime": "image/png", "filename": "a.png" },
+            { "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes": 1, "mime": "image/png", "filename": "b.png" }
+          ]
+        }
+      }
+    },
+    {
+      "why": "a collection link, which v1 does not carry",
+      "code": "SITE_STATE_UNSUPPORTED_LINK",
+      "files": {
+        "site/navigation/tr-TR/main.json": {
+          "json": {
+            "handle": "main",
+            "locale": "tr-TR",
+            "title": "x",
+            "items": [{ "id": "n1", "parent": null, "label": "Ürünler", "link": { "type": "collection", "key": "urunler" } }]
+          }
+        }
+      }
+    },
+    {
+      "why": "a translation group naming a page the tree does not carry",
+      "code": "SITE_STATE_TRANSLATION_REFUSED",
+      "files": {
+        "site/translations.json": {
+          "json": { "groups": [{ "group": "g1", "members": [{ "locale": "tr-TR", "slug": "/" }, { "locale": "en-US", "slug": "/gone" }] }] }
+        },
+        "pages/tr-TR/index.json": {
+          "json": { "format_version": 2, "slug": "/", "locale": "tr-TR", "title": "Ana Sayfa", "data": { "version": 2, "sections": [] } }
+        }
+      }
+    },
+    {
+      "why": "a translation group with two pages in one language",
+      "code": "SITE_STATE_TRANSLATION_REFUSED",
+      "files": {
+        "site/translations.json": {
+          "json": { "groups": [{ "group": "g1", "members": [{ "locale": "tr-TR", "slug": "/" }, { "locale": "tr-TR", "slug": "/b" }] }] }
+        },
+        "pages/tr-TR/index.json": {
+          "json": { "format_version": 2, "slug": "/", "locale": "tr-TR", "title": "Ana Sayfa", "data": { "version": 2, "sections": [] } }
+        },
+        "pages/tr-TR/routes/b/index.json": {
+          "json": { "format_version": 2, "slug": "/b", "locale": "tr-TR", "title": "B", "data": { "version": 2, "sections": [] } }
+        }
+      }
+    }
+  ],
+  "assetRefRoundTrip": {
+    "uuid": "0f7c1a2b-3d4e-4f50-8a9b-0c1d2e3f4a5b",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "foreignUuid": "11111111-2222-4333-8444-555555555555",
+    "encodes": [
+      ["0f7c1a2b-3d4e-4f50-8a9b-0c1d2e3f4a5b", "asset:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+      ["0F7C1A2B-3D4E-4F50-8A9B-0C1D2E3F4A5B", "asset:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+      ["https://kaynak.myblocofy.com/cdn/0f7c1a2b-3d4e-4f50-8a9b-0c1d2e3f4a5b/pixel.png", "asset:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+      ["https://example.com/logo.png", "https://example.com/logo.png"],
+      ["hero", "hero"],
+      ["11111111-2222-4333-8444-555555555555", "11111111-2222-4333-8444-555555555555"]
+    ]
+  },
+  "diffIgnored": [
+    {
+      "why": "exported_at and the source site move on every export",
+      "a": { "site/locales.json": { "json": { "default": "tr-TR", "supported": ["en-US", "tr-TR"] } } },
+      "b": { "site/locales.json": { "json": { "default": "tr-TR", "supported": ["en-US", "tr-TR"] } } }
+    },
+    {
+      "why": "base_revision is the source site's fingerprint",
+      "a": {
+        "pages/tr-TR/index.json": {
+          "json": { "format_version": 2, "base_revision": "r1_0123456789abcdef0123456789abcdef", "slug": "/", "locale": "tr-TR", "title": "Ana Sayfa", "data": { "version": 2, "sections": [] } }
+        }
+      },
+      "b": {
+        "pages/tr-TR/index.json": {
+          "json": { "format_version": 2, "base_revision": "r1_ffffffffffffffffffffffffffffffff", "slug": "/", "locale": "tr-TR", "title": "Ana Sayfa", "data": { "version": 2, "sections": [] } }
+        }
+      }
+    },
+    {
+      "why": "the media decision audit fields are re-derived by the importing key",
+      "a": {
+        "pages/tr-TR/index.json": {
+          "json": { "format_version": 2, "slug": "/", "locale": "tr-TR", "title": "Ana Sayfa", "data": { "version": 2, "sections": [] } }
+        },
+        "pages/tr-TR/media-decisions.json": {
+          "json": [{ "path": "hero", "facet": "alt", "decision": "shared_confirmed", "target_asset": null, "alt": "x", "caption": null, "decorative": false, "decided_by": { "type": "user", "id": "7" }, "decided_at": "2026-09-17T10:00:00.000Z", "policy_version": 3 }]
+        }
+      },
+      "b": {
+        "pages/tr-TR/index.json": {
+          "json": { "format_version": 2, "slug": "/", "locale": "tr-TR", "title": "Ana Sayfa", "data": { "version": 2, "sections": [] } }
+        },
+        "pages/tr-TR/media-decisions.json": {
+          "json": [{ "path": "hero", "facet": "alt", "decision": "shared_confirmed", "target_asset": null, "alt": "x", "caption": null, "decorative": false, "decided_by": { "type": "api_key", "id": "42" }, "decided_at": "2026-09-18T11:00:00.000Z", "policy_version": 4 }]
+        }
+      }
+    },
+    {
+      "why": "the reserved platform envelope (decisions + replay ring) never travels in a page document",
+      "a": {
+        "pages/tr-TR/index.json": {
+          "json": { "format_version": 2, "slug": "/", "locale": "tr-TR", "title": "Ana Sayfa", "data": { "version": 2, "sections": [], "platform": { "mediaLocalization": { "schemaVersion": 1, "uses": {} } } } }
+        }
+      },
+      "b": {
+        "pages/tr-TR/index.json": {
+          "json": { "format_version": 2, "slug": "/", "locale": "tr-TR", "title": "Ana Sayfa", "data": { "version": 2, "sections": [] } }
+        }
+      }
+    },
+    {
+      "why": "key order is not content",
+      "a": { "theme/chrome/footer_group.json": { "json": { "area": "footer", "document": { "version": 2, "sections": [] } } } },
+      "b": { "theme/chrome/footer_group.json": { "json": { "document": { "sections": [], "version": 2 }, "area": "footer" } } }
+    }
+  ],
+  "diffReported": [
+    {
+      "why": "a changed page title",
+      "a": {
+        "pages/tr-TR/index.json": {
+          "json": { "format_version": 2, "slug": "/", "locale": "tr-TR", "title": "Ana Sayfa", "data": { "version": 2, "sections": [] } }
+        }
+      },
+      "b": {
+        "pages/tr-TR/index.json": {
+          "json": { "format_version": 2, "slug": "/", "locale": "tr-TR", "title": "Anasayfa", "data": { "version": 2, "sections": [] } }
+        }
+      },
+      "expect": [{ "owner": "pages", "key": "pages/tr-TR/index.json", "change": "changed" }]
+    },
+    {
+      "why": "a theme file only the target has, and a menu only the source has",
+      "a": { "site/navigation/tr-TR/main.json": { "json": { "handle": "main", "locale": "tr-TR", "title": "Ana Menü", "items": [] } } },
+      "b": { "theme/assets/extra.css": { "text": "body{}" } },
+      "expect": [
+        { "owner": "navigation", "key": "site/navigation/tr-TR/main.json", "change": "removed" },
+        { "owner": "theme", "key": "theme/assets/extra.css", "change": "added" }
+      ]
+    },
+    {
+      "why": "a theme file whose bytes differ only by line endings is NOT a difference",
+      "a": { "theme/assets/theme.css": { "text": "body{}\r\n" } },
+      "b": { "theme/assets/theme.css": { "text": "body{}\n" } },
+      "expect": []
+    }
+  ]
+}

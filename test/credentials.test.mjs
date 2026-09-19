@@ -1,33 +1,32 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { EventEmitter, once } from "node:events";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { EventEmitter } from "node:events";
-
-import { credentialsPath, loadApiCredentials, loadCredentials, saveCredentials } from "../lib/credentials.mjs";
+import { CredentialsError, backupPath, credentialsPath, envContext, loadStore, lockPath, readSecrets, saveStore, secretsPath, withStoreLock, writeSecret } from "../lib/credentials.mjs";
 import { promptSecret } from "../lib/secret-prompt.mjs";
 
 /**
- * D3 / CLI 0.8.0 — credential coexistence (L5–L9) ve sır hijyeni (L10–L11).
- * Plan: multisite-cms docs/architecture/plans/2026-09-16-d3-page-media-use-public-surfaces.md §4.7, Task 9.
+ * CF-T1 (contract C1) — credential store v2: named contexts, secrets outside credentials.json, lossless v1
+ * migration, CREDENTIALS_CORRUPT, env context, secret stores. Supersedes the 0.8.0 flat-file L5–L11 arms (the
+ * flat file no longer exists; coexistence of the dev and API pairs is now "two pairs in one context").
  *
- * `HOME` geçici dizine yönlendirilir; `credentialsPath()` HOME'u çağrı anında çözer. Child süreçler
- * `stdin` pipe ile koşar → `process.stdin.isTTY` false (non-TTY kolu).
+ * `HOME` points at a temp dir; child processes run with piped stdin (non-TTY).
  */
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const BIN = join(root, "bin", "blocofy.mjs");
 
-// Planted canary: hiçbir stdout/stderr çıktısında GEÇMEMELİ (önek dahil basılmaz).
 const CANARY = "blcf_live_CANARY7f3a9c2e1b5d4e6f8a0b1c2d3e4f5a6b";
 const DEV = { url: "https://store.example.com", token: "bcf_devtoken_0123456789abcdef" };
 const API = { apiUrl: "https://app.blocofy.com", apiKey: "blcf_live_filekey0123456789abcdef" };
 
-const ENV_KEYS = ["HOME", "BLOCOFY_URL", "BLOCOFY_TOKEN", "BLOCOFY_API_KEY", "BLOCOFY_API_URL"];
+const ENV_KEYS = ["HOME", "BLOCOFY_URL", "BLOCOFY_TOKEN", "BLOCOFY_API_KEY", "BLOCOFY_API_URL", "BLOCOFY_CONTEXT", "BLOCOFY_SECRET_STORE"];
 let home;
 let saved;
 
@@ -46,22 +45,17 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
 
-function readFile() {
-  return JSON.parse(readFileSync(credentialsPath(), "utf8"));
-}
+const mode = (p) => statSync(p).mode & 0o777;
+const readJson = (p) => JSON.parse(readFileSync(p, "utf8"));
 
 function writeRaw(content) {
   mkdirSync(dirname(credentialsPath()), { recursive: true });
   writeFileSync(credentialsPath(), typeof content === "string" ? content : JSON.stringify(content));
 }
 
-/** Child CLI: temiz env (yalnız PATH + verilenler), stdin pipe (non-TTY) ve hemen kapalı. */
 function runCli(args, env = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [BIN, ...args], {
-      env: { PATH: process.env.PATH, HOME: home, ...env },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    const child = spawn(process.execPath, [BIN, ...args], { cwd: home, env: { PATH: process.env.PATH, HOME: home, ...env }, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
@@ -71,86 +65,169 @@ function runCli(args, env = {}) {
   });
 }
 
-test("[L5] legacy {url,token} dosyası okunur; loadApiCredentials() null", () => {
-  writeRaw(DEV);
-  assert.deepEqual(loadCredentials(), { ...DEV, source: "file" });
-  assert.equal(loadApiCredentials(), null);
-});
-
-test("[L6] saveCredentials({apiUrl,apiKey}) dev {url,token} çiftini KORUR", () => {
-  writeRaw(DEV);
-  saveCredentials(API);
-  assert.deepEqual(readFile(), { ...DEV, ...API });
-  assert.deepEqual(loadCredentials(), { ...DEV, source: "file" });
-  assert.deepEqual(loadApiCredentials(), { ...API, source: "file" });
-});
-
-test("[L7] sonraki dev login saveCredentials({url,token}) {apiUrl,apiKey} çiftini KORUR", () => {
-  saveCredentials(API);
-  saveCredentials(DEV);
-  assert.deepEqual(readFile(), { ...DEV, ...API });
-  assert.deepEqual(loadApiCredentials(), { ...API, source: "file" });
-  assert.deepEqual(loadCredentials(), { ...DEV, source: "file" });
-});
-
-test("[L7b] bozuk dosya üstüne saveCredentials → {} + patch yazılır", () => {
-  writeRaw("{not json");
-  saveCredentials(API);
-  assert.deepEqual(readFile(), API);
-});
-
-test("[L8] env BLOCOFY_API_KEY+BLOCOFY_API_URL dosyaya göre öncelikli", () => {
-  saveCredentials(API);
-  process.env.BLOCOFY_API_KEY = "blcf_live_envkey0123456789abcdef";
-  process.env.BLOCOFY_API_URL = "https://staging.blocofy.com/";
-  assert.deepEqual(loadApiCredentials(), {
-    apiUrl: "https://staging.blocofy.com",
-    apiKey: "blcf_live_envkey0123456789abcdef",
-    source: "env",
+/** Fake platform answering whoami (dev token) + ping (API key) for one site. */
+async function fakeSite({ id = "s1", slug = "shop", token = DEV.token, apiKey = null, whoamiStatus = 200 } = {}) {
+  const reqs = [];
+  const server = createServer((req, res) => {
+    reqs.push(`${req.method} ${req.url}`);
+    const send = (status, body) => {
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+    const site = { id, slug, name: "Shop" };
+    if (req.url === "/api/dev/whoami" && req.headers.authorization === `Bearer ${token}`) return whoamiStatus === 200 ? send(200, { site, liveThemeId: null }) : send(whoamiStatus, { error: "down" });
+    if (req.url === "/api/v1/ping" && apiKey && req.headers.authorization === `Bearer ${apiKey}`) return send(200, { ok: true, site });
+    if (req.url === "/api/dev/site") return send(200, { site: { slug }, drafts: [], health: "ok", live_theme_instance: null });
+    send(401, { error: "unauthorized" });
   });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  return { url: `http://127.0.0.1:${server.address().port}`, reqs, close: () => new Promise((r) => server.close(r)) };
+}
+
+// ── migration ────────────────────────────────────────────────────────────────────────────────────────────────
+
+test("v1 → v2 migration is lossless: contexts.default (unverified), secrets moved, exact-bytes backup, all 0600", () => {
+  const raw = JSON.stringify({ ...DEV, ...API }, null, 2);
+  writeRaw(raw);
+  const store = loadStore();
+  assert.equal(store.schema_version, 2);
+  assert.equal(store.current_context, "default");
+  assert.deepEqual(store.contexts.default, {
+    platform_origin: null,
+    site: null,
+    verified_at: null,
+    dev: { url: DEV.url, secret: { store: "file" } },
+    api: { url: API.apiUrl, secret: { store: "file" } },
+  });
+  assert.equal(readFileSync(backupPath(), "utf8"), raw, "backup bytes equal the original file");
+  const onDisk = readFileSync(credentialsPath(), "utf8");
+  assert.ok(!onDisk.includes(DEV.token) && !onDisk.includes(API.apiKey), "credentials.json holds no secret");
+  assert.deepEqual(readJson(secretsPath()), { default: { dev_token: DEV.token, api_key: API.apiKey } });
+  assert.deepEqual(readSecrets("default", store.contexts.default), { devToken: DEV.token, apiKey: API.apiKey });
+  for (const p of [credentialsPath(), secretsPath(), backupPath()]) assert.equal(mode(p), 0o600, p);
+  // Idempotent: a second read sees v2 and changes nothing.
+  assert.deepEqual(loadStore(), store);
+  assert.equal(readFileSync(credentialsPath(), "utf8"), onDisk);
 });
 
-test("[L8b] env'in yalnız biri set → hata; dosyaya düşülmez", () => {
-  saveCredentials(API);
-  process.env.BLOCOFY_API_KEY = "blcf_live_envkey0123456789abcdef";
-  assert.throws(() => loadApiCredentials(), /BLOCOFY_API_URL/);
-  delete process.env.BLOCOFY_API_KEY;
-  process.env.BLOCOFY_API_URL = "https://staging.blocofy.com";
-  assert.throws(() => loadApiCredentials(), /BLOCOFY_API_KEY/);
+test("v1 dev-only file migrates to a context with only the dev pair", () => {
+  writeRaw(DEV);
+  const store = loadStore();
+  assert.deepEqual(Object.keys(store.contexts), ["default"]);
+  assert.equal(store.contexts.default.api, undefined);
+  assert.deepEqual(readSecrets("default", store.contexts.default), { devToken: DEV.token, apiKey: null });
 });
 
-test("[L8c] env hata mesajı anahtarı basmaz", () => {
-  process.env.BLOCOFY_API_KEY = CANARY;
-  let message = "";
+for (const [label, content] of [
+  ["invalid JSON", "{not json"],
+  ["half dev pair (url without token)", JSON.stringify({ url: DEV.url })],
+  ["half API pair (key without url)", JSON.stringify({ ...DEV, apiKey: API.apiKey })],
+  ["non-string token", JSON.stringify({ url: DEV.url, token: 42 })],
+  ["v2 with a broken context", JSON.stringify({ schema_version: 2, contexts: { a: { dev: { url: 1 } } } })],
+  ["JSON array", "[]"],
+]) {
+  test(`CREDENTIALS_CORRUPT (${label}): nothing written, bytes unchanged, message has the path and no content`, () => {
+    writeRaw(content);
+    let error;
+    try {
+      loadStore();
+    } catch (e) {
+      error = e;
+    }
+    assert.ok(error instanceof CredentialsError, String(error));
+    assert.equal(error.code, "CREDENTIALS_CORRUPT");
+    assert.equal(error.exitCode, 1);
+    assert.ok(error.message.includes(credentialsPath()));
+    assert.ok(!error.message.includes(DEV.url) && !error.message.includes(API.apiKey));
+    assert.equal(readFileSync(credentialsPath(), "utf8"), content);
+    assert.equal(existsSync(backupPath()), false);
+    assert.equal(existsSync(secretsPath()), false);
+  });
+}
+
+test("a missing file is an empty store and is not created; `{}` likewise", () => {
+  assert.deepEqual(loadStore().contexts, {});
+  assert.equal(existsSync(credentialsPath()), false);
+  writeRaw("{}");
+  assert.deepEqual(loadStore().contexts, {});
+  assert.equal(readFileSync(credentialsPath(), "utf8"), "{}");
+});
+
+test("saveStore writes atomically with 0600 file / 0700 dir and no tmp leftovers", () => {
+  saveStore({ current_context: null, contexts: {} });
+  assert.equal(mode(credentialsPath()), 0o600);
+  assert.equal(mode(dirname(credentialsPath())), 0o700);
+  writeSecret("a", "dev", "file", DEV.token);
+  assert.equal(mode(secretsPath()), 0o600);
+  const leftovers = readdirSync(dirname(credentialsPath())).filter((n) => n.endsWith(".tmp"));
+  assert.deepEqual(leftovers, []);
+});
+
+
+// ── env context ─────────────────────────────────────────────────────────────────────────────────────────────
+
+test("env context: full pairs form the ephemeral 'env' context; half-set pairs throw naming the missing variable only", () => {
+  assert.equal(envContext({}), null);
+  const both = envContext({ BLOCOFY_URL: "https://x.test/", BLOCOFY_TOKEN: DEV.token, BLOCOFY_API_URL: API.apiUrl, BLOCOFY_API_KEY: API.apiKey });
+  assert.equal(both.name, "env");
+  assert.equal(both.context.dev.url, "https://x.test");
+  assert.deepEqual(both.secrets, { devToken: DEV.token, apiKey: API.apiKey });
+  assert.throws(() => envContext({ BLOCOFY_API_KEY: CANARY }), (e) => e.code === "ENV_CREDENTIALS_INCOMPLETE" && /BLOCOFY_API_URL/.test(e.message) && !e.message.includes(CANARY));
+  assert.throws(() => envContext({ BLOCOFY_API_URL: API.apiUrl }), /BLOCOFY_API_KEY/);
+  assert.throws(() => envContext({ BLOCOFY_TOKEN: DEV.token }), (e) => /BLOCOFY_URL/.test(e.message) && !e.message.includes(DEV.token));
+});
+
+// ── CLI login / contexts ───────────────────────────────────────────────────────────────────────────────────
+
+test("login (dev): whoami verified → context named after the site slug; secret only in secrets.json", async () => {
+  const s = await fakeSite();
   try {
-    loadApiCredentials();
-  } catch (e) {
-    message = String(e?.message ?? e);
+    const r = await runCli(["login", "--url", s.url, "--token", DEV.token]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /Site:\s*Shop \(shop\)/);
+    assert.ok(!(r.stdout + r.stderr).includes(DEV.token));
+    const store = readJson(credentialsPath());
+    assert.equal(store.current_context, "shop");
+    assert.deepEqual(store.contexts.shop.site, { id: "s1", slug: "shop", name: "Shop", domain: null });
+    assert.ok(!readFileSync(credentialsPath(), "utf8").includes(DEV.token));
+    assert.equal(readJson(secretsPath()).shop.dev_token, DEV.token);
+  } finally {
+    await s.close();
   }
-  assert.ok(message.length > 0);
-  assert.ok(!message.includes(CANARY));
 });
 
-test("[L9] dosya modu 0600 — yeni dosyada ve mevcut (0644) dosya üstüne yazımda", () => {
-  saveCredentials(API);
-  assert.equal(statSync(credentialsPath()).mode & 0o777, 0o600);
-  chmodSync(credentialsPath(), 0o644);
-  saveCredentials(DEV);
-  assert.equal(statSync(credentialsPath()).mode & 0o777, 0o600);
-  assert.deepEqual(readFile(), { ...DEV, ...API });
+test("login (dev): whoami failure → TARGET_UNVERIFIED, exit 3, nothing saved", async () => {
+  const s = await fakeSite({ whoamiStatus: 503 });
+  try {
+    const r = await runCli(["login", "--url", s.url, "--token", DEV.token, "--json"]);
+    assert.equal(r.code, 3, r.stderr);
+    assert.equal(JSON.parse(r.stderr.trim().split("\n").pop()).error.code, "TARGET_UNVERIFIED");
+    assert.equal(existsSync(credentialsPath()), false);
+    assert.equal(existsSync(secretsPath()), false);
+  } finally {
+    await s.close();
+  }
 });
 
-test("[L10] non-TTY login --api-key env anahtarıyla kaydeder; canary stdout/stderr'de GEÇMEZ", async () => {
-  const r = await runCli(["login", "--api-key"], { BLOCOFY_API_KEY: CANARY, BLOCOFY_API_URL: "https://app.blocofy.com" });
-  assert.equal(r.code, 0, r.stderr);
-  assert.ok(!r.stdout.includes(CANARY) && !r.stderr.includes(CANARY), "canary leaked to output");
-  assert.ok(!(r.stdout + r.stderr).includes("CANARY7f3a"), "canary fragment leaked");
-  assert.match(r.stdout, /API key saved/);
-  assert.equal(readFile().apiKey, CANARY);
-  assert.equal(readFile().apiUrl, "https://app.blocofy.com");
+test("login --api-key (non-TTY, env key): ping verified, key saved into the same-site context next to the dev pair; canary never printed", async () => {
+  const s = await fakeSite({ apiKey: CANARY });
+  try {
+    assert.equal((await runCli(["login", "--url", s.url, "--token", DEV.token])).code, 0);
+    const r = await runCli(["login", "--api-key"], { BLOCOFY_API_KEY: CANARY, BLOCOFY_API_URL: s.url });
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(!(r.stdout + r.stderr).includes("CANARY7f3a"), "canary fragment leaked");
+    assert.match(r.stdout, /API key saved to context "shop"/);
+    const ctx = readJson(credentialsPath()).contexts.shop;
+    assert.equal(ctx.dev.url, s.url, "the dev pair is kept");
+    assert.equal(ctx.api.url, s.url);
+    assert.deepEqual(readJson(secretsPath()).shop, { dev_token: DEV.token, api_key: CANARY });
+  } finally {
+    await s.close();
+  }
 });
 
-test("[L10b] login --api-key <değer> sözdizimi REDDEDİLİR; argv'deki canary echo edilmez, dosya yazılmaz", async () => {
+test("login --api-key <value> is REFUSED; the argv canary is not echoed; nothing written", async () => {
   const r = await runCli(["login", "--api-key", CANARY]);
   assert.equal(r.code, 1);
   assert.ok(!r.stdout.includes(CANARY) && !r.stderr.includes(CANARY), "canary leaked to output");
@@ -158,39 +235,67 @@ test("[L10b] login --api-key <değer> sözdizimi REDDEDİLİR; argv'deki canary 
   assert.equal(existsSync(credentialsPath()), false);
 });
 
-test("[L10c] --help ve hata yolu canary basmaz", async () => {
+test("--help and an unreachable identity endpoint never print the key (unreachable → TARGET_UNVERIFIED, exit 3)", async () => {
   const help = await runCli(["--help"], { BLOCOFY_API_KEY: CANARY, BLOCOFY_API_URL: "https://app.blocofy.com" });
   assert.equal(help.code, 0);
   assert.ok(!(help.stdout + help.stderr).includes(CANARY));
-  // Ağ hatası (kapalı port) → exit 1; mesaj anahtarı taşımaz.
-  const err = await runCli(["pages", "media-uses", "pg_1"], { BLOCOFY_API_KEY: CANARY, BLOCOFY_API_URL: "http://127.0.0.1:9" });
-  assert.equal(err.code, 1);
+  const err = await runCli(["pages", "media-uses", "pg_1", "--json"], { BLOCOFY_API_KEY: CANARY, BLOCOFY_API_URL: "http://127.0.0.1:9" });
+  assert.equal(err.code, 3);
+  assert.equal(JSON.parse(err.stderr.trim().split("\n").pop()).error.code, "TARGET_UNVERIFIED");
+  assert.match(err.stderr, /Network error .* retrying .*\(3\/3\)/, "the unreachable identity endpoint was retried (CF-T3)");
   assert.ok(!(err.stdout + err.stderr).includes(CANARY), "canary leaked on network error");
 });
 
-test("[L11] non-TTY + env yok → login --api-key exit 1, dosya yazılmaz", async () => {
+test("non-TTY + no env → login --api-key exit 1, nothing written; a bcf_ token is not a v1 key", async () => {
   const r = await runCli(["login", "--api-key"]);
   assert.equal(r.code, 1);
   assert.match(r.stderr, /BLOCOFY_API_KEY/);
+  const d = await runCli(["login", "--api-key"], { BLOCOFY_API_KEY: DEV.token, BLOCOFY_API_URL: "https://app.blocofy.com" });
+  assert.equal(d.code, 1);
+  assert.match(d.stderr, /blcf_live_/);
+  assert.ok(!d.stderr.includes(DEV.token));
   assert.equal(existsSync(credentialsPath()), false);
 });
 
-test("[L11b] bcf_ dev token v1 anahtarı olarak KABUL EDİLMEZ (login --api-key)", async () => {
-  const r = await runCli(["login", "--api-key"], { BLOCOFY_API_KEY: DEV.token, BLOCOFY_API_URL: "https://app.blocofy.com" });
-  assert.equal(r.code, 1);
-  assert.match(r.stderr, /blcf_live_/);
-  assert.ok(!r.stderr.includes(DEV.token));
-  assert.equal(existsSync(credentialsPath()), false);
+test("a migrated (unverified) v1 context gets its site recorded on the first successful whoami", async () => {
+  const s = await fakeSite({ id: "s9", slug: "legacy" });
+  try {
+    writeRaw({ url: s.url, token: DEV.token });
+    const r = await runCli(["status"]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /Context:\s+default/);
+    const ctx = readJson(credentialsPath()).contexts.default;
+    assert.equal(ctx.site.id, "s9");
+    assert.ok(ctx.verified_at);
+    const list = await runCli(["contexts", "--json"]);
+    assert.equal(list.code, 0, list.stderr);
+    assert.ok(!list.stdout.includes(DEV.token));
+    assert.equal(JSON.parse(list.stdout).contexts[0].site.slug, "legacy");
+  } finally {
+    await s.close();
+  }
 });
 
-test("[L11c] login --api-key, mevcut dev çiftini korur (dosya merge)", async () => {
-  writeRaw(DEV);
-  const r = await runCli(["login", "--api-key"], { BLOCOFY_API_KEY: API.apiKey, BLOCOFY_API_URL: "https://app.blocofy.com" });
-  assert.equal(r.code, 0, r.stderr);
-  assert.deepEqual(readFile(), { ...DEV, ...API });
+test("use / logout: `use` sets current_context; logout removes the context and its secrets", async () => {
+  const s = await fakeSite();
+  try {
+    await runCli(["login", "--url", s.url, "--token", DEV.token, "--context", "one"]);
+    await runCli(["login", "--url", s.url, "--token", DEV.token, "--context", "two"]);
+    assert.equal(readJson(credentialsPath()).current_context, "one");
+    assert.equal((await runCli(["use", "two"])).code, 0);
+    assert.equal(readJson(credentialsPath()).current_context, "two");
+    assert.equal((await runCli(["use", "nope"])).code, 3);
+    assert.equal((await runCli(["logout", "--context", "two"])).code, 0);
+    const store = readJson(credentialsPath());
+    assert.deepEqual(Object.keys(store.contexts), ["one"]);
+    assert.equal(store.current_context, null);
+    assert.deepEqual(Object.keys(readJson(secretsPath())), ["one"]);
+  } finally {
+    await s.close();
+  }
 });
 
-// --- lib/secret-prompt.mjs -------------------------------------------------------------------
+// ── lib/secret-prompt.mjs ───────────────────────────────────────────────────────────────────────────────────
 
 /** Sahte TTY: isTTY + setRawMode; yazılanlar `written`'a düşer, tuşlar `feed` ile beslenir. */
 function fakeTty() {
@@ -217,7 +322,7 @@ test("promptSecret: TTY'de raw mode ile okur, echo ETMEZ, backspace işler, Ente
   const { input, output } = fakeTty();
   const p = promptSecret("API key: ", { input, output });
   input.emit("data", "blcf_");
-  input.emit("data", "x\u007f"); // yanlış tuş + backspace
+  input.emit("data", "x"); // yanlış tuş + backspace
   input.emit("data", "live_k\r");
   assert.equal(await p, "blcf_live_k");
   assert.deepEqual(input.rawModes, [true, false]);
@@ -228,7 +333,32 @@ test("promptSecret: TTY'de raw mode ile okur, echo ETMEZ, backspace işler, Ente
 test("promptSecret: Ctrl-C → null (kayıt yok), raw mode geri alınır", async () => {
   const { input, output } = fakeTty();
   const p = promptSecret("API key: ", { input, output });
-  input.emit("data", "abc\u0003");
+  input.emit("data", "abc");
   assert.equal(await p, null);
   assert.deepEqual(input.rawModes, [true, false]);
+});
+
+test("review M5: concurrent logins into one HOME (different contexts) — every context and secret is saved (store lock)", async () => {
+  const s = await fakeSite();
+  try {
+    const names = ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"];
+    const results = await Promise.all(names.map((n) => runCli(["login", "--url", s.url, "--token", DEV.token, "--context", n])));
+    for (const r of results) assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(Object.keys(loadStore().contexts).sort(), names, "a concurrent login lost another login's context");
+    assert.deepEqual(Object.keys(readJson(secretsPath())).sort(), names, "a concurrent login lost another login's secret");
+    assert.equal(existsSync(join(home, ".blocofy", ".lock")), false, "the lock is released");
+  } finally {
+    await s.close();
+  }
+});
+
+test("review M5: a stale lock (crashed process, > 10 s old) is taken over; the lock is released after the callback, even on throw", () => {
+  mkdirSync(dirname(lockPath()), { recursive: true });
+  writeFileSync(lockPath(), "99999");
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(lockPath(), old, old);
+  assert.equal(withStoreLock(() => "ran"), "ran");
+  assert.equal(existsSync(lockPath()), false);
+  assert.throws(() => withStoreLock(() => { throw new Error("boom"); }), /boom/);
+  assert.equal(existsSync(lockPath()), false);
 });

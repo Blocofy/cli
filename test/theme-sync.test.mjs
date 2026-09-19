@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,86 +10,11 @@ import { localPathFor } from "../lib/local-theme.mjs";
 import {
   fetchDevSession,
   fetchSiteStatus,
-  fetchWithRetry,
   publishInstance,
   pullTheme,
   pushTheme,
   renameInstance,
 } from "../lib/theme-sync.mjs";
-
-// Zero backoff keeps retry tests instant; onRetry records each notice.
-const noWait = { backoff: [0, 0] };
-
-test("fetchWithRetry: network throw twice → succeeds on 3rd attempt (2 retries)", async () => {
-  const realFetch = globalThis.fetch;
-  let calls = 0;
-  const retries = [];
-  globalThis.fetch = async () => {
-    calls += 1;
-    if (calls < 3) throw new TypeError("fetch failed");
-    return new Response("ok", { status: 200 });
-  };
-  after(() => {
-    globalThis.fetch = realFetch;
-  });
-
-  const res = await fetchWithRetry("http://x", {}, { ...noWait, onRetry: (i) => retries.push(i) });
-  assert.equal(res.status, 200);
-  assert.equal(calls, 3);
-  assert.equal(retries.length, 2);
-  assert.deepEqual(retries.map((r) => r.attempt), [1, 2]);
-});
-
-test("fetchWithRetry: persistent network error → throws after retries exhausted", async () => {
-  const realFetch = globalThis.fetch;
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls += 1;
-    throw new TypeError("fetch failed");
-  };
-  after(() => {
-    globalThis.fetch = realFetch;
-  });
-
-  await assert.rejects(fetchWithRetry("http://x", {}, noWait), /fetch failed/);
-  assert.equal(calls, 3); // initial + 2 retries
-});
-
-test("fetchWithRetry: 422 (permanent 4xx) → returned immediately, NO retry", async () => {
-  const realFetch = globalThis.fetch;
-  let calls = 0;
-  const retries = [];
-  globalThis.fetch = async () => {
-    calls += 1;
-    return new Response(JSON.stringify({ error: "Unprocessable" }), { status: 422 });
-  };
-  after(() => {
-    globalThis.fetch = realFetch;
-  });
-
-  const res = await fetchWithRetry("http://x", {}, { ...noWait, onRetry: (i) => retries.push(i) });
-  assert.equal(res.status, 422);
-  assert.equal(calls, 1);
-  assert.equal(retries.length, 0);
-});
-
-test("fetchWithRetry: 503 then 200 → retries once on transient 5xx", async () => {
-  const realFetch = globalThis.fetch;
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls += 1;
-    return calls === 1
-      ? new Response("busy", { status: 503 })
-      : new Response("ok", { status: 200 });
-  };
-  after(() => {
-    globalThis.fetch = realFetch;
-  });
-
-  const res = await fetchWithRetry("http://x", {}, noWait);
-  assert.equal(res.status, 200);
-  assert.equal(calls, 2);
-});
 
 test("pushTheme: retries a transient 503 then succeeds; onRetry fired", async () => {
   const realFetch = globalThis.fetch;
@@ -533,4 +458,197 @@ test("fetchDevSession: 410 gövdeli ise SUNUCUNUN mesajı gösterilir (otorite s
       return true;
     },
   );
+});
+
+// CF-T5: the platform accepts legacy theme locale files at `locales/<tag>.json` /
+// `locales/<tag>.default.json`. `locales` is a plain THEME_DIRS entry (not a Liquid kind), so
+// push/pull/diff treat it exactly like `asset`: raw content, no `.liquid` stripped/re-added.
+
+test("pushTheme: readLocalTemplates picks up locales/ (legacy locale files) and sends them", async () => {
+  let received = null;
+  const fake = createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      received = JSON.parse(body);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, created: 2, updated: 0 }));
+    });
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  const dir = mkdtempSync(join(tmpdir(), "blocofy-locales-push-"));
+  mkdirSync(join(dir, "locales"), { recursive: true });
+  writeFileSync(join(dir, "locales", "en-US.json"), '{"hello":"world"}');
+  writeFileSync(join(dir, "locales", "en-US.default.json"), '{"hello":"world"}');
+  after(() => {
+    fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  await pushTheme({ dir, url: `http://localhost:${fake.address().port}`, token: "bcf_t" });
+  assert.equal(received.files["locales/en-US.json"], '{"hello":"world"}');
+  assert.equal(received.files["locales/en-US.default.json"], '{"hello":"world"}');
+});
+
+test("pullTheme: writes locales/<tag>.json to disk raw (no .liquid re-added, unlike Liquid kinds)", async () => {
+  const fake = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ files: { "locales/en-US.json": '{"hello":"world"}' } }));
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  const dir = mkdtempSync(join(tmpdir(), "blocofy-locales-pull-"));
+  after(() => {
+    fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const { count } = await pullTheme({ dir, url: `http://localhost:${fake.address().port}`, token: "bcf_t" });
+  assert.equal(count, 1);
+  assert.equal(readFileSync(join(dir, "locales", "en-US.json"), "utf8"), '{"hello":"world"}');
+});
+
+test("pullTheme: a locales/ file among the response does not weaken the path-escape gate — `locales/../x.json` and `.BLOCOFY/…` are still refused (all-or-nothing)", async () => {
+  const fake = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      files: {
+        "locales/en-US.json": "{}",
+        "locales/../x.json": "escape",
+        ".BLOCOFY/project.json": "binding",
+      },
+    }));
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  const dir = mkdtempSync(join(tmpdir(), "blocofy-locales-escape-"));
+  after(() => {
+    fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  await assert.rejects(
+    pullTheme({ dir, url: `http://localhost:${fake.address().port}`, token: "bcf_t" }),
+    (err) => {
+      assert.equal(err.code, "PAGES_PATH_ESCAPE");
+      return true;
+    },
+  );
+  assert.equal(existsSync(join(dir, "locales", "en-US.json")), false, "all-or-nothing: even the valid file is not written");
+});
+
+test("pushTheme: a non-JSON filename under locales/ (e.g. locales/readme.md) is sent as-is — the CLI does not duplicate the server's tag/extension validation", async () => {
+  let received = null;
+  const fake = createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      received = JSON.parse(body);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, created: 1, updated: 0 }));
+    });
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  const dir = mkdtempSync(join(tmpdir(), "blocofy-locales-nonjson-"));
+  mkdirSync(join(dir, "locales"), { recursive: true });
+  writeFileSync(join(dir, "locales", "readme.md"), "not a locale file");
+  after(() => {
+    fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  await pushTheme({ dir, url: `http://localhost:${fake.address().port}`, token: "bcf_t" });
+  assert.equal(received.files["locales/readme.md"], "not a locale file");
+});
+
+test("pullTheme: the theme's own config rows come down (a starter theme ships config/theme.json), nested config paths do not", async () => {
+  // CROSS-REPO GAP, found by the real-platform smoke: `GET /api/dev/theme` serves every `config`-kind row,
+  // and refusing them refused the WHOLE pull — a freshly provisioned Klaros-themed site could not be pulled.
+  const fake = createServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({
+      files: {
+        "layout/theme": "<html></html>",
+        "config/settings_schema.json": "[]",
+        "config/theme.json": '{"name":"Klaros"}',
+      },
+    }));
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  const dir = mkdtempSync(join(tmpdir(), "blocofy-config-pull-"));
+  after(() => {
+    fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const { count } = await pullTheme({ dir, url: `http://localhost:${fake.address().port}`, token: "bcf_t" });
+  assert.equal(count, 3);
+  assert.equal(readFileSync(join(dir, "config", "theme.json"), "utf8"), '{"name":"Klaros"}');
+  assert.equal(readFileSync(join(dir, "config", "settings_schema.json"), "utf8"), "[]");
+});
+
+test("pullTheme: a nested config path is still refused, and nothing is written", async () => {
+  const fake = createServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ files: { "layout/theme": "<html></html>", "config/nested/evil.json": "{}" } }));
+  });
+  fake.listen(0);
+  await once(fake, "listening");
+  const dir = mkdtempSync(join(tmpdir(), "blocofy-config-nested-"));
+  after(() => {
+    fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  await assert.rejects(
+    pullTheme({ dir, url: `http://localhost:${fake.address().port}`, token: "bcf_t" }),
+    (err) => {
+      assert.equal(err.code, "PAGES_PATH_ESCAPE");
+      return true;
+    },
+  );
+  assert.equal(existsSync(join(dir, "layout", "theme.liquid")), false);
+});
+
+test("pullTheme: a flat README.md at the theme root comes down; a tooling file and a dot-file do not", async () => {
+  // The starter themes ship `README.md` and the platform serves it on pull. `package.json` belongs to the
+  // developer's own tooling and a pull must never overwrite it.
+  const serve = (files) => {
+    const fake = createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ files }));
+    });
+    return fake;
+  };
+  const okServer = serve({ "layout/theme": "<html></html>", "README.md": "# theme" });
+  okServer.listen(0);
+  await once(okServer, "listening");
+  const okDir = mkdtempSync(join(tmpdir(), "blocofy-root-file-"));
+  after(() => {
+    okServer.close();
+    rmSync(okDir, { recursive: true, force: true });
+  });
+  await pullTheme({ dir: okDir, url: `http://localhost:${okServer.address().port}`, token: "bcf_t" });
+  assert.equal(readFileSync(join(okDir, "README.md"), "utf8"), "# theme");
+
+  for (const hostile of [{ "package.json": "{}" }, { ".env": "SECRET=1" }]) {
+    const bad = serve({ "layout/theme": "<html></html>", ...hostile });
+    bad.listen(0);
+    await once(bad, "listening");
+    const dir = mkdtempSync(join(tmpdir(), "blocofy-root-deny-"));
+    await assert.rejects(
+      pullTheme({ dir, url: `http://localhost:${bad.address().port}`, token: "bcf_t" }),
+      (err) => {
+        assert.equal(err.code, "PAGES_PATH_ESCAPE");
+        return true;
+      },
+      `${Object.keys(hostile)[0]} was accepted`,
+    );
+    assert.equal(existsSync(join(dir, "layout", "theme.liquid")), false, "all-or-nothing");
+    bad.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
