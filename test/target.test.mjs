@@ -286,13 +286,38 @@ test("null platform origin rule: binding × server origin, all four combinations
   assert.equal((await resolveContext({ getStore: () => s, binding: withOrigin(siteA, null), commandClass: "remote-mutation" })).name, "a");
 });
 
-test("output: the target block format, the error envelope, and secret redaction", () => {
-  const t = targetData({ site: siteA, url: "https://alpha.test", contextName: "alpha", bindingLabel: ".blocofy/project.json", operation: "pages push · live" });
+test("output: the target block format (site, platform, context + its source, binding, operation/mode), the error envelope, and secret redaction", () => {
+  const t = targetData({ site: siteA, url: "https://alpha.test", platformOrigin: ORIGIN, contextName: "alpha", contextSource: ".blocofy/local.json", bindingLabel: ".blocofy/project.json", command: "pages push", mode: "live" });
   assert.equal(
     formatTargetBlock(t),
-    ["Target:    Alpha · sA1 · alpha.myblocofy.test", "Context:   alpha", "Binding:   .blocofy/project.json", "Operation: pages push · live"].join("\n"),
+    [
+      "Target:    Alpha · sA1 · alpha.myblocofy.test",
+      `Platform:  ${ORIGIN}`,
+      "Context:   alpha (from .blocofy/local.json)",
+      "Binding:   .blocofy/project.json",
+      "Operation: pages push · live",
+    ].join("\n"),
   );
-  assert.match(formatTargetBlock(targetData({ site: siteB, url: "https://beta.test", contextName: "env", bindingLabel: "none (new pull)", operation: "theme pull · live" })), /Beta · sB2 · https:\/\/beta\.test/);
+  assert.deepEqual(t, {
+    site: { id: "sA1", slug: "alpha", name: "Alpha", domain: "alpha.myblocofy.test" },
+    url: "https://alpha.test",
+    platform_origin: ORIGIN,
+    context: "alpha",
+    context_source: ".blocofy/local.json",
+    context_overrides: [],
+    binding: ".blocofy/project.json",
+    command: "pages push",
+    mode: "live",
+    operation: "pages push · live",
+  });
+  // An explicit --context names what it overrode; the default context and the env pair are labelled; a server
+  // that reports no platform origin is said so (never blank).
+  const over = targetData({ site: siteB, url: "https://beta.test", platformOrigin: null, contextName: "beta", contextSource: "--context", contextOverrides: [{ source: "BLOCOFY_CONTEXT", name: "a" }, { source: "env", name: "env" }], bindingLabel: "none", command: "status", mode: "read" });
+  assert.match(formatTargetBlock(over), /^Platform:  \(not reported by the server\)$/m);
+  assert.match(formatTargetBlock(over), /^Context:   beta \(from --context; overrides BLOCOFY_CONTEXT=a, env credentials\)$/m);
+  assert.deepEqual(over.context_overrides, [{ source: "BLOCOFY_CONTEXT", context: "a" }, { source: "env", context: "env" }]);
+  assert.match(formatTargetBlock(targetData({ site: siteA, url: null, platformOrigin: ORIGIN, contextName: "alpha", contextSource: "current_context", bindingLabel: "none", command: "status", mode: "read" })), /^Context:   alpha \(from default context \(blocofy use\)\)$/m);
+  assert.match(formatTargetBlock(targetData({ site: siteB, url: "https://beta.test", platformOrigin: ORIGIN, contextName: "env", contextSource: "env", bindingLabel: "none (new pull)", command: "theme pull", mode: "live" })), /Beta · sB2 · https:\/\/beta\.test[\s\S]*Context:   env \(from env credentials\)/);
   registerSecret("bcf_supersecret_value_123");
   assert.equal(redact("x bcf_supersecret_value_123 y"), "x [redacted] y");
   let out = "";

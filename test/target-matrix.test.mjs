@@ -281,6 +281,8 @@ test("[1] two customer contexts: both listed without secrets; each project's tar
   const tB = await run(home, ["target", projB, "--json"]);
   assert.equal(tA.code, 0, tA.stderr);
   assert.deepEqual([JSON.parse(tA.stdout).target.site.id, JSON.parse(tA.stdout).target.context], ["sA1", "alpha"]);
+  const jA = JSON.parse(tA.stdout).target;
+  assert.deepEqual([jA.context_source, jA.context_overrides, jA.platform_origin, jA.command, jA.mode], [".blocofy/local.json", [], ORIGIN, "target", "read"]);
   assert.deepEqual([JSON.parse(tB.stdout).target.site.id, JSON.parse(tB.stdout).target.context], ["sB2", "beta"]);
   assert.equal(A.state.mutations + B.state.mutations, 0, "`target` is read-only");
 });
@@ -290,7 +292,8 @@ test("[2] two project dirs: a push from each dir reaches only its own site", asy
   const rA = await run(home, ["theme", "push", projA]);
   assert.equal(rA.code, 0, rA.stderr);
   assert.match(rA.stderr, /Target:\s+Alpha Bakery · sA1 · alpha\.myblocofy\.test/);
-  assert.match(rA.stderr, /Context:\s+alpha/);
+  assert.match(rA.stderr, /Platform:\s+https:\/\/app\.blocofy\.test/);
+  assert.match(rA.stderr, /Context:\s+alpha \(from \.blocofy\/local\.json\)/);
   assert.match(rA.stderr, /Binding:\s+.*\.blocofy\/project\.json/);
   assert.match(rA.stderr, /Operation: theme push · draft/);
   assert.ok(A.state.mutations > 0);

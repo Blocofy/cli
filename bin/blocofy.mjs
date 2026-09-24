@@ -324,7 +324,10 @@ Examples
   blocofy pages media-decide pg_abc123 --decisions decisions.json
 
 Targets (which site a command talks to)
-  Every remote command verifies its site first and prints a Target block on stderr.
+  Every remote command verifies its site first and prints a Target block on stderr: the site,
+  the Platform it was verified on, the Context and where that choice came from (--context,
+  BLOCOFY_CONTEXT, env credentials, .blocofy/local.json, the project's site, the \`use\`
+  default), the Binding and the Operation (command · mode). --json: the same as {"target":…}.
   The context is chosen in this order: --context → BLOCOFY_CONTEXT → env credentials
   (BLOCOFY_URL+BLOCOFY_TOKEN and/or BLOCOFY_API_URL+BLOCOFY_API_KEY) → .blocofy/local.json
   → the one saved context matching the project's site → (terminal) pick from the matches.
@@ -332,9 +335,9 @@ Targets (which site a command talks to)
   name different contexts the command is refused before anything is read or written
   (TARGET_CONTEXT_CONFLICT) — pass --context <name> to settle it (the Target block then lists
   what it overrode). Inside a bound project \`use\` is ignored; outside one it is used only by
-  status, target and pages check — every other command needs --context/BLOCOFY_CONTEXT/env. Commands that change a site (theme push/publish/
-  rename/dev sync, pages push, settings push, pages media-decide) need a bound project;
-  pulls into a new empty directory bind it. A wrong project/site pairing changes nothing.
+  status, target and pages check — every other command needs --context/BLOCOFY_CONTEXT/env.
+  Commands that change a site (theme push/publish/rename/dev sync, pages push, settings push,
+  pages media-decide) need a bound project; pulls into a new empty directory bind it. A wrong project/site pairing changes nothing.
   A binding made against an older server has no platform origin: it still matches the same site
   (one warning; run \`blocofy link --adopt\` to record it). A server that reports no origin cannot
   serve a binding that records one (TARGET_UNVERIFIED).
@@ -800,7 +803,7 @@ async function prepareTarget({ command, commandClass, dir, flags, needs, mode, r
 
   const url = needs === "api" ? resolved.context.api?.url : resolved.context.dev?.url ?? resolved.context.api?.url;
   const bindingLabel = binding ? relative(process.cwd(), binding.projectPath) || binding.projectPath : newBinding ? "none (new pull)" : "none";
-  const display = targetData({ site: identity.site, url, contextName: resolved.name, bindingLabel, operation: `${command} · ${mode}` });
+  const display = targetData({ site: identity.site, url, platformOrigin: identity.platformOrigin, contextName: resolved.name, contextSource: resolved.source, contextOverrides: resolved.ignored, bindingLabel, command, mode });
   if (!quiet) printTarget(display, { json: JSON_MODE });
   return {
     name: resolved.name,
