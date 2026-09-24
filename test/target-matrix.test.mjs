@@ -81,6 +81,11 @@ function fakeSite(key, { id, slug, name }) {
       return json(res, 200, { site: { slug }, url: `https://${slug}.myblocofy.test`, live_theme_instance: { id: `t${key}live`, name: "Live", template_count: 2 }, pages_on_live: 1, drafts: [{ id: `t${key}draft`, name: "CLI Draft", source: "import" }], health: "ok" });
     }
     if (url.pathname === "/api/dev/publish") return json(res, 200, { ok: true, published: `t${key}draft`, cloned: false });
+    if (url.pathname === "/api/dev/theme/rename" && req.method === "POST") {
+      const body = JSON.parse(raw || "{}");
+      if (body.instance !== `t${key}live` && body.instance !== `t${key}draft`) return json(res, 404, { error: "not_found" });
+      return json(res, 200, { id: body.instance, name: body.name });
+    }
     if (url.pathname === "/api/dev/content" && req.method === "GET") {
       const scope = url.searchParams.get("scope");
       if (scope === "settings") return json(res, 200, { files: { "config/settings.json": `{"site":"${key}"}` } });
@@ -776,6 +781,47 @@ test("[28] review M4: two pulls into the same empty dir for different sites — 
   assert.equal(JSON.parse(readFileSync(join(fresh, ".blocofy", "project.json"), "utf8")).site_id, "sA1");
   assert.equal(readFileSync(join(fresh, "layout", "theme.liquid"), "utf8"), "<html>A</html>");
   assert.equal(count(B, "GET", "/api/dev/theme"), 0, "the refused pull fetched nothing");
+});
+
+test("[29] 1.8 argument dir ≠ cwd: `theme publish <dir>`, `status <dir>`, `theme rename … --dir`, `pages media-uses|media-decide … --dir` resolve the ARGUMENT's binding, never cwd's", async () => {
+  const { home, projA, projB } = await world();
+  const beforeB = treeHash(projB);
+  const decisions = join(tmp("bcf-mx-dec-"), "d.json");
+  writeFileSync(decisions, JSON.stringify({ decisions: [{ path: "p", facet: "target", decision: "inherit" }] }));
+  const cases = [
+    [["theme", "publish", projA], "POST", "/api/dev/publish"],
+    [["theme", "publish", projA, "--instance", "tAdraft"], "POST", "/api/dev/publish"],
+    [["theme", "rename", "tAlive", "New", "name", "--dir", projA], "POST", "/api/dev/theme/rename"],
+    [["status", projA], "GET", "/api/dev/site"],
+    [["pages", "media-uses", "pgA", "--dir", projA], "GET", "/api/v1/pages/pgA/media-uses"],
+    [["pages", "media-decide", "pgA", "--decisions", decisions, "--dir", projA], "POST", "/api/v1/pages/pgA/media-uses"],
+  ];
+  for (const [args, method, path] of cases) {
+    resetSites();
+    const r = await run(home, [...args, "--json"], { cwd: projB });
+    assert.equal(r.code, 0, `${args.join(" ")}: ${r.stderr}`);
+    assert.equal(B.state.requests.length, 0, `${args.join(" ")}: cwd's site B was contacted`);
+    assert.ok(count(A, method, path) >= 1, `${args.join(" ")}: A's ${method} ${path} not called`);
+    const target = JSON.parse(r.stderr.split("\n").find((l) => l.startsWith('{"target"'))).target;
+    assert.equal(target.site.id, "sA1", args.join(" "));
+    assert.equal(target.context, "alpha", args.join(" "));
+    assert.ok(target.binding.endsWith(join(projA.split("/").pop(), ".blocofy", "project.json")), `${args.join(" ")}: binding ${target.binding}`);
+    assert.equal(treeHash(projB), beforeB);
+    noSecrets(r);
+  }
+  // A missing argument dir is a usage error before any request; so is a second positional for publish/status.
+  for (const args of [["theme", "publish", join(projA, "nope")], ["status", join(projA, "nope")], ["theme", "rename", "tAlive", "New", "--dir", join(projA, "nope")], ["pages", "media-uses", "pgA", "--dir", join(projA, "nope")], ["theme", "publish", projA, projB], ["status", projA, projB]]) {
+    resetSites();
+    const r = await run(home, [...args, "--json"], { cwd: projB });
+    assert.equal(r.code, 1, `${args.join(" ")}: ${r.stderr}`);
+    assert.equal(A.state.requests.length + B.state.requests.length, 0, args.join(" "));
+  }
+  // Without an argument the default is still cwd (bound to B).
+  resetSites();
+  const here = await run(home, ["theme", "publish"], { cwd: projB });
+  assert.equal(here.code, 0, here.stderr);
+  assert.equal(A.state.requests.length, 0);
+  assert.equal(count(B, "POST", "/api/dev/publish"), 1);
 });
 
 test("[18] secret leakage scan: every captured stdout/stderr and every file written outside the secret stores", () => {

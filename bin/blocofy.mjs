@@ -70,12 +70,12 @@ const args = process.argv.slice(2);
 // BLOCOFY_API_KEY'den gelir, argv'ye asla girmez. `pages media-uses` / `media-decide` v1 API komutlarıdır.
 const KNOWN = {
   login: ["url", "token", "api-key", "api-url", "keychain"],
-  pages: ["decisions", "expected-revision-id", "expected-version", "json"],
+  pages: ["decisions", "expected-revision-id", "expected-version", "json", "dir"],
   themePull: ["draft", "instance"],
   themePush: ["diff", "draft", "instance", "name", "live", "yes", "confirm", "dry-run", "validate", "idempotency-key", "prune"],
   themeDev: ["port", "dry", "no-sync", "name"],
   themePublish: ["instance"],
-  themeRename: ["name"],
+  themeRename: ["name", "dir"],
   content: [],
   settingsPush: ["instance", "live", "yes", "confirm"],
   pagesPull: ["strict"],
@@ -101,6 +101,24 @@ function parseArgsOrExit(rest, known) {
     process.exit(1);
   }
   return parsed;
+}
+
+/**
+ * 1.8: the project directory a command resolves its binding from — the explicit argument (`[dir]` or `--dir <dir>`)
+ * when given, else cwd. A missing directory is a usage error before any request.
+ */
+function commandDir(explicit) {
+  if (explicit === undefined) return process.cwd();
+  if (typeof explicit !== "string" || explicit === "") throw new TargetError("USAGE", "--dir needs a directory. Nothing was read or written.", {}, 1);
+  const dir = resolve(explicit);
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new TargetError("USAGE", `Directory not found: ${dir}. Nothing was read or written.`, { dir }, 1);
+  return dir;
+}
+
+/** Commands whose only positional is the optional `[dir]`. */
+function singleDirArg(positionals, usage) {
+  if (positionals.length > 1) throw new TargetError("USAGE", `Usage: ${usage}`, {}, 1);
+  return commandDir(positionals[0]);
 }
 
 /** Human label for a resolved site: "Name (slug)" or just the slug. */
@@ -177,17 +195,20 @@ Usage
                      (lists them first; on the live theme asks to confirm — non-interactive
                      shells must add --yes)
 
-  blocofy theme rename <handle> <new name>
+  blocofy theme rename <handle> <new name> [--dir <dir>]
       Rename a theme (the name is just a label). Works on any of your themes,
       including the live one. Handle comes from the panel theme card or 'blocofy status'.
+        --dir <dir>  the bound project whose site this is (default: cwd)
 
-  blocofy theme publish [--instance <handle>]
+  blocofy theme publish [dir] [--instance <handle>]
       Publish a draft theme to the LIVE site: it REPLACES the live theme for every visitor.
+      The site is the one [dir]'s project is bound to (dir defaults to cwd), so
+      'theme push ./shop && theme publish ./shop' always publishes ./shop's site.
       With no flag, publishes the draft that 'theme dev' / 'theme push --draft' writes into.
       The server refuses to publish a theme that has no pages (it would 404); preview first.
         --instance <handle>  publish a specific theme (handle from the panel / status)
 
-  blocofy status
+  blocofy status [dir]
       Show the live theme, page distribution per instance, drafts, and a health flag
       (ok / live_instance_empty / pages_split). For a problem it names the theme holding the
       pages, the missing pages, why, and safe preview-first next steps — never a one-line fix.
@@ -230,12 +251,13 @@ Usage
       is moved, exit 1. Files without "locale" use the site's default language (login needed;
       with --write outside a bound project only an explicit --context/env credentials are used).
 
-  blocofy pages media-uses <page-handle> [--json]
+  blocofy pages media-uses <page-handle> [--dir <dir>] [--json]
       List a page's localized-media decisions on its newest DRAFT (v1 API, pages:read).
       Prints the draft's revision id/version needed by media-decide. --json: raw response.
+      --dir <dir> (both media commands): the bound project whose site the page is on (default: cwd).
 
   blocofy pages media-decide <page-handle> --decisions <file.json>
-                             [--expected-revision-id <n> --expected-version <n>] [--json]
+                             [--expected-revision-id <n> --expected-version <n>] [--dir <dir>] [--json]
       Apply one or more media decisions to the page's draft atomically (v1 API, pages:write).
       The file is { "decisions": [ { path, facet, decision, target_asset?, alt?, caption?,
       decorative?, idempotency_key?, witness? } ] } (max 20). Without the two --expected-*
@@ -318,6 +340,7 @@ Examples
   blocofy theme pull store-theme --context store && cd store-theme && blocofy theme dev
   blocofy link ~/code/store-theme --context store     (an existing checkout)
   blocofy theme push && blocofy theme publish          (inside the bound project)
+  blocofy theme push ./shop && blocofy theme publish ./shop   (from anywhere: ./shop's site)
   blocofy target && blocofy status
   blocofy login --api-key --context store
   blocofy pages media-uses pg_abc123 --json
@@ -1690,7 +1713,7 @@ async function pagesMediaUses(rest) {
     console.error("Usage: blocofy pages media-uses <page-handle> [--json]");
     process.exit(1);
   }
-  const { apiUrl, apiKey } = (await prepareTarget({ command: "pages media-uses", commandClass: "read", dir: process.cwd(), flags, needs: "api", mode: `read · page ${page}` })).api;
+  const { apiUrl, apiKey } = (await prepareTarget({ command: "pages media-uses", commandClass: "read", dir: commandDir(flags.dir), flags, needs: "api", mode: `read · page ${page}` })).api;
   const view = await fetchPageMediaUses({ apiUrl, apiKey, page, onRetry });
   if (flags.json) console.log(JSON.stringify(view, null, 2));
   else printMediaUsesView(view);
@@ -1733,7 +1756,7 @@ async function pagesMediaDecide(rest) {
     process.exit(1);
   }
 
-  const { apiUrl, apiKey } = (await prepareTarget({ command: "pages media-decide", commandClass: "remote-mutation", dir: process.cwd(), flags, needs: "api", mode: `draft · page ${page}` })).api;
+  const { apiUrl, apiKey } = (await prepareTarget({ command: "pages media-decide", commandClass: "remote-mutation", dir: commandDir(flags.dir), flags, needs: "api", mode: `draft · page ${page}` })).api;
   if (expectedRevisionId === null) {
     const view = await fetchPageMediaUses({ apiUrl, apiKey, page, onRetry });
     if (view.applicable === false) {
@@ -1910,8 +1933,9 @@ async function themeDev(rest) {
 }
 
 async function themePublish(rest) {
-  const { flags } = parseArgsOrExit(rest, KNOWN.themePublish);
-  const target = await prepareTarget({ command: "theme publish", commandClass: "remote-mutation", dir: process.cwd(), flags, needs: "dev", mode: `live${typeof flags.instance === "string" ? ` · instance ${flags.instance}` : " · CLI draft"}` });
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.themePublish);
+  const dir = singleDirArg(positionals, "blocofy theme publish [dir] [--instance <handle>]");
+  const target = await prepareTarget({ command: "theme publish", commandClass: "remote-mutation", dir, flags, needs: "dev", mode: `live${typeof flags.instance === "string" ? ` · instance ${flags.instance}` : " · CLI draft"}` });
   const creds = target.dev;
   let instance = typeof flags.instance === "string" ? flags.instance : null;
   if (!instance) {
@@ -1947,18 +1971,18 @@ async function themeRename(rest) {
   const handle = positionals[0];
   const name = positionals.slice(1).join(" ") || (typeof flags.name === "string" ? flags.name : null);
   if (!handle || !name) {
-    console.error("Usage: blocofy theme rename <handle> <new name>");
+    console.error("Usage: blocofy theme rename <handle> <new name> [--dir <dir>]");
     console.error("  Rename a theme (handle from the panel theme card or `blocofy status`).");
     process.exit(1);
   }
-  const creds = (await prepareTarget({ command: "theme rename", commandClass: "remote-mutation", dir: process.cwd(), flags, needs: "dev", mode: `instance ${handle}` })).dev;
+  const creds = (await prepareTarget({ command: "theme rename", commandClass: "remote-mutation", dir: commandDir(flags.dir), flags, needs: "dev", mode: `instance ${handle}` })).dev;
   const result = await renameInstance({ url: creds.url, token: creds.token, instance: handle, name, onRetry });
   console.log(`✓ Renamed to "${result.name}" (${result.id}).`);
 }
 
 async function status(rest) {
-  const { flags } = parseArgsOrExit(rest, []);
-  const creds = (await prepareTarget({ command: "status", commandClass: "read", dir: process.cwd(), flags, needs: "dev", mode: "read", allowCurrentContext: true })).dev;
+  const { flags, positionals } = parseArgsOrExit(rest, []);
+  const creds = (await prepareTarget({ command: "status", commandClass: "read", dir: singleDirArg(positionals, "blocofy status [dir]"), flags, needs: "dev", mode: "read", allowCurrentContext: true })).dev;
   const s = await fetchSiteStatus({ url: creds.url, token: creds.token, onRetry });
   const live = s.live_theme_instance;
   console.log(`\nSite: ${s.site.slug}${s.url ? ` · ${s.url}` : ""}`);
