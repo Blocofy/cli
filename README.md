@@ -95,12 +95,23 @@ the admin panel, never touching the live site. Publish it with `blocofy theme pu
 - `--instance <handle>` — push to a specific theme by its handle (safe targeted write — no
   live-confirmation prompt).
 - `--name <name>` — name the new draft (draft mode only; ignored on `--live`/`--instance`).
-- `--dry-run` / `--validate` — validate on the server without writing (auth + snapshot + Liquid
-  check); the two flags are aliases.
+- `--dry-run` / `--validate` — check the push on the server without writing; the two flags are
+  aliases. The dry run covers exactly the files the push would send (remote-only files it keeps
+  included; with `--prune`, without the ones it would remove). A current platform plans the whole
+  deploy and prints the target, its pointer version and what happens to each file
+  (`+` created, `~` updated, `-` removed; unchanged files are counted).
 - `--diff` — show what a push would change vs the target (read-only), then stop.
 - `--idempotency-key <k>` — attach a key so a retried push is not double-applied.
 - `--prune` — also remove target files that no longer exist locally (`locales/` included);
   lists them first, and on the live theme asks to confirm (non-interactive shells add `--yes`).
+
+Every push first runs that dry run, then writes the same files. On a current platform the write is
+bound to the dry run: it is refused, with nothing written, if the files differ from what was checked
+(`manifest_mismatch`) or the target theme was deployed again in between (`pointer_version_conflict`).
+If the dry run finds a file on the target that the push would remove although it was not there when
+the push read the target, the push stops (`THEME_PUSH_TARGET_CHANGED`); run it again, or add
+`--prune`. `Deployed atomically` is printed only when the server read the written files back and
+they match; an older platform that does not read back gets `Deployed: … not verified`.
 
 ```
 blocofy theme rename <handle> <new name> [--dir <dir>]
@@ -402,6 +413,18 @@ on stderr.
     key) is refused before any request with `TARGET_CREDENTIAL_WRONG_TYPE`, naming the variable
     or context — it was sent to the wrong endpoint and reported as `TARGET_UNVERIFIED`.
     `login --token blcf_…` points at `login --api-key`.
+  - Theme push preflight bound to the write (customer item 6.5):
+    - `theme push` checks the MERGED payload (local files plus the remote-only files it keeps) in its
+      dry run, then writes exactly those files with the dry run's `manifestHash` and
+      `expectedPointerVersion`. The dry run carries its own throwaway idempotency key, so
+      `--idempotency-key` retries of a committed push still converge.
+    - Per-file outcomes are printed for the push and for `--dry-run`. `Deployed atomically` appears only
+      with a verified readback. New refusals with messages: `pointer_version_conflict`,
+      `site_state_version_conflict`, `manifest_mismatch`, `readback_unverified` and the preflight path
+      errors (`path_too_long`, `reserved_path`, `binary_content_rejected`…, naming the file).
+    - A push stops with `THEME_PUSH_TARGET_CHANGED` when the dry run would remove a file the push never
+      saw; `--prune` lists it for confirmation instead. `--dry-run --prune` now plans the pruned set.
+    - Against an older platform the write body is unchanged from 0.10.
 - **0.10.0** — Named contexts + verified project binding, and a declarative whole-site state.
   - `login` now saves a **named context** (`--context <name>`, default the site's slug) instead
     of one global credentials pair; `blocofy contexts` / `use` / `logout` manage them, and

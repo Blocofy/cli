@@ -976,10 +976,11 @@ async function themePush(rest) {
   // PS-13 `--prune`: canlı temadan dosya SİLER. Hedef canlıysa (`--live` ya da canlı temanın handle'ı
   // verilmiş `--instance`; whoami çözülemediyse canlı sayılır) canlı-push onay kuralı aynen uygulanır:
   // `--yes`/`--confirm` → onaylı, TTY → liste basıldıktan sonra y/N, non-TTY → yazımsız çıkış.
-  const prune = Boolean(flags.prune) && !dryRun;
+  // TPUSH-5: `--dry-run --prune` plans the pruned payload (it writes nothing, so it asks nothing).
+  const prune = Boolean(flags.prune);
   const liveTarget = mode === "live" || (mode === "instance" && (whoami.liveThemeId == null || String(instance) === String(whoami.liveThemeId)));
   const pruneDecision = livePushDecision({
-    draft: !prune || !liveTarget,
+    draft: !prune || dryRun || !liveTarget,
     yes: Boolean(flags.yes),
     confirm: Boolean(flags.confirm),
     isTTY: Boolean(process.stdin.isTTY),
@@ -1049,6 +1050,8 @@ async function themePush(rest) {
       }
       failAndExit({ code: "idempotency_conflict", status: error.status, message: "The idempotency key was already used with different content. Retry with a new key (or omit --idempotency-key).", details: {} });
     }
+    const refusal = themePushRefusal(error);
+    if (refusal) failAndExit({ code: error.code, status: error.status, ...refusal });
     throw error;
   }
 
@@ -1062,6 +1065,12 @@ async function themePush(rest) {
     const warnings = Array.isArray(result.warnings) ? result.warnings : [];
     console.log(`✓ Validation passed (dry run — nothing written).${warnings.length ? ` ${warnings.length} warning(s).` : ""}`);
     for (const w of warnings) console.log(`  ⚠ ${w}`);
+    // TPUSH-5: a 6.5 server plans the push on the control plane; an older one only validated.
+    if (result.newDraft === true) console.log("Plan against a new draft (created by the push):");
+    else if (result.target === "live" || result.target === "draft") {
+      console.log(`Plan against the ${result.target} theme, pointer ${result.pointerVersion == null ? "none yet" : `v${result.pointerVersion}`}:`);
+    }
+    printThemeOutcomes(result.files);
     return;
   }
 
@@ -1073,7 +1082,15 @@ async function themePush(rest) {
     if (Array.isArray(result.remoteOnlyRemoved) && result.remoteOnlyRemoved.length) {
       console.log(`  (removed ${result.remoteOnlyRemoved.length} file(s) absent locally — --prune)`);
     }
-    console.log(`✓ Deployed atomically: deployment #${result.deploymentId}, revision #${result.sourceRevisionId}, pointer v${result.pointerVersion}.`);
+    printThemeOutcomes(result.files);
+    const ids = `deployment #${result.deploymentId}, revision #${result.sourceRevisionId}, pointer v${result.pointerVersion}`;
+    // TPUSH-5: "atomically" only when the server read the written files back and they match what was sent.
+    if (result.readback?.verified === true) {
+      console.log(`✓ Deployed atomically and read back (${result.readback.files} file${result.readback.files === 1 ? "" : "s"} verified): ${ids}.`);
+    } else {
+      console.log(`✓ Deployed: ${ids}. The written files were not verified (this server does not read them back).`);
+    }
+    if (result.convergence === "converged") console.log("  (already applied by an earlier push with the same idempotency key)");
     if (mode === "draft") {
       console.log("Preview & publish it in the admin panel: Theme -> Theme library -> \"Open in editor\".");
       console.log("Publish it live with:  blocofy theme publish");
@@ -1100,6 +1117,48 @@ async function themePush(rest) {
       : "";
     console.log(`Push: ${result.created} created, ${result.updated} updated${extra}.`);
   }
+}
+
+/**
+ * TPUSH-5 — per-file outcomes of a theme push or its plan (6.5 server; an older one sends none). Changed files are
+ * listed, unchanged ones only counted.
+ */
+function printThemeOutcomes(files) {
+  if (!Array.isArray(files)) return;
+  const count = { created: 0, updated: 0, removed: 0, unchanged: 0 };
+  const mark = { created: "+", updated: "~", removed: "-" };
+  for (const f of files) {
+    if (!(f?.outcome in count)) continue;
+    count[f.outcome] += 1;
+    if (f.outcome !== "unchanged") console.log(`  ${mark[f.outcome]} ${f.path}`);
+  }
+  console.log(`Files: ${count.created} created, ${count.updated} updated, ${count.removed} removed, ${count.unchanged} unchanged.`);
+}
+
+/** TPUSH-5 — the 6.5 theme push refusals, in words. `null` = not one of them. */
+function themePushRefusal(error) {
+  const body = error?.body ?? {};
+  switch (error?.code) {
+    case "pointer_version_conflict":
+      return {
+        message: `The target theme was deployed again after this push checked it (now at pointer ${body.currentVersion == null ? "none" : `v${body.currentVersion}`}). Nothing was written. Run the push again.`,
+        details: { currentVersion: body.currentVersion ?? null },
+      };
+    case "site_state_version_conflict":
+      return { message: "The theme's settings were saved on the site while this push was running. Nothing was written. Run the push again.", details: {} };
+    case "manifest_mismatch":
+      return { message: "The files sent for writing differ from the files the dry run checked. Nothing was written. Run the push again.", details: {} };
+    case "readback_unverified":
+      return {
+        message: `The server could not read back the files it wrote${body.committed === true ? " (the deploy was committed)" : body.committed === false ? " (nothing was committed)" : ""}. Compare with \`blocofy theme push --diff\`.`,
+        details: { committed: typeof body.committed === "boolean" ? body.committed : null },
+      };
+  }
+  // The 6.5 preflight names the file it refused (reserved_path, path_too_long, invalid_json…).
+  if (error?.status === 422 && typeof body.path === "string") {
+    return { message: `${body.path}: ${typeof body.message === "string" ? body.message : error.code}. Nothing was written.`, details: { path: body.path } };
+  }
+  return null;
 }
 
 /** PS-19 — print platform/CLI findings; returns the exit code they imply. */
