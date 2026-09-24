@@ -877,6 +877,138 @@ test("[30] 1.8 wrong credential type: a v1 key (blcf_) where the dev token (bcf_
   }
 });
 
+// ── [31] 1.8 closure: the COMPLETE remote command matrix × every case ─────────────────────────────────────────
+//
+// Owner: CLI/platform security. Threshold: zero silent fallback and zero cross-target read/write. Every remote
+// command (class: m = remote-mutation, w = local-write, r = read, o = offline-capable read that opts into the `use`
+// default) is run in each cell; the oracle is the exit/error code, which site was contacted, the target block's
+// site + context source, byte-identical trees for refusals, and no secret in any output (scenario 18).
+
+function matrixCommands(dir, decisions) {
+  return [
+    ["target", ["target", dir], "o"],
+    ["status", ["status", dir], "o"],
+    ["pages check", ["pages", "check", dir], "o"],
+    ["pages migrate-layout", ["pages", "migrate-layout", dir], "r?"],
+    ["theme dev --no-sync", ["theme", "dev", dir, "--no-sync", "--dry"], "r"],
+    ["theme dev", ["theme", "dev", dir, "--dry"], "m"],
+    ["theme pull", ["theme", "pull", dir], "w"],
+    ["theme pull --draft", ["theme", "pull", dir, "--draft"], "m"],
+    ["theme push", ["theme", "push", dir], "m"],
+    ["theme push --diff", ["theme", "push", dir, "--diff"], "r"],
+    ["theme push --dry-run", ["theme", "push", dir, "--dry-run"], "r"],
+    ["theme publish", ["theme", "publish", dir], "m"],
+    ["theme rename", ["theme", "rename", "tAlive", "New", "--dir", dir], "m"],
+    ["pages pull", ["pages", "pull", dir], "w"],
+    ["pages push", ["pages", "push", dir], "m"],
+    ["pages push --dry-run", ["pages", "push", dir, "--dry-run"], "r"],
+    ["pages media-uses", ["pages", "media-uses", "pgA", "--dir", dir], "r"],
+    ["pages media-decide", ["pages", "media-decide", "pgA", "--decisions", decisions, "--dir", dir], "m"],
+    ["settings pull", ["settings", "pull", dir], "w"],
+    ["settings push", ["settings", "push", dir, "--live", "--yes"], "m"],
+    ["site export", ["site", "export", dir], "w"],
+    ["site plan", ["site", "plan", dir], "r"],
+    ["site apply", ["site", "apply", dir], "m"],
+    ["site publish", ["site", "publish", dir, "--yes"], "m"],
+  ];
+}
+
+/** The target block of a run (stderr JSON line, or `blocofy target --json`'s stdout). */
+function targetOf(r, name) {
+  const line = r.stderr.split("\n").find((l) => l.startsWith('{"target"'));
+  if (line) return JSON.parse(line).target;
+  if (name === "target") return JSON.parse(r.stdout).target;
+  assert.fail(`${name}: no target block\n${r.stderr}`);
+}
+
+test("[31] 1.8 closure matrix: every remote command × {conflicting authorities, explicit other site, argument dir from another project while `use` points elsewhere, CI env pair, wrong credential type, unbound dir across two terminals}", async () => {
+  const { home, projA, projB } = await world();
+  const decisions = join(tmp("bcf-mx-dec-"), "d.json");
+  writeFileSync(decisions, JSON.stringify({ decisions: [{ path: "p", facet: "target", decision: "inherit" }] }));
+  const envB = { BLOCOFY_URL: B.url, BLOCOFY_TOKEN: SECRETS.B.token, BLOCOFY_API_URL: B.url, BLOCOFY_API_KEY: SECRETS.B.apiKey };
+  const envA = { BLOCOFY_URL: A.url, BLOCOFY_TOKEN: SECRETS.A.token, BLOCOFY_API_URL: A.url, BLOCOFY_API_KEY: SECRETS.A.apiKey };
+  const swappedA = { BLOCOFY_URL: A.url, BLOCOFY_TOKEN: SECRETS.A.apiKey, BLOCOFY_API_URL: A.url, BLOCOFY_API_KEY: SECRETS.A.token };
+  // CI checkout: the committed project.json only (no local.json), bound to A.
+  const projCI = tmp("bcf-mx-ci-proj-");
+  writeTheme(projCI, "A");
+  writeBinding(projCI, { siteId: "sA1", slug: "alpha" });
+  const loose = tmp("bcf-mx-unbound-");
+  writeTheme(loose, "A");
+  let cells = 0;
+
+  const refusal = async (label, args, opts, code, { exit = 3, dirs = [] } = {}) => {
+    const hashes = dirs.map((d) => [d, treeHash(d)]);
+    resetSites();
+    const r = await run(home, [...args, "--json"], opts);
+    assert.equal(r.code, exit, `${label}: ${r.stderr}`);
+    assert.equal(jsonError(r).code, code, label);
+    assert.deepEqual([...A.state.requests, ...B.state.requests], [], `${label}: a refused command reached the network`);
+    for (const [d, h] of hashes) assert.equal(treeHash(d), h, `${label}: ${d} changed`);
+    noSecrets(r);
+    cells += 1;
+  };
+  const reachesOnly = async (label, name, args, opts, site, other, { source, siteId }) => {
+    resetSites();
+    const r = await run(home, [...args, "--json"], opts);
+    assert.deepEqual(other.state.requests, [], `${label}: the other site was contacted (exit ${r.code})\n${r.stderr}`);
+    assert.ok(count(site, "GET", "/api/dev/whoami") + count(site, "GET", "/api/v1/ping") >= 1, `${label}: identity not verified`);
+    const t = targetOf(r, name);
+    assert.deepEqual([t.site.id, t.context_source, t.platform_origin], [siteId, source, ORIGIN], label);
+    assert.ok(typeof t.mode === "string" && t.mode.length > 0, `${label}: no mode`);
+    noSecrets(r);
+    cells += 1;
+  };
+
+  for (const [name, args] of matrixCommands(projA, decisions)) {
+    // (a) env pair for B + project A's local.json (alpha) → conflict, from another project's cwd.
+    await refusal(`${name} · env B vs local.json`, args, { cwd: projB, env: envB }, "TARGET_CONTEXT_CONFLICT", { dirs: [projA, projB] });
+    // (b) BLOCOFY_CONTEXT=beta vs local.json alpha → conflict.
+    await refusal(`${name} · BLOCOFY_CONTEXT vs local.json`, args, { cwd: projB, env: { BLOCOFY_CONTEXT: "beta" } }, "TARGET_CONTEXT_CONFLICT", { dirs: [projA] });
+    // (c) an explicit --context for the other site → refused offline.
+    await refusal(`${name} · --context beta on project A`, [...args, "--context", "beta"], { cwd: projB }, "TARGET_SITE_MISMATCH", { dirs: [projA] });
+  }
+  for (const [name, args] of matrixCommands(projCI, decisions)) {
+    // (d) wrong credential type in the CI env (dev and API secrets swapped) → refused before any request.
+    await refusal(`${name} · swapped credential types`, args, { cwd: loose, env: swappedA }, "TARGET_CREDENTIAL_WRONG_TYPE", { exit: 1, dirs: [projCI] });
+  }
+  for (const [name, args, kind] of matrixCommands(loose, decisions)) {
+    // (e) env pair + BLOCOFY_CONTEXT in an unbound dir (nothing pins the site) → conflict for every read; a write
+    // is refused even earlier by the binding policy.
+    const expected = kind === "m" || kind === "w" ? "TARGET_BINDING_REQUIRED" : "TARGET_CONTEXT_CONFLICT";
+    await refusal(`${name} · unbound env vs BLOCOFY_CONTEXT`, args, { cwd: loose, env: { ...envA, BLOCOFY_CONTEXT: "beta" } }, expected, { dirs: [loose] });
+  }
+
+  // (f) argument dir ≠ cwd, while "terminal 2" has switched the global default to beta: only A is contacted.
+  assert.equal((await run(home, ["use", "beta"])).code, 0);
+  for (const [name, args] of matrixCommands(projA, decisions)) {
+    await reachesOnly(`${name} · arg projA from cwd projB, use=beta`, name, args, { cwd: projB }, A, B, { source: ".blocofy/local.json", siteId: "sA1" });
+  }
+  // (g) CI: env pairs for A + committed project.json (no local.json), cwd elsewhere.
+  for (const [name, args] of matrixCommands(projCI, decisions)) {
+    await reachesOnly(`${name} · CI env A`, name, args, { cwd: loose, env: envA }, A, B, { source: "env", siteId: "sA1" });
+  }
+
+  // (h) unbound dir across two terminals: `use` moves only status / target / pages check (and says so);
+  // every other command refuses before any request whatever the default is.
+  for (const [ctxName, site, other, siteId] of [["beta", B, A, "sB2"], ["alpha", A, B, "sA1"]]) {
+    assert.equal((await run(home, ["use", ctxName])).code, 0);
+    for (const [name, args, kind] of matrixCommands(loose, decisions)) {
+      const label = `${name} · unbound, use=${ctxName}`;
+      if (kind === "o") {
+        await reachesOnly(label, name, args, { cwd: loose }, site, other, { source: "current_context", siteId });
+      } else if (kind === "r?") {
+        resetSites();
+        const r = await run(home, [...args, "--json"], { cwd: loose });
+        assert.deepEqual([...A.state.requests, ...B.state.requests], [], `${label}: the default context was used (exit ${r.code})`);
+        cells += 1;
+      } else {
+        await refusal(label, args, { cwd: loose }, kind === "r" ? "TARGET_CONTEXT_REQUIRED" : "TARGET_BINDING_REQUIRED", { dirs: [loose] });
+      }
+    }
+  }
+  assert.ok(cells >= 24 * 8, `only ${cells} cells ran`);
+});
+
 test("[18] secret leakage scan: every captured stdout/stderr and every file written outside the secret stores", () => {
   assert.ok(OUTPUTS.length > 50, `only ${OUTPUTS.length} outputs captured`);
   for (const o of OUTPUTS) {
