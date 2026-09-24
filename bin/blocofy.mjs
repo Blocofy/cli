@@ -130,7 +130,8 @@ Usage
       Non-interactive shells: set BLOCOFY_API_KEY + BLOCOFY_API_URL instead.
 
   blocofy contexts [--json]          list saved contexts (never prints secrets)
-  blocofy use <name>                 default context for read-only commands outside a project
+  blocofy use <name>                 default context for status / target / pages check outside a
+                                     project (never used by any other command)
   blocofy logout --context <name>    remove a context and its secrets
   blocofy link [dir] --context <name> [--adopt]
       Bind a project directory to the context's (verified) site: writes .blocofy/project.json
@@ -327,7 +328,11 @@ Targets (which site a command talks to)
   The context is chosen in this order: --context → BLOCOFY_CONTEXT → env credentials
   (BLOCOFY_URL+BLOCOFY_TOKEN and/or BLOCOFY_API_URL+BLOCOFY_API_KEY) → .blocofy/local.json
   → the one saved context matching the project's site → (terminal) pick from the matches.
-  Inside a bound project \`use\` is ignored. Commands that change a site (theme push/publish/
+  BLOCOFY_CONTEXT, the env credentials and .blocofy/local.json are each a choice: if two of them
+  name different contexts the command is refused before anything is read or written
+  (TARGET_CONTEXT_CONFLICT) — pass --context <name> to settle it (the Target block then lists
+  what it overrode). Inside a bound project \`use\` is ignored; outside one it is used only by
+  status, target and pages check — every other command needs --context/BLOCOFY_CONTEXT/env. Commands that change a site (theme push/publish/
   rename/dev sync, pages push, settings push, pages media-decide) need a bound project;
   pulls into a new empty directory bind it. A wrong project/site pairing changes nothing.
   A binding made against an older server has no platform origin: it still matches the same site
@@ -637,7 +642,7 @@ async function useCommand(rest) {
     store.current_context = name;
     saveStore(store);
   });
-  console.log(`✓ Default context for read-only commands outside a project: ${name}`);
+  console.log(`✓ Default context for status / target / pages check outside a project: ${name}`);
   console.log("  (Inside a bound project the project's site decides; `use` never retargets it.)");
 }
 
@@ -666,7 +671,7 @@ async function linkCommand(rest) {
   if (!flagContext && !process.env.BLOCOFY_CONTEXT && !envCtx) {
     throw new TargetError("TARGET_CONTEXT_REQUIRED", "`blocofy link` needs the context to bind: pass --context <name> (see `blocofy contexts`).", {});
   }
-  const resolved = await resolveContext({ flagContext, envContextName: process.env.BLOCOFY_CONTEXT || null, envCtx, getStore: () => loadStore(), binding: null, commandClass: "read" });
+  const resolved = await resolveContext({ flagContext, envContextName: process.env.BLOCOFY_CONTEXT || null, envCtx, getStore: () => loadStore(), binding: null });
   const secrets = resolved.env ? resolved.env.secrets : readSecrets(resolved.name, resolved.context);
   registerSecret(secrets.devToken);
   registerSecret(secrets.apiKey);
@@ -694,15 +699,21 @@ async function linkCommand(rest) {
   const projectPath = writeBinding(dir, { site: identity.site, platformOrigin: identity.platformOrigin, contextName: resolved.name, staleLocal: true });
   recordVerifiedSite(resolved, identity);
   console.log(`✓ Bound ${dir} to ${siteLabel(identity.site) || identity.site.id} (${identity.site.id}) via context "${resolved.name}".`);
+  if (resolved.ignored.length) console.log(`  ${resolved.source} ${resolved.name} overrode ${overridesLabel(resolved.ignored)}.`);
   console.log(`  ${relative(process.cwd(), projectPath) || projectPath} — commit it; .blocofy/local.json stays private (git-ignored).`);
 }
 
 async function targetCommand(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, []);
   const dir = resolve(positionals[0] ?? process.cwd());
-  const t = await prepareTarget({ command: "target", commandClass: "read", dir, flags, needs: "any", mode: "read", record: false, quiet: true });
+  const t = await prepareTarget({ command: "target", commandClass: "read", dir, flags, needs: "any", mode: "read", record: false, quiet: true, allowCurrentContext: true });
   if (JSON_MODE) console.log(JSON.stringify({ target: t.display }, null, 2));
   else printTarget(t.display, { stream: process.stdout });
+}
+
+/** "BLOCOFY_CONTEXT=beta, env credentials" — the stated context choices an explicit --context overrode. */
+function overridesLabel(ignored) {
+  return ignored.map((a) => (a.source === "env" ? "env credentials" : `${a.source}=${a.name}`)).join(", ");
 }
 
 /** An unverified (migrated) named context gets the verified site recorded once. */
@@ -735,9 +746,10 @@ async function promptContext(candidates) {
  * resolution → offline precheck → required pair → remote identity (both pairs when present) → binding match →
  * target block. Throws TargetError / CredentialsError; never returns an unverified target.
  *
- * `needs`: "dev" | "api" | "any". Returns `{ name, dev, api, identity, binding, newBinding, display }`.
+ * `needs`: "dev" | "api" | "any". `allowCurrentContext`: only `status`, `target` and `pages check` may fall back to
+ * the `blocofy use` default outside a project (contract C2). Returns `{ name, dev, api, identity, binding, newBinding, display }`.
  */
-async function prepareTarget({ command, commandClass, dir, flags, needs, mode, record = true, quiet = false, resolveClass = commandClass }) {
+async function prepareTarget({ command, commandClass, dir, flags, needs, mode, record = true, quiet = false, allowCurrentContext = false }) {
   const binding = findBinding(dir);
   const { newBinding } = enforceBindingPolicy({ commandClass, binding, dir, command });
   const envCtx = envContext();
@@ -748,7 +760,7 @@ async function prepareTarget({ command, commandClass, dir, flags, needs, mode, r
     envCtx,
     getStore: () => (cachedStore ??= loadStore()),
     binding,
-    commandClass: resolveClass,
+    allowCurrentContext,
     isTTY: Boolean(process.stdin.isTTY && process.stderr.isTTY),
     prompt: promptContext,
   });
@@ -1190,7 +1202,7 @@ async function pagesCheck(rest) {
     console.error(`Directory not found: ${dir}`);
     process.exit(1);
   }
-  const creds = (await optionalTarget({ command: "pages check", dir, flags }))?.dev;
+  const creds = (await optionalTarget({ command: "pages check", dir, flags, allowCurrentContext: true }))?.dev;
   const online = Boolean(creds);
   const r = await checkPages({ dir, onRetry, ...(online ? { url: creds.url, token: creds.token } : {}) });
   const code = reportPageDiagnostics(r.diagnostics, { strict: Boolean(flags.strict) });
@@ -1641,11 +1653,11 @@ async function contentPull(scope, rest) {
  * Optional online mode for offline-capable reads (`pages check`, `pages migrate-layout`): no credentials at all, or
  * no context choosable outside a project → offline. Inside a bound project every other refusal still applies.
  */
-async function optionalTarget({ command, dir, flags, localWrite = false }) {
+async function optionalTarget({ command, dir, flags, localWrite = false, allowCurrentContext = false }) {
   try {
-    // Review I3: a command that writes local files (migrate-layout --write) never borrows the global default
-    // context — outside a binding it needs an explicit --context/env, else it runs offline.
-    return await prepareTarget({ command, commandClass: "read", resolveClass: localWrite ? "local-write" : "read", dir, flags, needs: "dev", mode: localWrite ? "read · local write" : "read" });
+    // Review I3 / contract C2: only `pages check` may borrow the global default context outside a binding;
+    // migrate-layout (dry run or --write) needs an explicit --context/env there, else it runs offline.
+    return await prepareTarget({ command, commandClass: "read", allowCurrentContext, dir, flags, needs: "dev", mode: localWrite ? "read · local write" : "read" });
   } catch (error) {
     if (error instanceof TargetError && (error.code === "LOGIN_REQUIRED" || (error.code === "TARGET_CONTEXT_REQUIRED" && !findBinding(dir)))) return null;
     throw error;
@@ -1943,7 +1955,7 @@ async function themeRename(rest) {
 
 async function status(rest) {
   const { flags } = parseArgsOrExit(rest, []);
-  const creds = (await prepareTarget({ command: "status", commandClass: "read", dir: process.cwd(), flags, needs: "dev", mode: "read" })).dev;
+  const creds = (await prepareTarget({ command: "status", commandClass: "read", dir: process.cwd(), flags, needs: "dev", mode: "read", allowCurrentContext: true })).dev;
   const s = await fetchSiteStatus({ url: creds.url, token: creds.token, onRetry });
   const live = s.live_theme_instance;
   console.log(`\nSite: ${s.site.slug}${s.url ? ` · ${s.url}` : ""}`);

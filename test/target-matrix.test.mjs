@@ -354,9 +354,9 @@ test("[6] project A dir + context beta push/publish/rename/media-decide → refu
     const r = await run(home, [...args, "--context", "beta", "--json"], { cwd: projA });
     assertRefused(r, "TARGET_SITE_MISMATCH", { hashes: [[projA, before]] });
   }
-  // BLOCOFY_CONTEXT is the same explicit choice.
+  // 1.8: BLOCOFY_CONTEXT=beta against the project's own local.json (alpha) is a conflict — refused before any request.
   resetSites();
-  assertRefused(await run(home, ["theme", "push", projA, "--json"], { env: { BLOCOFY_CONTEXT: "beta" } }), "TARGET_SITE_MISMATCH", { hashes: [[projA, before]] });
+  assertRefused(await run(home, ["theme", "push", projA, "--json"], { env: { BLOCOFY_CONTEXT: "beta" } }), "TARGET_CONTEXT_CONFLICT", { hashes: [[projA, before]] });
 });
 
 test("[7] dev token A + API key B in one context → TARGET_CREDENTIAL_MISMATCH at login --api-key and (hand-edited file) at command time", async () => {
@@ -664,11 +664,20 @@ test("[21] review I3: `pages migrate-layout --write` outside a binding never use
   assert.equal(B.state.requests.length, 0);
 });
 
-test("[22] review I4a: project bound to A + env credentials for B → every command refused (exit 3) by the binding-vs-remote check, zero mutations, no writes", async () => {
+test("[22] review I4a: project bound to A + env credentials for B → every command refused (exit 3), zero mutations, no writes", async () => {
   const { home, projA } = await world();
   const env = { BLOCOFY_URL: B.url, BLOCOFY_TOKEN: SECRETS.B.token };
+  const commands = [["theme", "push", projA], ["pages", "push", projA], ["theme", "pull", projA], ["theme", "dev", projA, "--dry"], ["status"], ["target", projA]];
+  // 1.8: with the project's own local.json (alpha) present, the env pair is a CONFLICTING choice — refused before any request.
+  const withLocal = treeHash(projA);
+  for (const args of commands) {
+    resetSites();
+    assertRefused(await run(home, [...args, "--json"], { env, cwd: projA }), "TARGET_CONTEXT_CONFLICT", { hashes: [[projA, withLocal]] });
+  }
+  // CI shape (committed project.json, no local.json): the env pair is the only choice and the binding-vs-remote check refuses it.
+  rmSync(join(projA, ".blocofy", "local.json"));
   const before = treeHash(projA);
-  for (const args of [["theme", "push", projA], ["pages", "push", projA], ["theme", "pull", projA], ["theme", "dev", projA, "--dry"], ["status"], ["target", projA]]) {
+  for (const args of commands) {
     resetSites();
     const r = await run(home, [...args, "--json"], { env, cwd: projA });
     assert.equal(r.code, 3, `${args.join(" ")}: ${r.stderr}`);
@@ -697,11 +706,13 @@ test("[23] review I4b: a context recorded for A whose token now resolves to B �
   }
 });
 
-test("[24] review I4c: `status` and `target` refuse a mismatch end-to-end inside a bound project (context for B via BLOCOFY_CONTEXT)", async () => {
+test("[24] review I4c: `status` and `target` refuse a mismatch end-to-end inside a bound project (context for B via --context; BLOCOFY_CONTEXT=beta vs local.json alpha is a conflict)", async () => {
   const { home, projA } = await world();
   for (const args of [["status"], ["target"]]) {
     resetSites();
-    const r = await run(home, [...args, "--json"], { cwd: projA, env: { BLOCOFY_CONTEXT: "beta" } });
+    assertRefused(await run(home, [...args, "--json"], { cwd: projA, env: { BLOCOFY_CONTEXT: "beta" } }), "TARGET_CONTEXT_CONFLICT");
+    resetSites();
+    const r = await run(home, [...args, "--context", "beta", "--json"], { cwd: projA });
     assert.equal(r.code, 3, r.stderr);
     assert.equal(jsonError(r).code, "TARGET_SITE_MISMATCH");
     assert.equal(count(B, "GET", "/api/dev/site"), 0, "status must not read the other site");
