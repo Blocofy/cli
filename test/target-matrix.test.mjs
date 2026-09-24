@@ -824,6 +824,59 @@ test("[29] 1.8 argument dir ≠ cwd: `theme publish <dir>`, `status <dir>`, `the
   assert.equal(count(B, "POST", "/api/dev/publish"), 1);
 });
 
+test("[30] 1.8 wrong credential type: a v1 key (blcf_) where the dev token (bcf_) belongs, or the reverse — env or stored — is refused before any request, and the two are never merged", async () => {
+  const { home, projA } = await world();
+  const loose = tmp("bcf-mx-wrongtype-");
+  rmSync(join(projA, ".blocofy", "local.json")); // CI shape: committed project.json only
+  const before = treeHash(projA);
+  const cases = [
+    // [args, env, cwd, names the variable/pair]
+    [["target", loose], { BLOCOFY_URL: A.url, BLOCOFY_TOKEN: SECRETS.A.apiKey }, loose, /BLOCOFY_TOKEN[\s\S]*blcf_[\s\S]*BLOCOFY_API_KEY/],
+    [["theme", "pull", join(loose, "new")], { BLOCOFY_URL: A.url, BLOCOFY_TOKEN: SECRETS.A.apiKey }, loose, /BLOCOFY_TOKEN/],
+    [["pages", "media-uses", "pgA"], { BLOCOFY_API_URL: A.url, BLOCOFY_API_KEY: SECRETS.A.token }, loose, /BLOCOFY_API_KEY[\s\S]*bcf_[\s\S]*blcf_live_/],
+    [["theme", "push", projA], { BLOCOFY_URL: A.url, BLOCOFY_TOKEN: SECRETS.A.token, BLOCOFY_API_URL: A.url, BLOCOFY_API_KEY: SECRETS.A.token }, projA, /BLOCOFY_API_KEY/],
+    [["site", "plan", projA], { BLOCOFY_URL: A.url, BLOCOFY_TOKEN: SECRETS.A.apiKey, BLOCOFY_API_URL: A.url, BLOCOFY_API_KEY: SECRETS.A.apiKey }, projA, /BLOCOFY_TOKEN/],
+  ];
+  for (const [args, env, cwd, pattern] of cases) {
+    resetSites();
+    const r = await run(home, [...args, "--json"], { env, cwd });
+    assert.equal(r.code, 1, `${args.join(" ")}: ${r.stderr}`);
+    const err = jsonError(r);
+    assert.equal(err.code, "TARGET_CREDENTIAL_WRONG_TYPE", args.join(" "));
+    assert.match(err.message, pattern, args.join(" "));
+    assert.match(err.message, /separate/);
+    assert.deepEqual([...A.state.requests, ...B.state.requests], [], `${args.join(" ")}: a request was sent with the wrong credential type`);
+    assert.equal(treeHash(projA), before);
+    assert.deepEqual(readdirSync(loose), []);
+    noSecrets(r);
+  }
+  // Login keeps them apart too: a v1 key given as --token is pointed at `login --api-key`, nothing sent or saved.
+  resetSites();
+  const homeHash = treeHash(join(home, ".blocofy"));
+  const login = await run(home, ["login", "--url", A.url, "--token", SECRETS.A.apiKey, "--context", "x"]);
+  assert.equal(login.code, 1, login.stderr);
+  assert.match(login.stderr, /login --api-key/);
+  assert.deepEqual([...A.state.requests, ...B.state.requests], []);
+  assert.equal(treeHash(join(home, ".blocofy")), homeHash);
+  noSecrets(login);
+  // A hand-edited store: context alpha's dev secret is now alpha's v1 key.
+  const secPath = join(home, ".blocofy", "secrets.json");
+  const sec = JSON.parse(readFileSync(secPath, "utf8"));
+  sec.alpha.dev_token = SECRETS.A.apiKey;
+  writeFileSync(secPath, JSON.stringify(sec));
+  for (const args of [["status", projA], ["theme", "push", projA], ["pages", "media-uses", "pgA", "--dir", projA]]) {
+    resetSites();
+    const r = await run(home, [...args, "--context", "alpha", "--json"], { cwd: loose });
+    assert.equal(r.code, 1, `${args.join(" ")}: ${r.stderr}`);
+    const err = jsonError(r);
+    assert.equal(err.code, "TARGET_CREDENTIAL_WRONG_TYPE", args.join(" "));
+    assert.match(err.message, /context "alpha"/);
+    assert.match(err.message, /blocofy login --context alpha/);
+    assert.deepEqual([...A.state.requests, ...B.state.requests], [], args.join(" "));
+    noSecrets(r);
+  }
+});
+
 test("[18] secret leakage scan: every captured stdout/stderr and every file written outside the secret stores", () => {
   assert.ok(OUTPUTS.length > 50, `only ${OUTPUTS.length} outputs captured`);
   for (const o of OUTPUTS) {

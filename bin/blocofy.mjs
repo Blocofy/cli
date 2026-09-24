@@ -34,6 +34,7 @@ import { printError, printTarget, printWarning, redact, registerSecret, targetDa
 import {
   CONTEXT_NAME_RE,
   TargetError,
+  assertCredentialTypes,
   claimNewBinding,
   compareOrigin,
   enforceBindingPolicy,
@@ -361,6 +362,10 @@ Targets (which site a command talks to)
   status, target and pages check — every other command needs --context/BLOCOFY_CONTEXT/env.
   Commands that change a site (theme push/publish/rename/dev sync, pages push, settings push,
   pages media-decide) need a bound project; pulls into a new empty directory bind it. A wrong project/site pairing changes nothing.
+  A context holds two SEPARATE credentials — the theme dev token (bcf_…, BLOCOFY_TOKEN) and the
+  v1 API key (blcf_live_…, BLOCOFY_API_KEY); one in the other's place is refused before any
+  request (TARGET_CREDENTIAL_WRONG_TYPE, exit 1). Each is verified with its own endpoint
+  (/api/dev/whoami, /api/v1/ping) and both must resolve to the same site.
   A binding made against an older server has no platform origin: it still matches the same site
   (one warning; run \`blocofy link --adopt\` to record it). A server that reports no origin cannot
   serve a binding that records one (TARGET_UNVERIFIED).
@@ -585,7 +590,11 @@ async function login(rest) {
     process.exit(1);
   }
   if (token && !isValidToken(token)) {
-    console.error("Invalid --token — must start with bcf_.");
+    console.error(
+      token.startsWith("blcf_")
+        ? "Invalid --token — that is a v1 API key (blcf_…), not a theme dev token (bcf_…). The two are separate credentials: add the API key with `blocofy login --api-key`. Nothing was written."
+        : "Invalid --token — must start with bcf_.",
+    );
     process.exit(1);
   }
 
@@ -701,6 +710,7 @@ async function linkCommand(rest) {
   const secrets = resolved.env ? resolved.env.secrets : readSecrets(resolved.name, resolved.context);
   registerSecret(secrets.devToken);
   registerSecret(secrets.apiKey);
+  assertCredentialTypes({ resolved, secrets });
   const identity = await verifyTarget({ resolved, secrets, binding: null, retry });
   for (const w of identity.warnings ?? []) printWarning(w, { json: JSON_MODE });
 
@@ -794,6 +804,7 @@ async function prepareTarget({ command, commandClass, dir, flags, needs, mode, r
   const secrets = resolved.env ? resolved.env.secrets : readSecrets(resolved.name, resolved.context);
   registerSecret(secrets.devToken);
   registerSecret(secrets.apiKey);
+  assertCredentialTypes({ resolved, secrets });
 
   const hasDev = Boolean(resolved.context.dev && secrets.devToken);
   const hasApi = Boolean(resolved.context.api && secrets.apiKey);
@@ -803,9 +814,6 @@ async function prepareTarget({ command, commandClass, dir, flags, needs, mode, r
   if (needs === "api" || needs === "both") {
     if (!hasApi) {
       throw new TargetError("LOGIN_REQUIRED", `API key required: run \`blocofy login --api-key\` (or set BLOCOFY_API_KEY + BLOCOFY_API_URL). The dev token (bcf_) is not accepted for the v1 API.`, { context: resolved.name }, 1);
-    }
-    if (!isValidApiKey(secrets.apiKey)) {
-      throw new TargetError("LOGIN_REQUIRED", `The API key of context "${resolved.name}" is not a v1 key — it must start with blcf_live_. Run \`blocofy login --api-key\`.`, { context: resolved.name }, 1);
     }
   }
   // CF-T4 — site plan/apply need BOTH pairs: the v1 API for the site-state endpoints, the dev token for the
