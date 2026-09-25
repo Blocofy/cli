@@ -903,6 +903,31 @@ test("cli-fix3: target_changed says nothing was deployed, and after an unanswere
   }
 });
 
+// cli-fix3 (round 5) — an apply's committed readback_unverified: the deploy landed on the theme the dry run bound
+// it to. A plain `--diff` compares with the LIVE theme only, while a push writes to a draft by default, so the advice
+// names the bound theme (or `blocofy status` for a new draft), never a bare `--diff`.
+test("cli-fix3: an apply's readback_unverified points the check at the theme the write was bound to", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  const lastError = (r) => JSON.parse(r.stderr.trim().split("\n").pop()).error;
+  const unverified = (res) => json(res, 502, { error: "readback_unverified", committed: true }, { "retry-after": "0" });
+  try {
+    await withFake({ postResponder: planningServer({ targetInstance: "t7draft", apply: unverified }) }, async (url) => {
+      const e = lastError(await runBin(url, ["theme", "push", dir, "--draft", "--json"]));
+      assert.equal(e.code, "readback_unverified");
+      assert.match(e.message, /the deploy was committed/);
+      assert.match(e.message, /blocofy theme push --diff --instance t7draft/);
+      assert.equal(e.details.expectedTargetInstance, "t7draft");
+    });
+    await withFake({ postResponder: planningServer({ newDraft: true, targetInstance: null, plan: [["section/Hero", "created"]], apply: unverified }) }, async (url) => {
+      const e = lastError(await runBin(url, ["theme", "push", dir, "--draft", "--json"]));
+      assert.match(e.message, /blocofy status/);
+      assert.doesNotMatch(e.message, /theme push --diff`/, "no bare --diff: it compares with the live theme, not the draft");
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // cli-fix T2 — THEME_PUSH_TARGET_CHANGED advice is truthful. A planned removal the push did not carry is either a
 // file added while the push ran (a re-run reads and keeps it) or a row the push can never carry: one the merge probe
 // returned under a path the push cannot send (outside the merge mirror, e.g. a bare `layout`), or one the probe

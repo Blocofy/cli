@@ -1190,9 +1190,10 @@ function themePushRefusal(error, { draft = false } = {}) {
           details: { phase: "plan", committed: false },
         };
       }
+      // The write went to the theme the dry run bound it to; a plain --diff compares with the live theme only.
       return {
-        message: `The server could not read back the files it wrote${body.committed === true ? " (the deploy was committed)" : body.committed === false ? " (nothing was committed)" : ""}. Compare with \`blocofy theme push --diff\`.`,
-        details: { phase: "apply", committed: typeof body.committed === "boolean" ? body.committed : null },
+        message: `The server could not read back the files it wrote${body.committed === true ? " (the deploy was committed)" : body.committed === false ? " (nothing was committed)" : ""}. Check ${target} with ${check}.`,
+        details: { phase: "apply", committed: typeof body.committed === "boolean" ? body.committed : null, ...(bound !== undefined ? { expectedTargetInstance: bound } : {}) },
       };
   }
   // The 6.5 preflight names the file it refused (reserved_path, path_too_long, invalid_json…).
