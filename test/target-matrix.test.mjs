@@ -98,6 +98,28 @@ function fakeSite(key, { id, slug, name }) {
       if (body.protocol_version !== 2) return json(res, 200, { settingsUpdated: true, schemesUpserted: 0 });
       return json(res, 200, { ok: true, protocol_version: 2, dry_run: Boolean(body.dry_run), pagesUpdated: body.dry_run ? 0 : 1, pagesSkipped: 0, pages: [{ path: "pages/en-US/index.json", locale: "en-US", slug: "/", action: "publish", outcome: "published" }], diagnostics: [] });
     }
+    // cli-fix2: the site-state endpoints, in their steady state (the site already holds this state as a complete
+    // draft), so a `site *` cell shows the command completing on the right site. Their state machine is exercised
+    // in test/site-state.test.mjs.
+    if (url.pathname === "/api/v1/site-state" && req.method === "GET") {
+      return json(res, 200, {
+        schema_version: 1,
+        manifest: { schema_version: 1, kind: "blocofy-site-state", platform_origin: ORIGIN, source_site: { id, slug }, exported_at: "2026-09-18T00:00:00.000Z", manifest_digest: `d${key}`, owners: {} },
+        files: { "site/locales.json": JSON.stringify({ default: "en-US", supported: ["en-US"] }, null, 2) + "\n" },
+        assets: [],
+        diagnostics: [],
+      });
+    }
+    const siteState = { plan_hash: `h${key}`, target_instance: `t${key}draft` };
+    if (url.pathname === "/api/v1/site-state/plan" && req.method === "POST") {
+      return json(res, 200, { ...siteState, manifest_digest: `d${key}`, status: "draft_complete", steps: [], assets_missing: [], theme_source: null, preconditions: [], diagnostics: [] });
+    }
+    if (url.pathname === "/api/v1/site-state/apply" && req.method === "POST") {
+      return json(res, 200, { ...siteState, status: "draft_complete", applied: [], not_applied: [], report: [], theme_source: null });
+    }
+    if (url.pathname === "/api/v1/site-state/publish" && req.method === "POST") {
+      return json(res, 200, { ...siteState, status: "published", swapped: true, navigation: [], globals: false });
+    }
     const media = url.pathname.match(/^\/api\/v1\/pages\/([^/]+)\/media-uses$/);
     if (media) {
       if (media[1] !== `pg${key}`) return json(res, 404, { error: { code: "not_found", message: "Page not found." } });
@@ -972,15 +994,12 @@ test("[31] 1.8 closure matrix: every remote command × {conflicting authorities,
     resetSites();
     const r = await run(home, [...args, "--json"], opts);
     assert.deepEqual(other.state.requests, [], `${label}: the other site was contacted (exit ${r.code})\n${r.stderr}`);
-    // cli-fix T5: a success cell proves the command WORKED on the right site, not only that it chose it. This fake
-    // serves no site-state endpoint (test/site-state.test.mjs runs `site *` end to end), so a `site *` cell proves
-    // the command got past target resolution to ITS OWN endpoint on the right site: the fake's 404, exit 2.
+    // cli-fix T5 + cli-fix2: a success cell proves the command WORKED on the right site, not only that it chose it:
+    // exit 0 for every command, and a `site *` command completed through its own endpoint on that site.
+    assert.equal(r.code, 0, `${label}: exit ${r.code}\n${r.stderr}`);
     if (name.startsWith("site ")) {
-      assert.equal(r.code, 2, `${label}: exit ${r.code}\n${r.stderr}`);
-      assert.equal(jsonError(r).code, "http_404", label);
-      assert.ok(site.state.requests.some((q) => q.url.startsWith("/api/v1/site-state")), `${label}: the site-state endpoint was not reached`);
-    } else {
-      assert.equal(r.code, 0, `${label}: exit ${r.code}\n${r.stderr}`);
+      const endpoint = { "site export": "GET /api/v1/site-state", "site plan": "POST /api/v1/site-state/plan", "site apply": "POST /api/v1/site-state/plan", "site publish": "POST /api/v1/site-state/publish" }[name];
+      assert.ok(site.state.requests.some((q) => `${q.method} ${q.url}` === endpoint), `${label}: ${endpoint} was not reached`);
     }
     assert.ok(count(site, "GET", "/api/dev/whoami") + count(site, "GET", "/api/v1/ping") >= 1, `${label}: identity not verified`);
     const t = targetOf(r, name);
