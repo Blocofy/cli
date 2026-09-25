@@ -712,7 +712,7 @@ test("cli-fix T1: a 409 target_changed apply is explained (human and --json) and
       assert.match(r.stderr, /target_changed/);
       assert.match(r.stderr, /t7draft/);
       assert.match(r.stderr, /t8other/);
-      assert.match(r.stderr, /Nothing was written/);
+      assert.match(r.stderr, /Nothing was deployed/, "round 5: definitive, but not 'Nothing was written' (the draft race)");
       assert.doesNotMatch(r.stdout, /Deployed/);
       assert.equal(seen.posts.filter((p) => !p.body.dryRun).length, 1, "a 409 is not retried");
       const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
@@ -720,7 +720,7 @@ test("cli-fix T1: a 409 target_changed apply is explained (human and --json) and
       const e = lastError(j);
       assert.equal(e.code, "target_changed");
       assert.deepEqual([e.details.expectedTargetInstance, e.details.targetInstance], ["t7draft", "t8other"]);
-      assert.match(e.message, /Nothing was written/);
+      assert.match(e.message, /Nothing was deployed/);
     });
     const gone = planningServer({ targetInstance: "t7draft", apply: (res) => json(res, 409, { error: "target_changed", targetInstance: null }) });
     await withFake({ postResponder: gone }, async (url) => {
@@ -832,12 +832,71 @@ test("cli-fix2: a refusal on a retry after an unknown outcome never says 'Nothin
         assert.equal(e.details.earlierAttempt, "unknown", e.code);
       });
     }
-    // Without a retry a refusal is still certain: nothing was written.
+    // Without a retry a refusal is still certain: nothing was deployed (target_changed; round 5 wording).
     await withFake({ postResponder: retriedApply(moved, moved) }, async (url) => {
       const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
       const e = lastError(j);
-      assert.match(e.message, /Nothing was written/);
+      assert.match(e.message, /Nothing was deployed/);
       assert.ok(!("earlierAttempt" in e.details));
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// cli-fix3 (round 5) — a 409 target_changed is definitive for THIS request: it is not a replay of a committed push
+// under this key to the CURRENT target, and nothing was deployed (the tpush round-5 contract: a --draft push may have
+// provisioned a new empty draft in one race, kept for reuse — so not "Nothing was written"). An earlier attempt of the
+// same push without an answer was bound to the theme its dry run planned against, so that is the theme to check; the
+// current target (the 409's targetInstance) is where a re-run would write, never where that attempt landed.
+
+/** Like retriedApply, but for a push bound to an existing theme (`targetInstance`), not to a new draft. */
+function retriedBoundApply(targetInstance, first, then) {
+  let applies = 0;
+  const server = planningServer({ targetInstance, apply: (res, body) => ((applies += 1) === 1 ? first(res, body) : then(res, body)) });
+  return (res, n, body) => {
+    if (body.dryRun) applies = 0;
+    return server(res, n, body);
+  };
+}
+
+test("cli-fix3: target_changed says nothing was deployed, and after an unanswered attempt checks the theme that attempt was bound to", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  const lastError = (r) => JSON.parse(r.stderr.trim().split("\n").pop()).error;
+  try {
+    // Bound to the live theme t7live; its first apply got no answer; the live theme was then switched to t42.
+    await withFake({ postResponder: retriedBoundApply("t7live", gateway504, moved) }, async (url) => {
+      const r = await runBin(url, ["theme", "push", dir, "--live", "--yes"]);
+      assert.equal(r.code, 2, r.stderr);
+      assert.match(r.stderr, /t7live/, "the theme the earlier attempt was bound to");
+      assert.match(r.stderr, /t42/, "the current target");
+      assert.match(r.stderr, /theme push --diff --instance t7live/, "the check points at the bound theme");
+      assert.doesNotMatch(r.stderr, /--diff --instance t42/, "the current target is not where the earlier attempt landed");
+      const e = lastError(await runBin(url, ["theme", "push", dir, "--live", "--yes", "--json"]));
+      assert.equal(e.code, "target_changed");
+      assert.deepEqual([e.details.expectedTargetInstance, e.details.targetInstance, e.details.earlierAttempt], ["t7live", "t42", "unknown"]);
+      assert.match(e.message, /--diff --instance t7live/);
+      assert.doesNotMatch(e.message, /--instance t42/);
+    });
+    // Bound to a new draft (expectedTargetInstance null): the draft that attempt may have created is not the 409's
+    // targetInstance either — only `blocofy status` (it lists the drafts) finds it.
+    await withFake({ postResponder: retriedApply(gateway504, moved) }, async (url) => {
+      const e = lastError(await runBin(url, ["theme", "push", dir, "--draft", "--json"]));
+      assert.equal(e.code, "target_changed");
+      assert.match(e.message, /blocofy status/);
+      assert.doesNotMatch(e.message, /--instance t42/);
+    });
+    // Without an earlier attempt: definitive, nothing deployed; a --draft push says what the race may have kept.
+    await withFake({ postResponder: retriedBoundApply("t7live", moved, moved) }, async (url) => {
+      const e = lastError(await runBin(url, ["theme", "push", dir, "--live", "--yes", "--json"]));
+      assert.match(e.message, /Nothing was deployed/);
+      assert.doesNotMatch(e.message, /Nothing was written/);
+      assert.doesNotMatch(e.message, /empty draft/, "a live push provisions no draft");
+    });
+    await withFake({ postResponder: retriedApply(moved, moved) }, async (url) => {
+      const e = lastError(await runBin(url, ["theme", "push", dir, "--draft", "--json"]));
+      assert.match(e.message, /Nothing was deployed/);
+      assert.match(e.message, /empty draft/);
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });

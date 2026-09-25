@@ -109,13 +109,16 @@ Every push first runs that dry run, then writes the same files. On a current pla
 bound to the dry run: it is refused, with nothing written, if the files differ from what was checked
 (`manifest_mismatch`), the target theme was deployed again in between (`pointer_version_conflict`),
 or the push would now write to another theme than the one its dry run planned against — the live
-theme was switched, or the draft to reuse changed (`target_changed`; run the push again).
+theme was switched, or the draft to reuse changed (`target_changed`: nothing was deployed, though a
+draft push may have created a new, empty draft that the next push reuses; run the push again).
 A write that gets no answer (network error, 429/502/503/504) is resent (up to 3 times) under the same
 key; a push the platform already committed is then reported as deployed (`already applied by an
 earlier push with the same idempotency key`). If that resend is refused, the refusal cannot say
 what the earlier attempt did: the message says whether it was committed or its outcome is
-unknown (`details.earlierAttempt`), never "Nothing was written". Check the target with
-`blocofy theme push --diff --instance <handle>` before running the push again.
+unknown (`details.earlierAttempt`), never "Nothing was written". Check the theme the dry run bound
+the write to (`details.expectedTargetInstance`, not the current target a refusal names) with
+`blocofy theme push --diff --instance <handle>` — or, for a new draft, find it with `blocofy status` —
+before running the push again.
 If the dry run would remove a file the push did not carry, the push stops
 (`THEME_PUSH_TARGET_CHANGED`). The message says which case each file is:
 - a path the push cannot send (not a file inside a theme folder, e.g. a bare `layout` row; listed in

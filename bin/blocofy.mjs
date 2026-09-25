@@ -1050,7 +1050,7 @@ async function themePush(rest) {
       }
       failAndExit({ code: "idempotency_conflict", status: error.status, message: "The idempotency key was already used with different content. Retry with a new key (or omit --idempotency-key).", details: {} });
     }
-    const refusal = themePushRefusal(error);
+    const refusal = themePushRefusal(error, { draft: mode === "draft" });
     if (refusal) failAndExit({ code: error.code, status: error.status, ...refusal });
     throw error;
   }
@@ -1140,16 +1140,26 @@ function printThemeOutcomes(files) {
  * apply was resent after an attempt without a certain answer (`error.earlierAttempt`), that earlier attempt may have
  * written: then the message says so instead of "Nothing was written", and `details.earlierAttempt` names it.
  */
-function themePushRefusal(error) {
+function themePushRefusal(error, { draft = false } = {}) {
   const body = error?.body ?? {};
   const earlier = error?.phase === "apply" && (error.earlierAttempt === "unknown" || error.earlierAttempt === "committed") ? error.earlierAttempt : null;
-  const check = typeof body.targetInstance === "string" ? `\`blocofy theme push --diff --instance ${body.targetInstance}\`` : "`blocofy status` and `blocofy theme push --diff --instance <handle>`";
-  const nothing = (next) =>
+  // Where an earlier attempt of this push could have written: the theme its dry run bound it to (every attempt is the
+  // same request), never the current target a refusal may name. A new-draft binding (null) is found via the drafts.
+  const bound = error?.expectedTargetInstance;
+  const check =
+    typeof bound === "string"
+      ? `\`blocofy theme push --diff --instance ${bound}\``
+      : bound === null
+        ? "`blocofy status` (it lists the drafts; one this push created would be there) and `blocofy theme push --diff --instance <handle>`"
+        : "`blocofy status` and `blocofy theme push --diff --instance <handle>`";
+  const target = typeof bound === "string" ? `theme ${bound}` : "the target";
+  // `wrote`/`none`: what this refusal certainly did not do ("deployed" for target_changed, see below).
+  const nothing = (next, { wrote = "wrote", none = "Nothing was written." } = {}) =>
     earlier === "committed"
-      ? `This attempt wrote nothing, but an earlier attempt of this push was committed (its answer said so). Check the target with ${check} before running the push again.`
+      ? `This attempt ${wrote} nothing, but an earlier attempt of this push was committed (its answer said so). Check ${target} with ${check} before running the push again.`
       : earlier === "unknown"
-        ? `This attempt wrote nothing, but an earlier attempt of this push got no answer, so whether it wrote is unknown. Check the target with ${check} before running the push again.`
-        : `Nothing was written. ${next}`;
+        ? `This attempt ${wrote} nothing, but an earlier attempt of this push got no answer, so whether it wrote is unknown. Check ${target} with ${check} before running the push again.`
+        : `${none} ${next}`;
   const withEarlier = (details) => (earlier ? { ...details, earlierAttempt: earlier } : details);
   switch (error?.code) {
     case "pointer_version_conflict":
@@ -1164,8 +1174,11 @@ function themePushRefusal(error) {
     case "target_changed": {
       const was = error.expectedTargetInstance === undefined ? "the theme its dry run planned against" : error.expectedTargetInstance === null ? "a new draft (its dry run planned one)" : `theme ${error.expectedTargetInstance}`;
       const now = typeof body.targetInstance === "string" ? `theme ${body.targetInstance}` : "a new draft (there is no draft to reuse any more)";
+      // Definitive, but "nothing written" is not true of it: a draft push that lost the read/provision race may have
+      // provisioned a new empty draft first (kept; the next draft push reuses it). No theme file was deployed.
+      const none = `Nothing was deployed${draft ? " (at most a new, empty draft was created, which the next push reuses)" : ""}.`;
       return {
-        message: `The push's target changed after its dry run: it planned against ${was}, but it would now write to ${now} (the live theme was switched, or the draft to reuse changed). ${nothing("Run the push again to plan against the current target.")}`,
+        message: `The push's target changed after its dry run: it planned against ${was}, but it would now write to ${now} (the live theme was switched, or the draft to reuse changed). ${nothing("Run the push again to plan against the current target.", { wrote: "deployed", none })}`,
         details: withEarlier({ expectedTargetInstance: error.expectedTargetInstance ?? null, targetInstance: typeof body.targetInstance === "string" ? body.targetInstance : null }),
       };
     }
