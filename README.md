@@ -117,11 +117,16 @@ what the earlier attempt did: the message says whether it was committed or its o
 unknown (`details.earlierAttempt`), never "Nothing was written". Check the target with
 `blocofy theme push --diff --instance <handle>` before running the push again.
 If the dry run would remove a file the push did not carry, the push stops
-(`THEME_PUSH_TARGET_CHANGED`). A file added while the push was running is kept by running it
-again. A file the push cannot read (for example a theme file that is not published) or a path it
-cannot send stops every run the same way: add `--prune` to remove it, or add a local file at that
-path to replace it. `Deployed atomically` is printed only when the server read the written files back and
-they match; an older platform that does not read back gets `Deployed: … not verified`.
+(`THEME_PUSH_TARGET_CHANGED`). The message says which case each file is:
+- a path the push cannot send (not a file inside a theme folder, e.g. a bare `layout` row; listed in
+  `details.notCarryable`) stops every run the same way, and only `--prune` gets past it (it removes
+  the file);
+- any other file was either added while the push was running, and running the push again keeps it,
+  or the push cannot read it (for example a theme file that is not published): then it stops every
+  run the same way, and you add `--prune` to remove it or add a local file at that path to replace it.
+
+`Deployed atomically` is printed only when the server read the written files back and they match;
+an older platform that does not read back gets `Deployed: … not verified`.
 
 ```
 blocofy theme rename <handle> <new name> [--dir <dir>]
@@ -443,7 +448,7 @@ Each retry prints a notice on stderr.
       errors (`path_too_long`, `reserved_path`, `binary_content_rejected`…, naming the file).
     - A push stops with `THEME_PUSH_TARGET_CHANGED` when the dry run would remove a file the push did
       not carry; the message says whether a re-run can keep it or only `--prune` gets past it, and
-      `details.notCarryable` lists the paths the push read but cannot send. `--prune` lists them for
+      `details.notCarryable` lists the paths the push cannot send. `--prune` lists them for
       confirmation instead. `--dry-run --prune` now plans the pruned set.
     - Against an older platform the write body is unchanged from 0.10.
 - **0.10.0** — Named contexts + verified project binding, and a declarative whole-site state.

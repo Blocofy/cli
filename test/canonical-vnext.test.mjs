@@ -893,6 +893,34 @@ test("cli-fix T2: a planned removal the push cannot carry is not promised back b
   }
 });
 
+test("cli-fix2: a planned removal the push cannot send gets only --prune, seen by the probe or not", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  try {
+    // The probe lists published rows only: an unpublished bare `layout` row is not returned, and the push could not
+    // send that path anyway (the server refuses a single-segment key; a theme with `layout/` cannot hold a file
+    // named `layout`). So "add a local file at that path" cannot work for it; only --prune gets past it.
+    const unseenOutside = {
+      getBody: { files: { "section/Hero": "R" }, protocol: 1 },
+      postResponder: planningServer({ plan: [["section/Hero", "updated"], ["layout", "removed"], ["section/Hidden", "removed"]] }),
+    };
+    await withFake(unseenOutside, async (url) => {
+      await assert.rejects(pushTheme({ dir, url, token: TOKEN, idempotencyKey: "cli-adv-3" }), (e) => {
+        assert.equal(e.code, "THEME_PUSH_TARGET_CHANGED");
+        assert.deepEqual(e.details.paths, ["layout", "section/Hidden"]);
+        assert.deepEqual(e.details.notCarryable, ["layout"]);
+        const [layoutPart] = e.message.split(" section/Hidden: ");
+        assert.match(layoutPart, /layout: .*cannot carry/);
+        assert.doesNotMatch(layoutPart, /add a local file/);
+        assert.match(e.message, /section\/Hidden: not on the target when this push read it/);
+        assert.match(e.message, /add a local file at that path/, "a sendable path can still be replaced by a local file");
+        return true;
+      });
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("cli-fix T2: THEME_PUSH_TARGET_CHANGED reaches the terminal as a refusal (human and --json), nothing written", async () => {
   const dir = themeDir({ "section/Hero": "H" });
   const lastError = (r) => JSON.parse(r.stderr.trim().split("\n").pop()).error;
