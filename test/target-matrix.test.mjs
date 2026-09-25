@@ -39,7 +39,7 @@ const pageV2 = (label) => JSON.stringify({ format_version: 2, slug: "/", locale:
 
 function fakeSite(key, { id, slug, name }) {
   const s = SECRETS[key];
-  const state = { requests: [], mutations: 0, whoami: "ok", ping: "ok", platformOrigin: ORIGIN, url: null, themeFiles: null, identitySite: null, whoamiDelayMs: 0 };
+  const state = { requests: [], mutations: 0, whoami: "ok", ping: "ok", platformOrigin: ORIGIN, url: null, themeFiles: null, identitySite: null, whoamiDelayMs: 0, siteApplied: false };
   const json = (res, status, body, headers = {}) => {
     res.writeHead(status, { "content-type": "application/json", ...headers });
     res.end(typeof body === "string" ? body : JSON.stringify(body));
@@ -98,6 +98,32 @@ function fakeSite(key, { id, slug, name }) {
       if (body.protocol_version !== 2) return json(res, 200, { settingsUpdated: true, schemesUpserted: 0 });
       return json(res, 200, { ok: true, protocol_version: 2, dry_run: Boolean(body.dry_run), pagesUpdated: body.dry_run ? 0 : 1, pagesSkipped: 0, pages: [{ path: "pages/en-US/index.json", locale: "en-US", slug: "/", action: "publish", outcome: "published" }], diagnostics: [] });
     }
+    // cli-fix2: the site-state endpoints, minimal (one step to apply, then a complete draft), so a `site *` cell
+    // shows the command completing on the right site. Their state machine is exercised in test/site-state.test.mjs.
+    if (url.pathname === "/api/v1/site-state" && req.method === "GET") {
+      return json(res, 200, {
+        schema_version: 1,
+        manifest: { schema_version: 1, kind: "blocofy-site-state", platform_origin: ORIGIN, source_site: { id, slug }, exported_at: "2026-09-18T00:00:00.000Z", manifest_digest: `d${key}`, owners: {} },
+        files: { "site/locales.json": JSON.stringify({ default: "en-US", supported: ["en-US"] }, null, 2) + "\n" },
+        assets: [],
+        diagnostics: [],
+      });
+    }
+    // cli-fix3: until this site has been applied (per reset), the plan has one step, so `site apply` must reach its
+    // own apply endpoint on this site, with the plan hash this site gave it.
+    const siteState = { plan_hash: `h${key}`, target_instance: `t${key}draft` };
+    if (url.pathname === "/api/v1/site-state/plan" && req.method === "POST") {
+      const steps = state.siteApplied ? [] : [{ seq: 1, owner: "site", action: "update", key: "site/locales.json", live_effect: false }];
+      return json(res, 200, { ...siteState, manifest_digest: `d${key}`, status: steps.length ? "planned" : "draft_complete", steps, assets_missing: [], theme_source: null, preconditions: [], diagnostics: [] });
+    }
+    if (url.pathname === "/api/v1/site-state/apply" && req.method === "POST") {
+      if (JSON.parse(raw || "{}").expected_plan_hash !== siteState.plan_hash) return json(res, 409, { error: { code: "plan_changed", message: "not this site's plan" } });
+      state.siteApplied = true;
+      return json(res, 200, { ...siteState, status: "draft_complete", applied: [1], not_applied: [], report: [], theme_source: null });
+    }
+    if (url.pathname === "/api/v1/site-state/publish" && req.method === "POST") {
+      return json(res, 200, { ...siteState, status: "published", swapped: true, navigation: [], globals: false });
+    }
     const media = url.pathname.match(/^\/api\/v1\/pages\/([^/]+)\/media-uses$/);
     if (media) {
       if (media[1] !== `pg${key}`) return json(res, 404, { error: { code: "not_found", message: "Page not found." } });
@@ -119,6 +145,7 @@ function fakeSite(key, { id, slug, name }) {
       state.themeFiles = null;
       state.identitySite = null;
       state.whoamiDelayMs = 0;
+      state.siteApplied = false;
     },
     async start() {
       server.listen(0, "127.0.0.1");
@@ -811,11 +838,31 @@ test("[29] 1.8 argument dir ≠ cwd: `theme publish <dir>`, `status <dir>`, `the
     noSecrets(r);
   }
   // A missing argument dir is a usage error before any request; so is a second positional for publish/status.
-  for (const args of [["theme", "publish", join(projA, "nope")], ["status", join(projA, "nope")], ["theme", "rename", "tAlive", "New", "--dir", join(projA, "nope")], ["pages", "media-uses", "pgA", "--dir", join(projA, "nope")], ["theme", "publish", projA, projB], ["status", projA, projB]]) {
+  // cli-fix T5: the same rule for `target [dir]` (a missing dir is not climbed to an ancestor's binding) and for
+  // `pages media-uses|media-decide` (a directory given as a positional is refused, not silently dropped for cwd's).
+  for (const args of [
+    ["theme", "publish", join(projA, "nope")],
+    ["status", join(projA, "nope")],
+    ["theme", "rename", "tAlive", "New", "--dir", join(projA, "nope")],
+    ["pages", "media-uses", "pgA", "--dir", join(projA, "nope")],
+    ["theme", "publish", projA, projB],
+    ["status", projA, projB],
+    ["target", join(projA, "nope")],
+    ["target", projA, projB],
+    ["pages", "media-uses", "pgA", projA],
+    ["pages", "media-decide", "pgA", projA, "--decisions", decisions],
+  ]) {
     resetSites();
     const r = await run(home, [...args, "--json"], { cwd: projB });
     assert.equal(r.code, 1, `${args.join(" ")}: ${r.stderr}`);
     assert.equal(A.state.requests.length + B.state.requests.length, 0, args.join(" "));
+    assert.equal(jsonError(r).code, "USAGE", args.join(" "));
+  }
+  // The usage lines of the two page media commands name the directory option (as --help and the README do).
+  for (const args of [["pages", "media-uses"], ["pages", "media-decide", "pgA"], ["pages", "media-uses", "pgA", projA]]) {
+    const r = await run(home, args, { cwd: projB });
+    assert.equal(r.code, 1, args.join(" "));
+    assert.match(r.stderr, /Usage: blocofy pages media-(uses|decide) <page-handle>.*\[--dir <dir>\]/, `${args.join(" ")}: ${r.stderr}`);
   }
   // Without an argument the default is still cwd (bound to B).
   resetSites();
@@ -952,6 +999,13 @@ test("[31] 1.8 closure matrix: every remote command × {conflicting authorities,
     resetSites();
     const r = await run(home, [...args, "--json"], opts);
     assert.deepEqual(other.state.requests, [], `${label}: the other site was contacted (exit ${r.code})\n${r.stderr}`);
+    // cli-fix T5 + cli-fix2: a success cell proves the command WORKED on the right site, not only that it chose it:
+    // exit 0 for every command, and a `site *` command completed through its own endpoint on that site.
+    assert.equal(r.code, 0, `${label}: exit ${r.code}\n${r.stderr}`);
+    if (name.startsWith("site ")) {
+      const endpoint = { "site export": "GET /api/v1/site-state", "site plan": "POST /api/v1/site-state/plan", "site apply": "POST /api/v1/site-state/apply", "site publish": "POST /api/v1/site-state/publish" }[name];
+      assert.ok(site.state.requests.some((q) => `${q.method} ${q.url}` === endpoint), `${label}: ${endpoint} was not reached`);
+    }
     assert.ok(count(site, "GET", "/api/dev/whoami") + count(site, "GET", "/api/v1/ping") >= 1, `${label}: identity not verified`);
     const t = targetOf(r, name);
     assert.deepEqual([t.site.id, t.context_source, t.platform_origin], [siteId, source, ORIGIN], label);

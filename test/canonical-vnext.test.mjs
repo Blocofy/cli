@@ -453,12 +453,14 @@ const json = (res, status, body, headers = {}) => {
 const outcomes = (entries) => entries.map(([path, outcome]) => ({ path, outcome, ...(outcome === "removed" ? {} : { digest: "cd".repeat(32) }) }));
 
 /** A server with the 6.5 contract: the dry run is a plan, the apply reports outcomes + readback. */
-function planningServer({ pointerVersion = 4, newDraft = false, plan = [["section/Hero", "updated"]], apply = null, dry = null } = {}) {
+function planningServer({ pointerVersion = 4, newDraft = false, plan = [["section/Hero", "updated"]], apply = null, dry = null, targetInstance } = {}) {
   return (res, n, body) => {
     if (body.dryRun) {
       if (dry) return dry(res, body);
       return json(res, 200, {
         ok: true, dryRun: true, warnings: [], manifestHash: HASH, target: body.draft ? "draft" : "live", newDraft,
+        // Remediation round 3 server: the instance planned against (null with newDraft); absent on an older 6.5 server.
+        ...(targetInstance !== undefined ? { targetInstance } : {}),
         pointerVersion: newDraft ? null : pointerVersion, files: outcomes(plan), ...(newDraft ? {} : { readback: { verified: true, files: plan.length, settings: true } }),
       });
     }
@@ -658,6 +660,490 @@ test("TPUSH-5: refusals are explained — pointer conflict, a preflight path err
       assert.equal(lastError(r).details.committed, true);
       assert.match(lastError(r).message, /could not read back/);
       assert.doesNotMatch(r.stdout, /Deployed/);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// cli-fix T1 — the apply is bound to the INSTANCE its dry run planned against. pointer_version is per instance, so
+// manifestHash + expectedPointerVersion alone let the merged payload land on another instance whose pointer has the
+// same version (the live theme switched, another reusable draft). A server that answers `targetInstance` gets it
+// back as `expectedTargetInstance` (null = "a new draft", sent explicitly); an older server gets no such field; a
+// different target is refused 409 `target_changed` before anything is written, and the CLI says so.
+
+test("cli-fix T1: the apply sends the dry run's targetInstance back as expectedTargetInstance; the dry run binds nothing", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  try {
+    await withFake({ postResponder: planningServer({ targetInstance: "t7live" }) }, async (url, seen) => {
+      await pushTheme({ dir, url, token: TOKEN, idempotencyKey: "cli-ti-1" });
+      const [dry, real] = seen.posts;
+      assert.ok(!("expectedTargetInstance" in dry.body), "the dry run asks; it binds nothing");
+      assert.equal(real.body.expectedTargetInstance, "t7live");
+      assert.equal(real.body.manifestHash, HASH);
+      assert.equal(real.body.expectedPointerVersion, 4);
+    });
+    await withFake({ postResponder: planningServer({ newDraft: true, targetInstance: null, plan: [["section/Hero", "created"]] }) }, async (url, seen) => {
+      await pushTheme({ dir, url, token: TOKEN, draft: true, idempotencyKey: "cli-ti-2" });
+      const real = seen.posts.find((p) => !p.body.dryRun);
+      assert.ok("expectedTargetInstance" in real.body, "null ('a new draft') is sent explicitly");
+      assert.equal(real.body.expectedTargetInstance, null);
+    });
+    await withFake({ postResponder: planningServer() }, async (url, seen) => {
+      await pushTheme({ dir, url, token: TOKEN, idempotencyKey: "cli-ti-3" });
+      const real = seen.posts.find((p) => !p.body.dryRun);
+      assert.ok(!("expectedTargetInstance" in real.body), "a server that names no target gets no target binding");
+      assert.equal(real.body.manifestHash, HASH);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cli-fix T1: a 409 target_changed apply is explained (human and --json) and names both targets", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  const lastError = (r) => JSON.parse(r.stderr.trim().split("\n").pop()).error;
+  try {
+    const changed = planningServer({ targetInstance: "t7draft", apply: (res) => json(res, 409, { error: "target_changed", targetInstance: "t8other" }) });
+    await withFake({ postResponder: changed }, async (url, seen) => {
+      const r = await runBin(url, ["theme", "push", dir, "--draft"]);
+      assert.equal(r.code, 2, r.stderr);
+      assert.match(r.stderr, /target_changed/);
+      assert.match(r.stderr, /t7draft/);
+      assert.match(r.stderr, /t8other/);
+      assert.match(r.stderr, /Nothing was deployed/, "round 5: definitive, but not 'Nothing was written' (the draft race)");
+      assert.doesNotMatch(r.stdout, /Deployed/);
+      assert.equal(seen.posts.filter((p) => !p.body.dryRun).length, 1, "a 409 is not retried");
+      const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+      assert.equal(j.code, 2);
+      const e = lastError(j);
+      assert.equal(e.code, "target_changed");
+      assert.deepEqual([e.details.expectedTargetInstance, e.details.targetInstance], ["t7draft", "t8other"]);
+      assert.match(e.message, /Nothing was deployed/);
+    });
+    const gone = planningServer({ targetInstance: "t7draft", apply: (res) => json(res, 409, { error: "target_changed", targetInstance: null }) });
+    await withFake({ postResponder: gone }, async (url) => {
+      const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+      const e = lastError(j);
+      assert.equal(e.code, "target_changed");
+      assert.equal(e.details.targetInstance, null);
+      assert.match(e.message, /no draft to reuse|a new draft/);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// cli-fix2 (remediation round 4) — a same-key retry of an apply whose earlier attempt got no certain answer. A
+// fix4 server answers a retry of a committed bound push 200 converged, and the CLI reports that deploy. A refusal on
+// such a retry (e.g. 409 target_changed) says nothing about the earlier attempt, so the CLI must not say "Nothing
+// was written": it says the earlier attempt's outcome is unknown (or committed, when the server said so).
+
+/** Per push (counted from its dry run): the first apply attempt fails with `first`, every later one gets `then`. */
+function retriedApply(first, then) {
+  let applies = 0;
+  const server = planningServer({
+    newDraft: true,
+    targetInstance: null,
+    plan: [["section/Hero", "created"]],
+    apply: (res, body) => ((applies += 1) === 1 ? first(res, body) : then(res, body)),
+  });
+  return (res, n, body) => {
+    if (body.dryRun) applies = 0;
+    return server(res, n, body);
+  };
+}
+const gateway504 = (res) => json(res, 504, { error: "gateway_timeout" }, { "retry-after": "0" });
+const lostAnswer = (res) => res.socket.destroy();
+const committedUnverified = (res) => json(res, 502, { error: "readback_unverified", committed: true, convergence: "converged" }, { "retry-after": "0" });
+const converged = (res) =>
+  json(res, 200, {
+    committed: true, convergence: "converged", deploymentId: 11, sourceRevisionId: 12, eventId: 13, pointerVersion: 1, siteStateVersion: 2,
+    contentHash: "ef".repeat(32), files: outcomes([["section/Hero", "unchanged"]]), readback: { verified: true, files: 1, settings: true }, manifestHash: HASH,
+  });
+const moved = (res) => json(res, 409, { error: "target_changed", targetInstance: "t42" });
+
+test("cli-fix2: a same-key retry of a committed new-draft apply reports the committed deploy", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  try {
+    for (const first of [gateway504, lostAnswer, committedUnverified]) {
+      await withFake({ postResponder: retriedApply(first, converged) }, async (url, seen) => {
+        const r = await runBin(url, ["theme", "push", dir, "--draft"]);
+        assert.equal(r.code, 0, r.stderr);
+        const applies = seen.posts.filter((p) => !p.body.dryRun);
+        assert.equal(applies.length, 2, "the apply is resent once");
+        assert.equal(applies[0].headers["x-idempotency-key"], applies[1].headers["x-idempotency-key"], "under the same key");
+        assert.deepEqual(applies[1].body, applies[0].body, "the identical request, expectedTargetInstance:null included");
+        assert.equal(applies[1].body.expectedTargetInstance, null);
+        assert.match(r.stdout, /Deployed atomically/);
+        assert.match(r.stdout, /already applied by an earlier push with the same idempotency key/);
+        assert.doesNotMatch(r.stderr, /Nothing was written/);
+      });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cli-fix2: a refusal on a retry after an unknown outcome never says 'Nothing was written'", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  const lastError = (r) => JSON.parse(r.stderr.trim().split("\n").pop()).error;
+  try {
+    for (const first of [gateway504, lostAnswer]) {
+      await withFake({ postResponder: retriedApply(first, moved) }, async (url) => {
+        const r = await runBin(url, ["theme", "push", dir, "--draft"]);
+        assert.equal(r.code, 2, r.stderr);
+        assert.match(r.stderr, /target_changed/);
+        assert.doesNotMatch(r.stderr, /Nothing was written/);
+        assert.match(r.stderr, /earlier attempt/);
+        assert.match(r.stderr, /unknown/);
+        assert.match(r.stderr, /theme push --diff/);
+        const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+        const e = lastError(j);
+        assert.equal(e.code, "target_changed");
+        assert.doesNotMatch(e.message, /Nothing was written/);
+        assert.equal(e.details.earlierAttempt, "unknown");
+        assert.equal(e.details.targetInstance, "t42");
+      });
+    }
+    // The server said the earlier attempt committed: the refusal reports that, not "unknown" and not "nothing".
+    await withFake({ postResponder: retriedApply(committedUnverified, moved) }, async (url) => {
+      const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+      const e = lastError(j);
+      assert.equal(e.code, "target_changed");
+      assert.doesNotMatch(e.message, /Nothing was written/);
+      assert.match(e.message, /earlier attempt of this push was committed/);
+      assert.equal(e.details.earlierAttempt, "committed");
+    });
+    // Every apply refusal that says "Nothing was written" follows the same rule on a retry.
+    const refusals = [
+      (res) => json(res, 409, { error: "pointer_version_conflict", currentVersion: 5 }),
+      (res) => json(res, 409, { error: "site_state_version_conflict" }),
+      (res) => json(res, 409, { error: "manifest_mismatch" }),
+      (res) => json(res, 422, { error: "reserved_path", path: "asset/x.css", message: "reserved" }),
+    ];
+    for (const refuse of refusals) {
+      await withFake({ postResponder: retriedApply(gateway504, refuse) }, async (url) => {
+        const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+        const e = lastError(j);
+        assert.equal(j.code, 2);
+        assert.doesNotMatch(e.message, /Nothing was written/, e.code);
+        assert.equal(e.details.earlierAttempt, "unknown", e.code);
+      });
+    }
+    // Without a retry a refusal is still certain: nothing was deployed (target_changed; round 5 wording).
+    await withFake({ postResponder: retriedApply(moved, moved) }, async (url) => {
+      const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+      const e = lastError(j);
+      assert.match(e.message, /Nothing was deployed/);
+      assert.ok(!("earlierAttempt" in e.details));
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// cli-fix3 (round 5) — a 409 target_changed is definitive for THIS request: it is not a replay of a committed push
+// under this key to the CURRENT target, and nothing was deployed (the tpush round-5 contract: a --draft push may have
+// provisioned a new empty draft in one race, kept for reuse — so not "Nothing was written"). An earlier attempt of the
+// same push without an answer was bound to the theme its dry run planned against, so that is the theme to check; the
+// current target (the 409's targetInstance) is where a re-run would write, never where that attempt landed.
+
+/** Like retriedApply, but for a push bound to an existing theme (`targetInstance`), not to a new draft. */
+function retriedBoundApply(targetInstance, first, then) {
+  let applies = 0;
+  const server = planningServer({ targetInstance, apply: (res, body) => ((applies += 1) === 1 ? first(res, body) : then(res, body)) });
+  return (res, n, body) => {
+    if (body.dryRun) applies = 0;
+    return server(res, n, body);
+  };
+}
+
+test("cli-fix3: target_changed says nothing was deployed, and after an unanswered attempt checks the theme that attempt was bound to", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  const lastError = (r) => JSON.parse(r.stderr.trim().split("\n").pop()).error;
+  try {
+    // Bound to the live theme t7live; its first apply got no answer; the live theme was then switched to t42.
+    await withFake({ postResponder: retriedBoundApply("t7live", gateway504, moved) }, async (url) => {
+      const r = await runBin(url, ["theme", "push", dir, "--live", "--yes"]);
+      assert.equal(r.code, 2, r.stderr);
+      assert.match(r.stderr, /t7live/, "the theme the earlier attempt was bound to");
+      assert.match(r.stderr, /t42/, "the current target");
+      assert.match(r.stderr, /theme push --diff --instance t7live/, "the check points at the bound theme");
+      assert.doesNotMatch(r.stderr, /--diff --instance t42/, "the current target is not where the earlier attempt landed");
+      const e = lastError(await runBin(url, ["theme", "push", dir, "--live", "--yes", "--json"]));
+      assert.equal(e.code, "target_changed");
+      assert.deepEqual([e.details.expectedTargetInstance, e.details.targetInstance, e.details.earlierAttempt], ["t7live", "t42", "unknown"]);
+      assert.match(e.message, /--diff --instance t7live/);
+      assert.doesNotMatch(e.message, /--instance t42/);
+    });
+    // Bound to a new draft (expectedTargetInstance null): the draft that attempt may have created is not the 409's
+    // targetInstance either — only `blocofy status` (it lists the drafts) finds it.
+    await withFake({ postResponder: retriedApply(gateway504, moved) }, async (url) => {
+      const e = lastError(await runBin(url, ["theme", "push", dir, "--draft", "--json"]));
+      assert.equal(e.code, "target_changed");
+      assert.match(e.message, /blocofy status/);
+      assert.doesNotMatch(e.message, /--instance t42/);
+    });
+    // Without an earlier attempt: definitive, nothing deployed; a --draft push says what the race may have kept.
+    await withFake({ postResponder: retriedBoundApply("t7live", moved, moved) }, async (url) => {
+      const e = lastError(await runBin(url, ["theme", "push", dir, "--live", "--yes", "--json"]));
+      assert.match(e.message, /Nothing was deployed/);
+      assert.doesNotMatch(e.message, /Nothing was written/);
+      assert.doesNotMatch(e.message, /empty draft/, "a live push provisions no draft");
+    });
+    await withFake({ postResponder: retriedApply(moved, moved) }, async (url) => {
+      const e = lastError(await runBin(url, ["theme", "push", dir, "--draft", "--json"]));
+      assert.match(e.message, /Nothing was deployed/);
+      assert.match(e.message, /empty draft/);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// cli-fix3 (round 5) — an apply's committed readback_unverified: the deploy landed on the theme the dry run bound
+// it to. A plain `--diff` compares with the LIVE theme only, while a push writes to a draft by default, so the advice
+// names the bound theme (or `blocofy status` for a new draft), never a bare `--diff`.
+test("cli-fix3: an apply's readback_unverified points the check at the theme the write was bound to", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  const lastError = (r) => JSON.parse(r.stderr.trim().split("\n").pop()).error;
+  const unverified = (res) => json(res, 502, { error: "readback_unverified", committed: true }, { "retry-after": "0" });
+  try {
+    await withFake({ postResponder: planningServer({ targetInstance: "t7draft", apply: unverified }) }, async (url) => {
+      const e = lastError(await runBin(url, ["theme", "push", dir, "--draft", "--json"]));
+      assert.equal(e.code, "readback_unverified");
+      assert.match(e.message, /the deploy was committed/);
+      assert.match(e.message, /blocofy theme push --diff --instance t7draft/);
+      assert.equal(e.details.expectedTargetInstance, "t7draft");
+    });
+    await withFake({ postResponder: planningServer({ newDraft: true, targetInstance: null, plan: [["section/Hero", "created"]], apply: unverified }) }, async (url) => {
+      const e = lastError(await runBin(url, ["theme", "push", dir, "--draft", "--json"]));
+      assert.match(e.message, /blocofy status/);
+      assert.doesNotMatch(e.message, /theme push --diff`/, "no bare --diff: it compares with the live theme, not the draft");
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// cli-fix3 (round 5, tpush round-5 semantics) — a write whose last answer is transient (a 5xx the platform passes
+// through, a 503 fail-closed, 502 readback_unverified with outcomeUnknown, or no answer at all) has an UNKNOWN
+// outcome: it is retryable under the SAME key (it converges if the write committed). The CLI's keys are per run, so
+// the message names this push's key and how to reuse it; it never says "Nothing was written" or "use a new key".
+test("cli-fix3: an apply that ends without a definite answer is an unknown outcome, retryable with the same key", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  const lastError = (r) => JSON.parse(r.stderr.trim().split("\n").pop()).error;
+  const transient = {
+    "500 internal_error": (res) => json(res, 500, { error: "internal_error" }),
+    "503 control_plane_unavailable": (res) => json(res, 503, { error: "control_plane_unavailable" }, { "retry-after": "0" }),
+    "504 empty body": (res) => { res.writeHead(504, { "retry-after": "0" }); res.end(); },
+    "502 readback_unverified outcomeUnknown": (res) => json(res, 502, { error: "readback_unverified", outcomeUnknown: true }, { "retry-after": "0" }),
+    "no answer": lostAnswer,
+  };
+  try {
+    for (const [label, apply] of Object.entries(transient)) {
+      await withFake({ postResponder: planningServer({ targetInstance: "t7draft", apply }) }, async (url, seen) => {
+        const j = await runBin(url, ["theme", "push", dir, "--draft", "--json", "--idempotency-key", "cli-k-7"]);
+        assert.equal(j.code, 1, `${label}: ${j.stderr}`);
+        const e = lastError(j);
+        assert.match(e.message, /unknown/, label);
+        assert.match(e.message, /--idempotency-key cli-k-7/, `${label}: the retry reuses this push's key`);
+        assert.doesNotMatch(e.message, /Nothing was written|new key/, label);
+        assert.equal(e.details.outcome, "unknown", label);
+        assert.equal(e.details.idempotencyKey, "cli-k-7", label);
+        assert.equal(e.details.phase, "apply", label);
+        const applies = seen.posts.filter((p) => !p.body.dryRun);
+        assert.ok(applies.every((p) => p.headers["x-idempotency-key"] === "cli-k-7"), label);
+      });
+    }
+    // Without --idempotency-key the generated key is the one to reuse (human output).
+    await withFake({ postResponder: planningServer({ targetInstance: "t7draft", apply: transient["500 internal_error"] }) }, async (url, seen) => {
+      const r = await runBin(url, ["theme", "push", dir, "--draft"]);
+      assert.equal(r.code, 1, r.stderr);
+      const key = seen.posts.find((p) => !p.body.dryRun).headers["x-idempotency-key"];
+      assert.match(key, /^cli-/);
+      assert.ok(r.stderr.includes(`--idempotency-key ${key}`), r.stderr);
+    });
+    // A dry run's 5xx is not a write: no unknown-outcome advice.
+    await withFake({ postResponder: planningServer({ dry: transient["500 internal_error"] }) }, async (url) => {
+      const e = lastError(await runBin(url, ["theme", "push", dir, "--draft", "--json"]));
+      assert.doesNotMatch(e.message, /idempotency-key/);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// cli-fix T2 — THEME_PUSH_TARGET_CHANGED advice is truthful. A planned removal the push did not carry is either a
+// file added while the push ran (a re-run reads and keeps it) or a row the push can never carry: one the merge probe
+// returned under a path the push cannot send (outside the merge mirror, e.g. a bare `layout`), or one the probe
+// cannot see at all (it lists published rows only). For the second kind a re-run refuses the same way every time, so
+// the message must not promise that re-running keeps them.
+
+test("cli-fix T2: a planned removal the push cannot carry is not promised back by a re-run", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  try {
+    // The probe returned `layout` (a bare key the push cannot send) — the plan removes it.
+    const seenOutside = {
+      getBody: { files: { "section/Hero": "R", layout: "L" }, protocol: 1 },
+      postResponder: planningServer({ plan: [["section/Hero", "updated"], ["layout", "removed"]] }),
+    };
+    await withFake(seenOutside, async (url, seen) => {
+      await assert.rejects(pushTheme({ dir, url, token: TOKEN, idempotencyKey: "cli-adv-1" }), (e) => {
+        assert.equal(e.code, "THEME_PUSH_TARGET_CHANGED");
+        assert.deepEqual(e.details.paths, ["layout"]);
+        assert.deepEqual(e.details.notCarryable, ["layout"]);
+        assert.doesNotMatch(e.message, /Run the push again to keep them/, "a re-run cannot keep a path the push cannot send");
+        assert.match(e.message, /cannot carry/);
+        assert.match(e.message, /--prune/);
+        assert.match(e.message, /Nothing was written/);
+        return true;
+      });
+      assert.equal(seen.posts.length, 1);
+    });
+    // The probe did not see `section/Hidden` at all (added meanwhile, or a row it cannot list).
+    const unseen = {
+      getBody: { files: { "section/Hero": "R" }, protocol: 1 },
+      postResponder: planningServer({ plan: [["section/Hero", "updated"], ["section/Hidden", "removed"]] }),
+    };
+    await withFake(unseen, async (url) => {
+      await assert.rejects(pushTheme({ dir, url, token: TOKEN, idempotencyKey: "cli-adv-2" }), (e) => {
+        assert.equal(e.code, "THEME_PUSH_TARGET_CHANGED");
+        assert.deepEqual(e.details.paths, ["section/Hidden"]);
+        assert.deepEqual(e.details.notCarryable, []);
+        assert.doesNotMatch(e.message, /Run the push again to keep them/, "no unconditional promise");
+        assert.match(e.message, /added while this push was running/);
+        assert.match(e.message, /stop(s)? the push again/);
+        assert.match(e.message, /--prune/);
+        return true;
+      });
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cli-fix2: a planned removal the push cannot send gets only --prune, seen by the probe or not", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  try {
+    // The probe lists published rows only: an unpublished bare `layout` row is not returned, and the push could not
+    // send that path anyway (the server refuses a single-segment key; a theme with `layout/` cannot hold a file
+    // named `layout`). So "add a local file at that path" cannot work for it; only --prune gets past it.
+    const unseenOutside = {
+      getBody: { files: { "section/Hero": "R" }, protocol: 1 },
+      postResponder: planningServer({ plan: [["section/Hero", "updated"], ["layout", "removed"], ["section/Hidden", "removed"]] }),
+    };
+    await withFake(unseenOutside, async (url) => {
+      await assert.rejects(pushTheme({ dir, url, token: TOKEN, idempotencyKey: "cli-adv-3" }), (e) => {
+        assert.equal(e.code, "THEME_PUSH_TARGET_CHANGED");
+        assert.deepEqual(e.details.paths, ["layout", "section/Hidden"]);
+        assert.deepEqual(e.details.notCarryable, ["layout"]);
+        const [layoutPart] = e.message.split(" section/Hidden: ");
+        assert.match(layoutPart, /layout: .*cannot carry/);
+        assert.doesNotMatch(layoutPart, /add a local file/);
+        assert.match(e.message, /section\/Hidden: not on the target when this push read it/);
+        assert.match(e.message, /add a local file at that path/, "a sendable path can still be replaced by a local file");
+        return true;
+      });
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cli-fix T2: THEME_PUSH_TARGET_CHANGED reaches the terminal as a refusal (human and --json), nothing written", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  const lastError = (r) => JSON.parse(r.stderr.trim().split("\n").pop()).error;
+  try {
+    const opts = { getBody: { files: { "section/Hero": "R" }, protocol: 1 }, postResponder: planningServer({ plan: [["section/Hero", "updated"], ["section/Hidden", "removed"]] }) };
+    await withFake(opts, async (url, seen) => {
+      const r = await runBin(url, ["theme", "push", dir, "--draft"]);
+      assert.equal(r.code, 1, r.stderr);
+      assert.match(r.stderr, /THEME_PUSH_TARGET_CHANGED/);
+      assert.match(r.stderr, /section\/Hidden/);
+      const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+      assert.equal(lastError(j).code, "THEME_PUSH_TARGET_CHANGED");
+      assert.deepEqual(lastError(j).details.paths, ["section/Hidden"]);
+      assert.equal(seen.posts.filter((p) => !p.body.dryRun).length, 0, "only dry runs were sent");
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// cli-fix T3 — the two 6.5 refusals that had no test: site_state_version_conflict and manifest_mismatch, human and
+// --json. Both are 409s from the apply: exit 2, the code named, "Nothing was written", no success line.
+test("cli-fix T3: site_state_version_conflict and manifest_mismatch are explained (human and --json)", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  const lastError = (r) => JSON.parse(r.stderr.trim().split("\n").pop()).error;
+  const cases = [
+    ["site_state_version_conflict", /settings were saved on the site while this push was running/],
+    ["manifest_mismatch", /differ from the files the dry run checked/],
+  ];
+  try {
+    for (const [code, words] of cases) {
+      await withFake({ postResponder: planningServer({ apply: (res) => json(res, 409, { error: code }) }) }, async (url, seen) => {
+        const r = await runBin(url, ["theme", "push", dir, "--draft"]);
+        assert.equal(r.code, 2, `${code}: ${r.stderr}`);
+        assert.match(r.stderr, new RegExp(`\\[${code}\\]`), code);
+        assert.match(r.stderr, words, code);
+        assert.match(r.stderr, /Nothing was written/, code);
+        assert.doesNotMatch(r.stdout, /Deployed/, code);
+        const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+        assert.equal(j.code, 2, code);
+        const e = lastError(j);
+        assert.equal(e.code, code);
+        assert.match(e.message, words, code);
+        assert.match(e.message, /Nothing was written/, code);
+        assert.equal(e.details.status, 409, code);
+        assert.equal(seen.posts.filter((p) => !p.body.dryRun).length, 2, `${code}: one apply per run, a 409 is not retried`);
+      });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// cli-fix T4 — readback_unverified from the DRY RUN is not a write: the plan was rolled back, nothing was written. It
+// is also not transient (the plan read back something other than what it checked), so the plan POST is not resent
+// on that 502 the way a gateway 502 is. An apply's readback_unverified keeps its wording (and its same-key retry,
+// which converges on the committed deploy and reads it back again).
+test("cli-fix T4: a dry run's readback_unverified is reported as a plan (nothing written) and is not retried", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  const lastError = (r) => JSON.parse(r.stderr.trim().split("\n").pop()).error;
+  try {
+    const planUnverified = planningServer({ dry: (res) => json(res, 502, { error: "readback_unverified", committed: false }, { "retry-after": "0" }) });
+    for (const argv of [["theme", "push", dir, "--draft", "--json"], ["theme", "push", dir, "--live", "--dry-run", "--json"]]) {
+      await withFake({ postResponder: planUnverified }, async (url, seen) => {
+        const r = await runBin(url, argv);
+        assert.equal(r.code, 1, r.stderr);
+        assert.equal(seen.posts.length, 1, `${argv.join(" ")}: the plan was resent on its readback_unverified 502`);
+        assert.doesNotMatch(r.stderr, /retry/i, "no retry notice");
+        const e = lastError(r);
+        assert.equal(e.code, "readback_unverified");
+        assert.doesNotMatch(e.message, /files it wrote/, "a plan writes nothing");
+        assert.match(e.message, /dry run/);
+        assert.match(e.message, /Nothing was written/);
+        assert.equal(e.details.phase, "plan");
+        assert.equal(e.details.committed, false);
+      });
+    }
+    // A gateway 502 on the plan (no readback_unverified body) is still transient: retried.
+    let n = 0;
+    const flaky = planningServer({ dry: (res, body) => (n++ === 0 ? json(res, 502, { error: "bad_gateway" }, { "retry-after": "0" }) : planningServer()(res, 1, body)) });
+    await withFake({ postResponder: flaky }, async (url, seen) => {
+      const r = await runBin(url, ["theme", "push", dir, "--draft"]);
+      assert.equal(r.code, 0, r.stderr);
+      assert.equal(seen.posts.filter((p) => p.body.dryRun).length, 2, "a plain 502 on the plan is retried");
+    });
+    // The apply's readback_unverified keeps the write wording.
+    const applyUnverified = planningServer({ apply: (res) => json(res, 502, { error: "readback_unverified", committed: true }, { "retry-after": "0" }) });
+    await withFake({ postResponder: applyUnverified }, async (url) => {
+      const e = lastError(await runBin(url, ["theme", "push", dir, "--draft", "--json"]));
+      assert.match(e.message, /could not read back the files it wrote \(the deploy was committed\)/);
+      assert.equal(e.details.phase, "apply");
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });

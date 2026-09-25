@@ -107,11 +107,33 @@ the admin panel, never touching the live site. Publish it with `blocofy theme pu
 
 Every push first runs that dry run, then writes the same files. On a current platform the write is
 bound to the dry run: it is refused, with nothing written, if the files differ from what was checked
-(`manifest_mismatch`) or the target theme was deployed again in between (`pointer_version_conflict`).
-If the dry run finds a file on the target that the push would remove although it was not there when
-the push read the target, the push stops (`THEME_PUSH_TARGET_CHANGED`); run it again, or add
-`--prune`. `Deployed atomically` is printed only when the server read the written files back and
-they match; an older platform that does not read back gets `Deployed: … not verified`.
+(`manifest_mismatch`), the target theme was deployed again in between (`pointer_version_conflict`),
+or the push would now write to another theme than the one its dry run planned against — the live
+theme was switched, or the draft to reuse changed (`target_changed`: nothing was deployed, though a
+draft push may have created a new, empty draft that the next push reuses; run the push again).
+A write that gets no answer (network error, 429/502/503/504) is resent (up to 3 times) under the same
+key; a push the platform already committed is then reported as deployed (`already applied by an
+earlier push with the same idempotency key`). If that resend is refused, the refusal cannot say
+what the earlier attempt did: the message says whether it was committed or its outcome is
+unknown (`details.earlierAttempt`), never "Nothing was written". Check the theme the dry run bound
+the write to (`details.expectedTargetInstance`, not the current target a refusal names) with
+`blocofy theme push --diff --instance <handle>` — or, for a new draft, find it with `blocofy status` —
+before running the push again. A write whose last answer is still not definite (HTTP 500 or another
+5xx, a 503, a 502 `readback_unverified` with `outcomeUnknown`, or no answer) has an unknown outcome
+(`details.outcome: "unknown"`): the message names the push's key (`details.idempotencyKey`); run the
+same command again with `--idempotency-key <that key>`, and a push that was deployed is reported as
+deployed instead of being written again.
+If the dry run would remove a file the push did not carry, the push stops
+(`THEME_PUSH_TARGET_CHANGED`). The message says which case each file is:
+- a path the push cannot send (not a file inside a theme folder, e.g. a bare `layout` row; listed in
+  `details.notCarryable`) stops every run the same way, and only `--prune` gets past it (it removes
+  the file);
+- any other file was either added while the push was running, and running the push again keeps it,
+  or the push cannot read it (for example a theme file that is not published): then it stops every
+  run the same way, and you add `--prune` to remove it or add a local file at that path to replace it.
+
+`Deployed atomically` is printed only when the server read the written files back and they match;
+an older platform that does not read back gets `Deployed: … not verified`.
 
 ```
 blocofy theme rename <handle> <new name> [--dir <dir>]
@@ -384,8 +406,9 @@ line; the target block (`{"target":…}`) and any warning lines are printed on s
 
 Retries: network errors and HTTP 429/502/503/504 are retried up to 3 times (`Retry-After`
 honoured, max 30s per wait; else 0.3s/0.9s/2s), resending the identical request (`pages push`
-carries one `x-idempotency-key` per push). HTTP 500 is never retried. Each retry prints a notice
-on stderr.
+carries one `x-idempotency-key` per push). HTTP 500 is never retried, nor is a `theme push` dry
+run answered 502 `readback_unverified` (a verdict on a rolled-back plan, not a transient failure).
+Each retry prints a notice on stderr.
 
 ## Changelog
 
@@ -408,7 +431,9 @@ on stderr.
   - `theme publish [dir]` and `status [dir]` take the project directory as an argument, and
     `theme rename` / `pages media-uses|media-decide` take `--dir <dir>`. Before, they always used
     cwd, so `theme push ./a && theme publish` run from another project published that project's
-    draft.
+    draft. A directory that does not exist, or one given where the command takes none (a second
+    positional to `target`/`status`/`theme publish`, any directory positional to
+    `pages media-uses|media-decide`), is a usage error (exit 1) before any request.
   - A secret of the wrong type (a `blcf_live_…` key as the dev token, a `bcf_…` token as the API
     key) is refused before any request with `TARGET_CREDENTIAL_WRONG_TYPE`, naming the variable
     or context — it was sent to the wrong endpoint and reported as `TARGET_UNVERIFIED`.
@@ -416,14 +441,22 @@ on stderr.
   - Theme push preflight bound to the write (customer item 6.5):
     - `theme push` checks the MERGED payload (local files plus the remote-only files it keeps) in its
       dry run, then writes exactly those files with the dry run's `manifestHash` and
-      `expectedPointerVersion`. The dry run carries its own throwaway idempotency key, so
+      `expectedPointerVersion`, and — when the platform names it — the theme the dry run planned
+      against (`expectedTargetInstance`; refused with `target_changed` if the target moved). The dry
+      run carries its own throwaway idempotency key, so
       `--idempotency-key` retries of a committed push still converge.
+    - A write resent after an attempt without an answer is reported as deployed when the platform
+      had committed it. A refusal of such a resend says the earlier attempt's outcome is unknown (or
+      that it was committed) instead of "Nothing was written", and `details.earlierAttempt` names it.
     - Per-file outcomes are printed for the push and for `--dry-run`. `Deployed atomically` appears only
       with a verified readback. New refusals with messages: `pointer_version_conflict`,
-      `site_state_version_conflict`, `manifest_mismatch`, `readback_unverified` and the preflight path
+      `site_state_version_conflict`, `manifest_mismatch`, `readback_unverified` (worded for the dry
+      run, where nothing was written, or for the write; `details.phase` says which) and the preflight path
       errors (`path_too_long`, `reserved_path`, `binary_content_rejected`…, naming the file).
-    - A push stops with `THEME_PUSH_TARGET_CHANGED` when the dry run would remove a file the push never
-      saw; `--prune` lists it for confirmation instead. `--dry-run --prune` now plans the pruned set.
+    - A push stops with `THEME_PUSH_TARGET_CHANGED` when the dry run would remove a file the push did
+      not carry; the message says whether a re-run can keep it or only `--prune` gets past it, and
+      `details.notCarryable` lists the paths the push cannot send. `--prune` lists them for
+      confirmation instead. `--dry-run --prune` now plans the pruned set.
     - Against an older platform the write body is unchanged from 0.10.
 - **0.10.0** — Named contexts + verified project binding, and a declarative whole-site state.
   - `login` now saves a **named context** (`--context <name>`, default the site's slug) instead

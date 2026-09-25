@@ -741,7 +741,7 @@ async function linkCommand(rest) {
 
 async function targetCommand(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, []);
-  const dir = resolve(positionals[0] ?? process.cwd());
+  const dir = singleDirArg(positionals, "blocofy target [dir]");
   const t = await prepareTarget({ command: "target", commandClass: "read", dir, flags, needs: "any", mode: "read", record: false, quiet: true, allowCurrentContext: true });
   if (JSON_MODE) console.log(JSON.stringify({ target: t.display }, null, 2));
   else printTarget(t.display, { stream: process.stdout });
@@ -1050,7 +1050,7 @@ async function themePush(rest) {
       }
       failAndExit({ code: "idempotency_conflict", status: error.status, message: "The idempotency key was already used with different content. Retry with a new key (or omit --idempotency-key).", details: {} });
     }
-    const refusal = themePushRefusal(error);
+    const refusal = themePushRefusal(error, { draft: mode === "draft", idempotencyKey });
     if (refusal) failAndExit({ code: error.code, status: error.status, ...refusal });
     throw error;
   }
@@ -1135,28 +1135,85 @@ function printThemeOutcomes(files) {
   console.log(`Files: ${count.created} created, ${count.updated} updated, ${count.removed} removed, ${count.unchanged} unchanged.`);
 }
 
-/** TPUSH-5 — the 6.5 theme push refusals, in words. `null` = not one of them. */
-function themePushRefusal(error) {
+/**
+ * TPUSH-5 — the 6.5 theme push refusals, in words. `null` = not one of them. A refusal writes nothing, but when the
+ * apply was resent after an attempt without a certain answer (`error.earlierAttempt`), that earlier attempt may have
+ * written: then the message says so instead of "Nothing was written", and `details.earlierAttempt` names it.
+ */
+function themePushRefusal(error, { draft = false, idempotencyKey = null } = {}) {
   const body = error?.body ?? {};
+  const earlier = error?.phase === "apply" && (error.earlierAttempt === "unknown" || error.earlierAttempt === "committed") ? error.earlierAttempt : null;
+  // Where an earlier attempt of this push could have written: the theme its dry run bound it to (every attempt is the
+  // same request), never the current target a refusal may name. A new-draft binding (null) is found via the drafts.
+  const bound = error?.expectedTargetInstance;
+  const check =
+    typeof bound === "string"
+      ? `\`blocofy theme push --diff --instance ${bound}\``
+      : bound === null
+        ? "`blocofy status` (it lists the drafts; one this push created would be there) and `blocofy theme push --diff --instance <handle>`"
+        : "`blocofy status` and `blocofy theme push --diff --instance <handle>`";
+  const target = typeof bound === "string" ? `theme ${bound}` : "the target";
+  // `wrote`/`none`: what this refusal certainly did not do ("deployed" for target_changed, see below).
+  const nothing = (next, { wrote = "wrote", none = "Nothing was written." } = {}) =>
+    earlier === "committed"
+      ? `This attempt ${wrote} nothing, but an earlier attempt of this push was committed (its answer said so). Check ${target} with ${check} before running the push again.`
+      : earlier === "unknown"
+        ? `This attempt ${wrote} nothing, but an earlier attempt of this push got no answer, so whether it wrote is unknown. Check ${target} with ${check} before running the push again.`
+        : `${none} ${next}`;
+  const withEarlier = (details) => (earlier ? { ...details, earlierAttempt: earlier } : details);
+  // tpush round 5: a write whose last answer is transient (a passed-through 5xx, a 503 fail-closed, 502
+  // readback_unverified with outcomeUnknown, or no answer) has an unknown outcome. It is retryable under the SAME key:
+  // the platform then reports the committed deploy instead of writing it again. Keys are per run, so name this one.
+  const unknownOutcome = (what) => ({
+    ...(error?.code ? {} : { code: error?.status ? `HTTP_${error.status}` : "NETWORK_ERROR" }),
+    message:
+      `${what}, so whether this push was deployed${typeof bound === "string" ? ` to theme ${bound}` : ""} is unknown` +
+      `${earlier === "committed" ? " (an earlier attempt's answer said it was committed)" : ""}. ` +
+      `Run the same command again with \`--idempotency-key ${idempotencyKey ?? "<the same key>"}\`: if this push was deployed, the server reports that deploy instead of writing it again.`,
+    details: withEarlier({ phase: "apply", outcome: "unknown", idempotencyKey, ...(error?.status ? { status: error.status } : {}), ...(bound !== undefined ? { expectedTargetInstance: bound } : {}) }),
+  });
   switch (error?.code) {
     case "pointer_version_conflict":
       return {
-        message: `The target theme was deployed again after this push checked it (now at pointer ${body.currentVersion == null ? "none" : `v${body.currentVersion}`}). Nothing was written. Run the push again.`,
-        details: { currentVersion: body.currentVersion ?? null },
+        message: `The target theme was deployed again after this push checked it (now at pointer ${body.currentVersion == null ? "none" : `v${body.currentVersion}`}). ${nothing("Run the push again.")}`,
+        details: withEarlier({ currentVersion: body.currentVersion ?? null }),
       };
     case "site_state_version_conflict":
-      return { message: "The theme's settings were saved on the site while this push was running. Nothing was written. Run the push again.", details: {} };
+      return { message: `The theme's settings were saved on the site while this push was running. ${nothing("Run the push again.")}`, details: withEarlier({}) };
     case "manifest_mismatch":
-      return { message: "The files sent for writing differ from the files the dry run checked. Nothing was written. Run the push again.", details: {} };
-    case "readback_unverified":
+      return { message: `The files sent for writing differ from the files the dry run checked. ${nothing("Run the push again.")}`, details: withEarlier({}) };
+    case "target_changed": {
+      const was = error.expectedTargetInstance === undefined ? "the theme its dry run planned against" : error.expectedTargetInstance === null ? "a new draft (its dry run planned one)" : `theme ${error.expectedTargetInstance}`;
+      const now = typeof body.targetInstance === "string" ? `theme ${body.targetInstance}` : "a new draft (there is no draft to reuse any more)";
+      // Definitive, but "nothing written" is not true of it: a draft push that lost the read/provision race may have
+      // provisioned a new empty draft first (kept; the next draft push reuses it). No theme file was deployed.
+      const none = `Nothing was deployed${draft ? " (at most a new, empty draft was created, which the next push reuses)" : ""}.`;
       return {
-        message: `The server could not read back the files it wrote${body.committed === true ? " (the deploy was committed)" : body.committed === false ? " (nothing was committed)" : ""}. Compare with \`blocofy theme push --diff\`.`,
-        details: { committed: typeof body.committed === "boolean" ? body.committed : null },
+        message: `The push's target changed after its dry run: it planned against ${was}, but it would now write to ${now} (the live theme was switched, or the draft to reuse changed). ${nothing("Run the push again to plan against the current target.", { wrote: "deployed", none })}`,
+        details: withEarlier({ expectedTargetInstance: error.expectedTargetInstance ?? null, targetInstance: typeof body.targetInstance === "string" ? body.targetInstance : null }),
       };
+    }
+    case "readback_unverified":
+      // The dry run's plan is rolled back on the server: nothing was written, whatever `committed` says.
+      if (error.phase === "plan") {
+        return {
+          message: "The server could not verify the plan of this push's dry run (a plan is rolled back). Nothing was written. Run the push again.",
+          details: { phase: "plan", committed: false },
+        };
+      }
+      if (body.outcomeUnknown === true) return unknownOutcome("The server could not read the control plane's answer to the write");
+      // The write went to the theme the dry run bound it to; a plain --diff compares with the live theme only.
+      return {
+        message: `The server could not read back the files it wrote${body.committed === true ? " (the deploy was committed)" : body.committed === false ? " (nothing was committed)" : ""}. Check ${target} with ${check}.`,
+        details: { phase: "apply", committed: typeof body.committed === "boolean" ? body.committed : null, ...(bound !== undefined ? { expectedTargetInstance: bound } : {}) },
+      };
+  }
+  if (error?.phase === "apply" && (error.status == null || error.status >= 500)) {
+    return unknownOutcome(error.status == null ? "The write got no answer" : `The write got no definite answer (HTTP ${error.status}${error.code ? ` ${error.code}` : ""})`);
   }
   // The 6.5 preflight names the file it refused (reserved_path, path_too_long, invalid_json…).
   if (error?.status === 422 && typeof body.path === "string") {
-    return { message: `${body.path}: ${typeof body.message === "string" ? body.message : error.code}. Nothing was written.`, details: { path: body.path } };
+    return { message: `${body.path}: ${typeof body.message === "string" ? body.message : error.code}. ${nothing("").trim()}`, details: withEarlier({ path: body.path }) };
   }
   return null;
 }
@@ -1776,10 +1833,13 @@ function printMediaUsesView(view) {
 async function pagesMediaUses(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, KNOWN.pages);
   const page = positionals[0];
+  const usage = "blocofy pages media-uses <page-handle> [--dir <dir>] [--json]";
   if (!page) {
-    console.error("Usage: blocofy pages media-uses <page-handle> [--json]");
+    console.error(`Usage: ${usage}`);
     process.exit(1);
   }
+  // 1.8: the project directory is `--dir`; a directory given as a positional is refused, never dropped for cwd's.
+  if (positionals.length > 1) throw new TargetError("USAGE", `Usage: ${usage}`, {}, 1);
   const { apiUrl, apiKey } = (await prepareTarget({ command: "pages media-uses", commandClass: "read", dir: commandDir(flags.dir), flags, needs: "api", mode: `read · page ${page}` })).api;
   const view = await fetchPageMediaUses({ apiUrl, apiKey, page, onRetry });
   if (flags.json) console.log(JSON.stringify(view, null, 2));
@@ -1801,10 +1861,12 @@ async function pagesMediaDecide(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, KNOWN.pages);
   const page = positionals[0];
   const file = typeof flags.decisions === "string" ? resolve(flags.decisions) : null;
+  const usage = "blocofy pages media-decide <page-handle> --decisions <file.json> [--expected-revision-id <n> --expected-version <n>] [--dir <dir>] [--json]";
   if (!page || !file) {
-    console.error("Usage: blocofy pages media-decide <page-handle> --decisions <file.json> [--expected-revision-id <n> --expected-version <n>] [--json]");
+    console.error(`Usage: ${usage}`);
     process.exit(1);
   }
+  if (positionals.length > 1) throw new TargetError("USAGE", `Usage: ${usage}`, {}, 1);
   let parsed;
   try {
     parsed = JSON.parse(readFileSync(file, "utf8"));
