@@ -81,6 +81,11 @@ function fakeSite(key, { id, slug, name }) {
       return json(res, 200, { site: { slug }, url: `https://${slug}.myblocofy.test`, live_theme_instance: { id: `t${key}live`, name: "Live", template_count: 2 }, pages_on_live: 1, drafts: [{ id: `t${key}draft`, name: "CLI Draft", source: "import" }], health: "ok" });
     }
     if (url.pathname === "/api/dev/publish") return json(res, 200, { ok: true, published: `t${key}draft`, cloned: false });
+    if (url.pathname === "/api/dev/theme/rename" && req.method === "POST") {
+      const body = JSON.parse(raw || "{}");
+      if (body.instance !== `t${key}live` && body.instance !== `t${key}draft`) return json(res, 404, { error: "not_found" });
+      return json(res, 200, { id: body.instance, name: body.name });
+    }
     if (url.pathname === "/api/dev/content" && req.method === "GET") {
       const scope = url.searchParams.get("scope");
       if (scope === "settings") return json(res, 200, { files: { "config/settings.json": `{"site":"${key}"}` } });
@@ -281,6 +286,8 @@ test("[1] two customer contexts: both listed without secrets; each project's tar
   const tB = await run(home, ["target", projB, "--json"]);
   assert.equal(tA.code, 0, tA.stderr);
   assert.deepEqual([JSON.parse(tA.stdout).target.site.id, JSON.parse(tA.stdout).target.context], ["sA1", "alpha"]);
+  const jA = JSON.parse(tA.stdout).target;
+  assert.deepEqual([jA.context_source, jA.context_overrides, jA.platform_origin, jA.command, jA.mode], [".blocofy/local.json", [], ORIGIN, "target", "read"]);
   assert.deepEqual([JSON.parse(tB.stdout).target.site.id, JSON.parse(tB.stdout).target.context], ["sB2", "beta"]);
   assert.equal(A.state.mutations + B.state.mutations, 0, "`target` is read-only");
 });
@@ -290,7 +297,8 @@ test("[2] two project dirs: a push from each dir reaches only its own site", asy
   const rA = await run(home, ["theme", "push", projA]);
   assert.equal(rA.code, 0, rA.stderr);
   assert.match(rA.stderr, /Target:\s+Alpha Bakery · sA1 · alpha\.myblocofy\.test/);
-  assert.match(rA.stderr, /Context:\s+alpha/);
+  assert.match(rA.stderr, /Platform:\s+https:\/\/app\.blocofy\.test/);
+  assert.match(rA.stderr, /Context:\s+alpha \(from \.blocofy\/local\.json\)/);
   assert.match(rA.stderr, /Binding:\s+.*\.blocofy\/project\.json/);
   assert.match(rA.stderr, /Operation: theme push · draft/);
   assert.ok(A.state.mutations > 0);
@@ -354,9 +362,9 @@ test("[6] project A dir + context beta push/publish/rename/media-decide → refu
     const r = await run(home, [...args, "--context", "beta", "--json"], { cwd: projA });
     assertRefused(r, "TARGET_SITE_MISMATCH", { hashes: [[projA, before]] });
   }
-  // BLOCOFY_CONTEXT is the same explicit choice.
+  // 1.8: BLOCOFY_CONTEXT=beta against the project's own local.json (alpha) is a conflict — refused before any request.
   resetSites();
-  assertRefused(await run(home, ["theme", "push", projA, "--json"], { env: { BLOCOFY_CONTEXT: "beta" } }), "TARGET_SITE_MISMATCH", { hashes: [[projA, before]] });
+  assertRefused(await run(home, ["theme", "push", projA, "--json"], { env: { BLOCOFY_CONTEXT: "beta" } }), "TARGET_CONTEXT_CONFLICT", { hashes: [[projA, before]] });
 });
 
 test("[7] dev token A + API key B in one context → TARGET_CREDENTIAL_MISMATCH at login --api-key and (hand-edited file) at command time", async () => {
@@ -664,11 +672,20 @@ test("[21] review I3: `pages migrate-layout --write` outside a binding never use
   assert.equal(B.state.requests.length, 0);
 });
 
-test("[22] review I4a: project bound to A + env credentials for B → every command refused (exit 3) by the binding-vs-remote check, zero mutations, no writes", async () => {
+test("[22] review I4a: project bound to A + env credentials for B → every command refused (exit 3), zero mutations, no writes", async () => {
   const { home, projA } = await world();
   const env = { BLOCOFY_URL: B.url, BLOCOFY_TOKEN: SECRETS.B.token };
+  const commands = [["theme", "push", projA], ["pages", "push", projA], ["theme", "pull", projA], ["theme", "dev", projA, "--dry"], ["status"], ["target", projA]];
+  // 1.8: with the project's own local.json (alpha) present, the env pair is a CONFLICTING choice — refused before any request.
+  const withLocal = treeHash(projA);
+  for (const args of commands) {
+    resetSites();
+    assertRefused(await run(home, [...args, "--json"], { env, cwd: projA }), "TARGET_CONTEXT_CONFLICT", { hashes: [[projA, withLocal]] });
+  }
+  // CI shape (committed project.json, no local.json): the env pair is the only choice and the binding-vs-remote check refuses it.
+  rmSync(join(projA, ".blocofy", "local.json"));
   const before = treeHash(projA);
-  for (const args of [["theme", "push", projA], ["pages", "push", projA], ["theme", "pull", projA], ["theme", "dev", projA, "--dry"], ["status"], ["target", projA]]) {
+  for (const args of commands) {
     resetSites();
     const r = await run(home, [...args, "--json"], { env, cwd: projA });
     assert.equal(r.code, 3, `${args.join(" ")}: ${r.stderr}`);
@@ -697,11 +714,13 @@ test("[23] review I4b: a context recorded for A whose token now resolves to B �
   }
 });
 
-test("[24] review I4c: `status` and `target` refuse a mismatch end-to-end inside a bound project (context for B via BLOCOFY_CONTEXT)", async () => {
+test("[24] review I4c: `status` and `target` refuse a mismatch end-to-end inside a bound project (context for B via --context; BLOCOFY_CONTEXT=beta vs local.json alpha is a conflict)", async () => {
   const { home, projA } = await world();
   for (const args of [["status"], ["target"]]) {
     resetSites();
-    const r = await run(home, [...args, "--json"], { cwd: projA, env: { BLOCOFY_CONTEXT: "beta" } });
+    assertRefused(await run(home, [...args, "--json"], { cwd: projA, env: { BLOCOFY_CONTEXT: "beta" } }), "TARGET_CONTEXT_CONFLICT");
+    resetSites();
+    const r = await run(home, [...args, "--context", "beta", "--json"], { cwd: projA });
     assert.equal(r.code, 3, r.stderr);
     assert.equal(jsonError(r).code, "TARGET_SITE_MISMATCH");
     assert.equal(count(B, "GET", "/api/dev/site"), 0, "status must not read the other site");
@@ -762,6 +781,232 @@ test("[28] review M4: two pulls into the same empty dir for different sites — 
   assert.equal(JSON.parse(readFileSync(join(fresh, ".blocofy", "project.json"), "utf8")).site_id, "sA1");
   assert.equal(readFileSync(join(fresh, "layout", "theme.liquid"), "utf8"), "<html>A</html>");
   assert.equal(count(B, "GET", "/api/dev/theme"), 0, "the refused pull fetched nothing");
+});
+
+test("[29] 1.8 argument dir ≠ cwd: `theme publish <dir>`, `status <dir>`, `theme rename … --dir`, `pages media-uses|media-decide … --dir` resolve the ARGUMENT's binding, never cwd's", async () => {
+  const { home, projA, projB } = await world();
+  const beforeB = treeHash(projB);
+  const decisions = join(tmp("bcf-mx-dec-"), "d.json");
+  writeFileSync(decisions, JSON.stringify({ decisions: [{ path: "p", facet: "target", decision: "inherit" }] }));
+  const cases = [
+    [["theme", "publish", projA], "POST", "/api/dev/publish"],
+    [["theme", "publish", projA, "--instance", "tAdraft"], "POST", "/api/dev/publish"],
+    [["theme", "rename", "tAlive", "New", "name", "--dir", projA], "POST", "/api/dev/theme/rename"],
+    [["status", projA], "GET", "/api/dev/site"],
+    [["pages", "media-uses", "pgA", "--dir", projA], "GET", "/api/v1/pages/pgA/media-uses"],
+    [["pages", "media-decide", "pgA", "--decisions", decisions, "--dir", projA], "POST", "/api/v1/pages/pgA/media-uses"],
+  ];
+  for (const [args, method, path] of cases) {
+    resetSites();
+    const r = await run(home, [...args, "--json"], { cwd: projB });
+    assert.equal(r.code, 0, `${args.join(" ")}: ${r.stderr}`);
+    assert.equal(B.state.requests.length, 0, `${args.join(" ")}: cwd's site B was contacted`);
+    assert.ok(count(A, method, path) >= 1, `${args.join(" ")}: A's ${method} ${path} not called`);
+    const target = JSON.parse(r.stderr.split("\n").find((l) => l.startsWith('{"target"'))).target;
+    assert.equal(target.site.id, "sA1", args.join(" "));
+    assert.equal(target.context, "alpha", args.join(" "));
+    assert.ok(target.binding.endsWith(join(projA.split("/").pop(), ".blocofy", "project.json")), `${args.join(" ")}: binding ${target.binding}`);
+    assert.equal(treeHash(projB), beforeB);
+    noSecrets(r);
+  }
+  // A missing argument dir is a usage error before any request; so is a second positional for publish/status.
+  for (const args of [["theme", "publish", join(projA, "nope")], ["status", join(projA, "nope")], ["theme", "rename", "tAlive", "New", "--dir", join(projA, "nope")], ["pages", "media-uses", "pgA", "--dir", join(projA, "nope")], ["theme", "publish", projA, projB], ["status", projA, projB]]) {
+    resetSites();
+    const r = await run(home, [...args, "--json"], { cwd: projB });
+    assert.equal(r.code, 1, `${args.join(" ")}: ${r.stderr}`);
+    assert.equal(A.state.requests.length + B.state.requests.length, 0, args.join(" "));
+  }
+  // Without an argument the default is still cwd (bound to B).
+  resetSites();
+  const here = await run(home, ["theme", "publish"], { cwd: projB });
+  assert.equal(here.code, 0, here.stderr);
+  assert.equal(A.state.requests.length, 0);
+  assert.equal(count(B, "POST", "/api/dev/publish"), 1);
+});
+
+test("[30] 1.8 wrong credential type: a v1 key (blcf_) where the dev token (bcf_) belongs, or the reverse — env or stored — is refused before any request, and the two are never merged", async () => {
+  const { home, projA } = await world();
+  const loose = tmp("bcf-mx-wrongtype-");
+  rmSync(join(projA, ".blocofy", "local.json")); // CI shape: committed project.json only
+  const before = treeHash(projA);
+  const cases = [
+    // [args, env, cwd, names the variable/pair]
+    [["target", loose], { BLOCOFY_URL: A.url, BLOCOFY_TOKEN: SECRETS.A.apiKey }, loose, /BLOCOFY_TOKEN[\s\S]*blcf_[\s\S]*BLOCOFY_API_KEY/],
+    [["theme", "pull", join(loose, "new")], { BLOCOFY_URL: A.url, BLOCOFY_TOKEN: SECRETS.A.apiKey }, loose, /BLOCOFY_TOKEN/],
+    [["pages", "media-uses", "pgA"], { BLOCOFY_API_URL: A.url, BLOCOFY_API_KEY: SECRETS.A.token }, loose, /BLOCOFY_API_KEY[\s\S]*bcf_[\s\S]*blcf_live_/],
+    [["theme", "push", projA], { BLOCOFY_URL: A.url, BLOCOFY_TOKEN: SECRETS.A.token, BLOCOFY_API_URL: A.url, BLOCOFY_API_KEY: SECRETS.A.token }, projA, /BLOCOFY_API_KEY/],
+    [["site", "plan", projA], { BLOCOFY_URL: A.url, BLOCOFY_TOKEN: SECRETS.A.apiKey, BLOCOFY_API_URL: A.url, BLOCOFY_API_KEY: SECRETS.A.apiKey }, projA, /BLOCOFY_TOKEN/],
+  ];
+  for (const [args, env, cwd, pattern] of cases) {
+    resetSites();
+    const r = await run(home, [...args, "--json"], { env, cwd });
+    assert.equal(r.code, 1, `${args.join(" ")}: ${r.stderr}`);
+    const err = jsonError(r);
+    assert.equal(err.code, "TARGET_CREDENTIAL_WRONG_TYPE", args.join(" "));
+    assert.match(err.message, pattern, args.join(" "));
+    assert.match(err.message, /separate/);
+    assert.deepEqual([...A.state.requests, ...B.state.requests], [], `${args.join(" ")}: a request was sent with the wrong credential type`);
+    assert.equal(treeHash(projA), before);
+    assert.deepEqual(readdirSync(loose), []);
+    noSecrets(r);
+  }
+  // Login keeps them apart too: a v1 key given as --token is pointed at `login --api-key`, nothing sent or saved.
+  resetSites();
+  const homeHash = treeHash(join(home, ".blocofy"));
+  const login = await run(home, ["login", "--url", A.url, "--token", SECRETS.A.apiKey, "--context", "x"]);
+  assert.equal(login.code, 1, login.stderr);
+  assert.match(login.stderr, /login --api-key/);
+  assert.deepEqual([...A.state.requests, ...B.state.requests], []);
+  assert.equal(treeHash(join(home, ".blocofy")), homeHash);
+  noSecrets(login);
+  // A hand-edited store: context alpha's dev secret is now alpha's v1 key.
+  const secPath = join(home, ".blocofy", "secrets.json");
+  const sec = JSON.parse(readFileSync(secPath, "utf8"));
+  sec.alpha.dev_token = SECRETS.A.apiKey;
+  writeFileSync(secPath, JSON.stringify(sec));
+  for (const args of [["status", projA], ["theme", "push", projA], ["pages", "media-uses", "pgA", "--dir", projA]]) {
+    resetSites();
+    const r = await run(home, [...args, "--context", "alpha", "--json"], { cwd: loose });
+    assert.equal(r.code, 1, `${args.join(" ")}: ${r.stderr}`);
+    const err = jsonError(r);
+    assert.equal(err.code, "TARGET_CREDENTIAL_WRONG_TYPE", args.join(" "));
+    assert.match(err.message, /context "alpha"/);
+    assert.match(err.message, /blocofy login --context alpha/);
+    assert.deepEqual([...A.state.requests, ...B.state.requests], [], args.join(" "));
+    noSecrets(r);
+  }
+});
+
+// ── [31] 1.8 closure: the COMPLETE remote command matrix × every case ─────────────────────────────────────────
+//
+// Owner: CLI/platform security. Threshold: zero silent fallback and zero cross-target read/write. Every remote
+// command (class: m = remote-mutation, w = local-write, r = read, o = offline-capable read that opts into the `use`
+// default) is run in each cell; the oracle is the exit/error code, which site was contacted, the target block's
+// site + context source, byte-identical trees for refusals, and no secret in any output (scenario 18).
+
+function matrixCommands(dir, decisions) {
+  return [
+    ["target", ["target", dir], "o"],
+    ["status", ["status", dir], "o"],
+    ["pages check", ["pages", "check", dir], "o"],
+    ["pages migrate-layout", ["pages", "migrate-layout", dir], "r?"],
+    ["theme dev --no-sync", ["theme", "dev", dir, "--no-sync", "--dry"], "r"],
+    ["theme dev", ["theme", "dev", dir, "--dry"], "m"],
+    ["theme pull", ["theme", "pull", dir], "w"],
+    ["theme pull --draft", ["theme", "pull", dir, "--draft"], "m"],
+    ["theme push", ["theme", "push", dir], "m"],
+    ["theme push --diff", ["theme", "push", dir, "--diff"], "r"],
+    ["theme push --dry-run", ["theme", "push", dir, "--dry-run"], "r"],
+    ["theme publish", ["theme", "publish", dir], "m"],
+    ["theme rename", ["theme", "rename", "tAlive", "New", "--dir", dir], "m"],
+    ["pages pull", ["pages", "pull", dir], "w"],
+    ["pages push", ["pages", "push", dir], "m"],
+    ["pages push --dry-run", ["pages", "push", dir, "--dry-run"], "r"],
+    ["pages media-uses", ["pages", "media-uses", "pgA", "--dir", dir], "r"],
+    ["pages media-decide", ["pages", "media-decide", "pgA", "--decisions", decisions, "--dir", dir], "m"],
+    ["settings pull", ["settings", "pull", dir], "w"],
+    ["settings push", ["settings", "push", dir, "--live", "--yes"], "m"],
+    ["site export", ["site", "export", dir], "w"],
+    ["site plan", ["site", "plan", dir], "r"],
+    ["site apply", ["site", "apply", dir], "m"],
+    ["site publish", ["site", "publish", dir, "--yes"], "m"],
+  ];
+}
+
+/** The target block of a run (stderr JSON line, or `blocofy target --json`'s stdout). */
+function targetOf(r, name) {
+  const line = r.stderr.split("\n").find((l) => l.startsWith('{"target"'));
+  if (line) return JSON.parse(line).target;
+  if (name === "target") return JSON.parse(r.stdout).target;
+  assert.fail(`${name}: no target block\n${r.stderr}`);
+}
+
+test("[31] 1.8 closure matrix: every remote command × {conflicting authorities, explicit other site, argument dir from another project while `use` points elsewhere, CI env pair, wrong credential type, unbound dir across two terminals}", async () => {
+  const { home, projA, projB } = await world();
+  const decisions = join(tmp("bcf-mx-dec-"), "d.json");
+  writeFileSync(decisions, JSON.stringify({ decisions: [{ path: "p", facet: "target", decision: "inherit" }] }));
+  const envB = { BLOCOFY_URL: B.url, BLOCOFY_TOKEN: SECRETS.B.token, BLOCOFY_API_URL: B.url, BLOCOFY_API_KEY: SECRETS.B.apiKey };
+  const envA = { BLOCOFY_URL: A.url, BLOCOFY_TOKEN: SECRETS.A.token, BLOCOFY_API_URL: A.url, BLOCOFY_API_KEY: SECRETS.A.apiKey };
+  const swappedA = { BLOCOFY_URL: A.url, BLOCOFY_TOKEN: SECRETS.A.apiKey, BLOCOFY_API_URL: A.url, BLOCOFY_API_KEY: SECRETS.A.token };
+  // CI checkout: the committed project.json only (no local.json), bound to A.
+  const projCI = tmp("bcf-mx-ci-proj-");
+  writeTheme(projCI, "A");
+  writeBinding(projCI, { siteId: "sA1", slug: "alpha" });
+  const loose = tmp("bcf-mx-unbound-");
+  writeTheme(loose, "A");
+  let cells = 0;
+
+  const refusal = async (label, args, opts, code, { exit = 3, dirs = [] } = {}) => {
+    const hashes = dirs.map((d) => [d, treeHash(d)]);
+    resetSites();
+    const r = await run(home, [...args, "--json"], opts);
+    assert.equal(r.code, exit, `${label}: ${r.stderr}`);
+    assert.equal(jsonError(r).code, code, label);
+    assert.deepEqual([...A.state.requests, ...B.state.requests], [], `${label}: a refused command reached the network`);
+    for (const [d, h] of hashes) assert.equal(treeHash(d), h, `${label}: ${d} changed`);
+    noSecrets(r);
+    cells += 1;
+  };
+  const reachesOnly = async (label, name, args, opts, site, other, { source, siteId }) => {
+    resetSites();
+    const r = await run(home, [...args, "--json"], opts);
+    assert.deepEqual(other.state.requests, [], `${label}: the other site was contacted (exit ${r.code})\n${r.stderr}`);
+    assert.ok(count(site, "GET", "/api/dev/whoami") + count(site, "GET", "/api/v1/ping") >= 1, `${label}: identity not verified`);
+    const t = targetOf(r, name);
+    assert.deepEqual([t.site.id, t.context_source, t.platform_origin], [siteId, source, ORIGIN], label);
+    assert.ok(typeof t.mode === "string" && t.mode.length > 0, `${label}: no mode`);
+    noSecrets(r);
+    cells += 1;
+  };
+
+  for (const [name, args] of matrixCommands(projA, decisions)) {
+    // (a) env pair for B + project A's local.json (alpha) → conflict, from another project's cwd.
+    await refusal(`${name} · env B vs local.json`, args, { cwd: projB, env: envB }, "TARGET_CONTEXT_CONFLICT", { dirs: [projA, projB] });
+    // (b) BLOCOFY_CONTEXT=beta vs local.json alpha → conflict.
+    await refusal(`${name} · BLOCOFY_CONTEXT vs local.json`, args, { cwd: projB, env: { BLOCOFY_CONTEXT: "beta" } }, "TARGET_CONTEXT_CONFLICT", { dirs: [projA] });
+    // (c) an explicit --context for the other site → refused offline.
+    await refusal(`${name} · --context beta on project A`, [...args, "--context", "beta"], { cwd: projB }, "TARGET_SITE_MISMATCH", { dirs: [projA] });
+  }
+  for (const [name, args] of matrixCommands(projCI, decisions)) {
+    // (d) wrong credential type in the CI env (dev and API secrets swapped) → refused before any request.
+    await refusal(`${name} · swapped credential types`, args, { cwd: loose, env: swappedA }, "TARGET_CREDENTIAL_WRONG_TYPE", { exit: 1, dirs: [projCI] });
+  }
+  for (const [name, args, kind] of matrixCommands(loose, decisions)) {
+    // (e) env pair + BLOCOFY_CONTEXT in an unbound dir (nothing pins the site) → conflict for every read; a write
+    // is refused even earlier by the binding policy.
+    const expected = kind === "m" || kind === "w" ? "TARGET_BINDING_REQUIRED" : "TARGET_CONTEXT_CONFLICT";
+    await refusal(`${name} · unbound env vs BLOCOFY_CONTEXT`, args, { cwd: loose, env: { ...envA, BLOCOFY_CONTEXT: "beta" } }, expected, { dirs: [loose] });
+  }
+
+  // (f) argument dir ≠ cwd, while "terminal 2" has switched the global default to beta: only A is contacted.
+  assert.equal((await run(home, ["use", "beta"])).code, 0);
+  for (const [name, args] of matrixCommands(projA, decisions)) {
+    await reachesOnly(`${name} · arg projA from cwd projB, use=beta`, name, args, { cwd: projB }, A, B, { source: ".blocofy/local.json", siteId: "sA1" });
+  }
+  // (g) CI: env pairs for A + committed project.json (no local.json), cwd elsewhere.
+  for (const [name, args] of matrixCommands(projCI, decisions)) {
+    await reachesOnly(`${name} · CI env A`, name, args, { cwd: loose, env: envA }, A, B, { source: "env", siteId: "sA1" });
+  }
+
+  // (h) unbound dir across two terminals: `use` moves only status / target / pages check (and says so);
+  // every other command refuses before any request whatever the default is.
+  for (const [ctxName, site, other, siteId] of [["beta", B, A, "sB2"], ["alpha", A, B, "sA1"]]) {
+    assert.equal((await run(home, ["use", ctxName])).code, 0);
+    for (const [name, args, kind] of matrixCommands(loose, decisions)) {
+      const label = `${name} · unbound, use=${ctxName}`;
+      if (kind === "o") {
+        await reachesOnly(label, name, args, { cwd: loose }, site, other, { source: "current_context", siteId });
+      } else if (kind === "r?") {
+        resetSites();
+        const r = await run(home, [...args, "--json"], { cwd: loose });
+        assert.deepEqual([...A.state.requests, ...B.state.requests], [], `${label}: the default context was used (exit ${r.code})`);
+        cells += 1;
+      } else {
+        await refusal(label, args, { cwd: loose }, kind === "r" ? "TARGET_CONTEXT_REQUIRED" : "TARGET_BINDING_REQUIRED", { dirs: [loose] });
+      }
+    }
+  }
+  assert.ok(cells >= 24 * 8, `only ${cells} cells ran`);
 });
 
 test("[18] secret leakage scan: every captured stdout/stderr and every file written outside the secret stores", () => {
