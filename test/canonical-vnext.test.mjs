@@ -734,3 +734,72 @@ test("cli-fix T1: a 409 target_changed apply is explained (human and --json) and
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// cli-fix T2 — THEME_PUSH_TARGET_CHANGED advice is truthful. A planned removal the push did not carry is either a
+// file added while the push ran (a re-run reads and keeps it) or a row the push can never carry: one the merge probe
+// returned under a path the push cannot send (outside the merge mirror, e.g. a bare `layout`), or one the probe
+// cannot see at all (it lists published rows only). For the second kind a re-run refuses the same way every time, so
+// the message must not promise that re-running keeps them.
+
+test("cli-fix T2: a planned removal the push cannot carry is not promised back by a re-run", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  try {
+    // The probe returned `layout` (a bare key the push cannot send) — the plan removes it.
+    const seenOutside = {
+      getBody: { files: { "section/Hero": "R", layout: "L" }, protocol: 1 },
+      postResponder: planningServer({ plan: [["section/Hero", "updated"], ["layout", "removed"]] }),
+    };
+    await withFake(seenOutside, async (url, seen) => {
+      await assert.rejects(pushTheme({ dir, url, token: TOKEN, idempotencyKey: "cli-adv-1" }), (e) => {
+        assert.equal(e.code, "THEME_PUSH_TARGET_CHANGED");
+        assert.deepEqual(e.details.paths, ["layout"]);
+        assert.deepEqual(e.details.notCarryable, ["layout"]);
+        assert.doesNotMatch(e.message, /Run the push again to keep them/, "a re-run cannot keep a path the push cannot send");
+        assert.match(e.message, /cannot carry/);
+        assert.match(e.message, /--prune/);
+        assert.match(e.message, /Nothing was written/);
+        return true;
+      });
+      assert.equal(seen.posts.length, 1);
+    });
+    // The probe did not see `section/Hidden` at all (added meanwhile, or a row it cannot list).
+    const unseen = {
+      getBody: { files: { "section/Hero": "R" }, protocol: 1 },
+      postResponder: planningServer({ plan: [["section/Hero", "updated"], ["section/Hidden", "removed"]] }),
+    };
+    await withFake(unseen, async (url) => {
+      await assert.rejects(pushTheme({ dir, url, token: TOKEN, idempotencyKey: "cli-adv-2" }), (e) => {
+        assert.equal(e.code, "THEME_PUSH_TARGET_CHANGED");
+        assert.deepEqual(e.details.paths, ["section/Hidden"]);
+        assert.deepEqual(e.details.notCarryable, []);
+        assert.doesNotMatch(e.message, /Run the push again to keep them/, "no unconditional promise");
+        assert.match(e.message, /added while this push was running/);
+        assert.match(e.message, /stop(s)? the push again/);
+        assert.match(e.message, /--prune/);
+        return true;
+      });
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cli-fix T2: THEME_PUSH_TARGET_CHANGED reaches the terminal as a refusal (human and --json), nothing written", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  const lastError = (r) => JSON.parse(r.stderr.trim().split("\n").pop()).error;
+  try {
+    const opts = { getBody: { files: { "section/Hero": "R" }, protocol: 1 }, postResponder: planningServer({ plan: [["section/Hero", "updated"], ["section/Hidden", "removed"]] }) };
+    await withFake(opts, async (url, seen) => {
+      const r = await runBin(url, ["theme", "push", dir, "--draft"]);
+      assert.equal(r.code, 1, r.stderr);
+      assert.match(r.stderr, /THEME_PUSH_TARGET_CHANGED/);
+      assert.match(r.stderr, /section\/Hidden/);
+      const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+      assert.equal(lastError(j).code, "THEME_PUSH_TARGET_CHANGED");
+      assert.deepEqual(lastError(j).details.paths, ["section/Hidden"]);
+      assert.equal(seen.posts.filter((p) => !p.body.dryRun).length, 0, "only dry runs were sent");
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

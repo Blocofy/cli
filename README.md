@@ -110,9 +110,11 @@ bound to the dry run: it is refused, with nothing written, if the files differ f
 (`manifest_mismatch`), the target theme was deployed again in between (`pointer_version_conflict`),
 or the push would now write to another theme than the one its dry run planned against — the live
 theme was switched, or the draft to reuse changed (`target_changed`; run the push again).
-If the dry run finds a file on the target that the push would remove although it was not there when
-the push read the target, the push stops (`THEME_PUSH_TARGET_CHANGED`); run it again, or add
-`--prune`. `Deployed atomically` is printed only when the server read the written files back and
+If the dry run would remove a file the push did not carry, the push stops
+(`THEME_PUSH_TARGET_CHANGED`). A file added while the push was running is kept by running it
+again. A file the push cannot read (for example a theme file that is not published) or a path it
+cannot send stops every run the same way: add `--prune` to remove it, or add a local file at that
+path to replace it. `Deployed atomically` is printed only when the server read the written files back and
 they match; an older platform that does not read back gets `Deployed: … not verified`.
 
 ```
@@ -426,8 +428,10 @@ on stderr.
       with a verified readback. New refusals with messages: `pointer_version_conflict`,
       `site_state_version_conflict`, `manifest_mismatch`, `readback_unverified` and the preflight path
       errors (`path_too_long`, `reserved_path`, `binary_content_rejected`…, naming the file).
-    - A push stops with `THEME_PUSH_TARGET_CHANGED` when the dry run would remove a file the push never
-      saw; `--prune` lists it for confirmation instead. `--dry-run --prune` now plans the pruned set.
+    - A push stops with `THEME_PUSH_TARGET_CHANGED` when the dry run would remove a file the push did
+      not carry; the message says whether a re-run can keep it or only `--prune` gets past it, and
+      `details.notCarryable` lists the paths the push read but cannot send. `--prune` lists them for
+      confirmation instead. `--dry-run --prune` now plans the pruned set.
     - Against an older platform the write body is unchanged from 0.10.
 - **0.10.0** — Named contexts + verified project binding, and a declarative whole-site state.
   - `login` now saves a **named context** (`--context <name>`, default the site's slug) instead
