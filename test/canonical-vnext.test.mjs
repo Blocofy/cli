@@ -836,3 +836,47 @@ test("cli-fix T3: site_state_version_conflict and manifest_mismatch are explaine
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// cli-fix T4 — readback_unverified from the DRY RUN is not a write: the plan was rolled back, nothing was written. It
+// is also not transient (the plan read back something other than what it checked), so the plan POST is not resent
+// on that 502 the way a gateway 502 is. An apply's readback_unverified keeps its wording (and its same-key retry,
+// which converges on the committed deploy and reads it back again).
+test("cli-fix T4: a dry run's readback_unverified is reported as a plan (nothing written) and is not retried", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  const lastError = (r) => JSON.parse(r.stderr.trim().split("\n").pop()).error;
+  try {
+    const planUnverified = planningServer({ dry: (res) => json(res, 502, { error: "readback_unverified", committed: false }, { "retry-after": "0" }) });
+    for (const argv of [["theme", "push", dir, "--draft", "--json"], ["theme", "push", dir, "--live", "--dry-run", "--json"]]) {
+      await withFake({ postResponder: planUnverified }, async (url, seen) => {
+        const r = await runBin(url, argv);
+        assert.equal(r.code, 1, r.stderr);
+        assert.equal(seen.posts.length, 1, `${argv.join(" ")}: the plan was resent on its readback_unverified 502`);
+        assert.doesNotMatch(r.stderr, /retry/i, "no retry notice");
+        const e = lastError(r);
+        assert.equal(e.code, "readback_unverified");
+        assert.doesNotMatch(e.message, /files it wrote/, "a plan writes nothing");
+        assert.match(e.message, /dry run/);
+        assert.match(e.message, /Nothing was written/);
+        assert.equal(e.details.phase, "plan");
+        assert.equal(e.details.committed, false);
+      });
+    }
+    // A gateway 502 on the plan (no readback_unverified body) is still transient: retried.
+    let n = 0;
+    const flaky = planningServer({ dry: (res, body) => (n++ === 0 ? json(res, 502, { error: "bad_gateway" }, { "retry-after": "0" }) : planningServer()(res, 1, body)) });
+    await withFake({ postResponder: flaky }, async (url, seen) => {
+      const r = await runBin(url, ["theme", "push", dir, "--draft"]);
+      assert.equal(r.code, 0, r.stderr);
+      assert.equal(seen.posts.filter((p) => p.body.dryRun).length, 2, "a plain 502 on the plan is retried");
+    });
+    // The apply's readback_unverified keeps the write wording.
+    const applyUnverified = planningServer({ apply: (res) => json(res, 502, { error: "readback_unverified", committed: true }, { "retry-after": "0" }) });
+    await withFake({ postResponder: applyUnverified }, async (url) => {
+      const e = lastError(await runBin(url, ["theme", "push", dir, "--draft", "--json"]));
+      assert.match(e.message, /could not read back the files it wrote \(the deploy was committed\)/);
+      assert.equal(e.details.phase, "apply");
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

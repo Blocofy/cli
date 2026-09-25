@@ -388,8 +388,9 @@ line; the target block (`{"target":…}`) and any warning lines are printed on s
 
 Retries: network errors and HTTP 429/502/503/504 are retried up to 3 times (`Retry-After`
 honoured, max 30s per wait; else 0.3s/0.9s/2s), resending the identical request (`pages push`
-carries one `x-idempotency-key` per push). HTTP 500 is never retried. Each retry prints a notice
-on stderr.
+carries one `x-idempotency-key` per push). HTTP 500 is never retried, nor is a `theme push` dry
+run answered 502 `readback_unverified` (a verdict on a rolled-back plan, not a transient failure).
+Each retry prints a notice on stderr.
 
 ## Changelog
 
@@ -426,7 +427,8 @@ on stderr.
       `--idempotency-key` retries of a committed push still converge.
     - Per-file outcomes are printed for the push and for `--dry-run`. `Deployed atomically` appears only
       with a verified readback. New refusals with messages: `pointer_version_conflict`,
-      `site_state_version_conflict`, `manifest_mismatch`, `readback_unverified` and the preflight path
+      `site_state_version_conflict`, `manifest_mismatch`, `readback_unverified` (worded for the dry
+      run, where nothing was written, or for the write; `details.phase` says which) and the preflight path
       errors (`path_too_long`, `reserved_path`, `binary_content_rejected`…, naming the file).
     - A push stops with `THEME_PUSH_TARGET_CHANGED` when the dry run would remove a file the push did
       not carry; the message says whether a re-run can keep it or only `--prune` gets past it, and

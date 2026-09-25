@@ -1157,9 +1157,16 @@ function themePushRefusal(error) {
       };
     }
     case "readback_unverified":
+      // The dry run's plan is rolled back on the server: nothing was written, whatever `committed` says.
+      if (error.phase === "plan") {
+        return {
+          message: "The server could not verify the plan of this push's dry run (a plan is rolled back). Nothing was written. Run the push again.",
+          details: { phase: "plan", committed: false },
+        };
+      }
       return {
         message: `The server could not read back the files it wrote${body.committed === true ? " (the deploy was committed)" : body.committed === false ? " (nothing was committed)" : ""}. Compare with \`blocofy theme push --diff\`.`,
-        details: { committed: typeof body.committed === "boolean" ? body.committed : null },
+        details: { phase: "apply", committed: typeof body.committed === "boolean" ? body.committed : null },
       };
   }
   // The 6.5 preflight names the file it refused (reserved_path, path_too_long, invalid_json…).
