@@ -741,7 +741,7 @@ async function linkCommand(rest) {
 
 async function targetCommand(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, []);
-  const dir = resolve(positionals[0] ?? process.cwd());
+  const dir = singleDirArg(positionals, "blocofy target [dir]");
   const t = await prepareTarget({ command: "target", commandClass: "read", dir, flags, needs: "any", mode: "read", record: false, quiet: true, allowCurrentContext: true });
   if (JSON_MODE) console.log(JSON.stringify({ target: t.display }, null, 2));
   else printTarget(t.display, { stream: process.stdout });
@@ -1791,10 +1791,13 @@ function printMediaUsesView(view) {
 async function pagesMediaUses(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, KNOWN.pages);
   const page = positionals[0];
+  const usage = "blocofy pages media-uses <page-handle> [--dir <dir>] [--json]";
   if (!page) {
-    console.error("Usage: blocofy pages media-uses <page-handle> [--json]");
+    console.error(`Usage: ${usage}`);
     process.exit(1);
   }
+  // 1.8: the project directory is `--dir`; a directory given as a positional is refused, never dropped for cwd's.
+  if (positionals.length > 1) throw new TargetError("USAGE", `Usage: ${usage}`, {}, 1);
   const { apiUrl, apiKey } = (await prepareTarget({ command: "pages media-uses", commandClass: "read", dir: commandDir(flags.dir), flags, needs: "api", mode: `read · page ${page}` })).api;
   const view = await fetchPageMediaUses({ apiUrl, apiKey, page, onRetry });
   if (flags.json) console.log(JSON.stringify(view, null, 2));
@@ -1816,10 +1819,12 @@ async function pagesMediaDecide(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, KNOWN.pages);
   const page = positionals[0];
   const file = typeof flags.decisions === "string" ? resolve(flags.decisions) : null;
+  const usage = "blocofy pages media-decide <page-handle> --decisions <file.json> [--expected-revision-id <n> --expected-version <n>] [--dir <dir>] [--json]";
   if (!page || !file) {
-    console.error("Usage: blocofy pages media-decide <page-handle> --decisions <file.json> [--expected-revision-id <n> --expected-version <n>] [--json]");
+    console.error(`Usage: ${usage}`);
     process.exit(1);
   }
+  if (positionals.length > 1) throw new TargetError("USAGE", `Usage: ${usage}`, {}, 1);
   let parsed;
   try {
     parsed = JSON.parse(readFileSync(file, "utf8"));

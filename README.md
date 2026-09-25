@@ -413,7 +413,9 @@ Each retry prints a notice on stderr.
   - `theme publish [dir]` and `status [dir]` take the project directory as an argument, and
     `theme rename` / `pages media-uses|media-decide` take `--dir <dir>`. Before, they always used
     cwd, so `theme push ./a && theme publish` run from another project published that project's
-    draft.
+    draft. A directory that does not exist, or one given where the command takes none (a second
+    positional to `target`/`status`/`theme publish`, any directory positional to
+    `pages media-uses|media-decide`), is a usage error (exit 1) before any request.
   - A secret of the wrong type (a `blcf_live_…` key as the dev token, a `bcf_…` token as the API
     key) is refused before any request with `TARGET_CREDENTIAL_WRONG_TYPE`, naming the variable
     or context — it was sent to the wrong endpoint and reported as `TARGET_UNVERIFIED`.

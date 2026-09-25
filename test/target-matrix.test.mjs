@@ -811,11 +811,31 @@ test("[29] 1.8 argument dir ≠ cwd: `theme publish <dir>`, `status <dir>`, `the
     noSecrets(r);
   }
   // A missing argument dir is a usage error before any request; so is a second positional for publish/status.
-  for (const args of [["theme", "publish", join(projA, "nope")], ["status", join(projA, "nope")], ["theme", "rename", "tAlive", "New", "--dir", join(projA, "nope")], ["pages", "media-uses", "pgA", "--dir", join(projA, "nope")], ["theme", "publish", projA, projB], ["status", projA, projB]]) {
+  // cli-fix T5: the same rule for `target [dir]` (a missing dir is not climbed to an ancestor's binding) and for
+  // `pages media-uses|media-decide` (a directory given as a positional is refused, not silently dropped for cwd's).
+  for (const args of [
+    ["theme", "publish", join(projA, "nope")],
+    ["status", join(projA, "nope")],
+    ["theme", "rename", "tAlive", "New", "--dir", join(projA, "nope")],
+    ["pages", "media-uses", "pgA", "--dir", join(projA, "nope")],
+    ["theme", "publish", projA, projB],
+    ["status", projA, projB],
+    ["target", join(projA, "nope")],
+    ["target", projA, projB],
+    ["pages", "media-uses", "pgA", projA],
+    ["pages", "media-decide", "pgA", projA, "--decisions", decisions],
+  ]) {
     resetSites();
     const r = await run(home, [...args, "--json"], { cwd: projB });
     assert.equal(r.code, 1, `${args.join(" ")}: ${r.stderr}`);
     assert.equal(A.state.requests.length + B.state.requests.length, 0, args.join(" "));
+    assert.equal(jsonError(r).code, "USAGE", args.join(" "));
+  }
+  // The usage lines of the two page media commands name the directory option (as --help and the README do).
+  for (const args of [["pages", "media-uses"], ["pages", "media-decide", "pgA"], ["pages", "media-uses", "pgA", projA]]) {
+    const r = await run(home, args, { cwd: projB });
+    assert.equal(r.code, 1, args.join(" "));
+    assert.match(r.stderr, /Usage: blocofy pages media-(uses|decide) <page-handle>.*\[--dir <dir>\]/, `${args.join(" ")}: ${r.stderr}`);
   }
   // Without an argument the default is still cwd (bound to B).
   resetSites();
@@ -952,6 +972,16 @@ test("[31] 1.8 closure matrix: every remote command × {conflicting authorities,
     resetSites();
     const r = await run(home, [...args, "--json"], opts);
     assert.deepEqual(other.state.requests, [], `${label}: the other site was contacted (exit ${r.code})\n${r.stderr}`);
+    // cli-fix T5: a success cell proves the command WORKED on the right site, not only that it chose it. This fake
+    // serves no site-state endpoint (test/site-state.test.mjs runs `site *` end to end), so a `site *` cell proves
+    // the command got past target resolution to ITS OWN endpoint on the right site: the fake's 404, exit 2.
+    if (name.startsWith("site ")) {
+      assert.equal(r.code, 2, `${label}: exit ${r.code}\n${r.stderr}`);
+      assert.equal(jsonError(r).code, "http_404", label);
+      assert.ok(site.state.requests.some((q) => q.url.startsWith("/api/v1/site-state")), `${label}: the site-state endpoint was not reached`);
+    } else {
+      assert.equal(r.code, 0, `${label}: exit ${r.code}\n${r.stderr}`);
+    }
     assert.ok(count(site, "GET", "/api/dev/whoami") + count(site, "GET", "/api/v1/ping") >= 1, `${label}: identity not verified`);
     const t = targetOf(r, name);
     assert.deepEqual([t.site.id, t.context_source, t.platform_origin], [siteId, source, ORIGIN], label);
