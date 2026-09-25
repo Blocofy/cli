@@ -803,3 +803,36 @@ test("cli-fix T2: THEME_PUSH_TARGET_CHANGED reaches the terminal as a refusal (h
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// cli-fix T3 — the two 6.5 refusals that had no test: site_state_version_conflict and manifest_mismatch, human and
+// --json. Both are 409s from the apply: exit 2, the code named, "Nothing was written", no success line.
+test("cli-fix T3: site_state_version_conflict and manifest_mismatch are explained (human and --json)", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  const lastError = (r) => JSON.parse(r.stderr.trim().split("\n").pop()).error;
+  const cases = [
+    ["site_state_version_conflict", /settings were saved on the site while this push was running/],
+    ["manifest_mismatch", /differ from the files the dry run checked/],
+  ];
+  try {
+    for (const [code, words] of cases) {
+      await withFake({ postResponder: planningServer({ apply: (res) => json(res, 409, { error: code }) }) }, async (url, seen) => {
+        const r = await runBin(url, ["theme", "push", dir, "--draft"]);
+        assert.equal(r.code, 2, `${code}: ${r.stderr}`);
+        assert.match(r.stderr, new RegExp(`\\[${code}\\]`), code);
+        assert.match(r.stderr, words, code);
+        assert.match(r.stderr, /Nothing was written/, code);
+        assert.doesNotMatch(r.stdout, /Deployed/, code);
+        const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+        assert.equal(j.code, 2, code);
+        const e = lastError(j);
+        assert.equal(e.code, code);
+        assert.match(e.message, words, code);
+        assert.match(e.message, /Nothing was written/, code);
+        assert.equal(e.details.status, 409, code);
+        assert.equal(seen.posts.filter((p) => !p.body.dryRun).length, 2, `${code}: one apply per run, a 409 is not retried`);
+      });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
