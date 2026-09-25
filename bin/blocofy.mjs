@@ -1050,7 +1050,7 @@ async function themePush(rest) {
       }
       failAndExit({ code: "idempotency_conflict", status: error.status, message: "The idempotency key was already used with different content. Retry with a new key (or omit --idempotency-key).", details: {} });
     }
-    const refusal = themePushRefusal(error, { draft: mode === "draft" });
+    const refusal = themePushRefusal(error, { draft: mode === "draft", idempotencyKey });
     if (refusal) failAndExit({ code: error.code, status: error.status, ...refusal });
     throw error;
   }
@@ -1140,7 +1140,7 @@ function printThemeOutcomes(files) {
  * apply was resent after an attempt without a certain answer (`error.earlierAttempt`), that earlier attempt may have
  * written: then the message says so instead of "Nothing was written", and `details.earlierAttempt` names it.
  */
-function themePushRefusal(error, { draft = false } = {}) {
+function themePushRefusal(error, { draft = false, idempotencyKey = null } = {}) {
   const body = error?.body ?? {};
   const earlier = error?.phase === "apply" && (error.earlierAttempt === "unknown" || error.earlierAttempt === "committed") ? error.earlierAttempt : null;
   // Where an earlier attempt of this push could have written: the theme its dry run bound it to (every attempt is the
@@ -1161,6 +1161,17 @@ function themePushRefusal(error, { draft = false } = {}) {
         ? `This attempt ${wrote} nothing, but an earlier attempt of this push got no answer, so whether it wrote is unknown. Check ${target} with ${check} before running the push again.`
         : `${none} ${next}`;
   const withEarlier = (details) => (earlier ? { ...details, earlierAttempt: earlier } : details);
+  // tpush round 5: a write whose last answer is transient (a passed-through 5xx, a 503 fail-closed, 502
+  // readback_unverified with outcomeUnknown, or no answer) has an unknown outcome. It is retryable under the SAME key:
+  // the platform then reports the committed deploy instead of writing it again. Keys are per run, so name this one.
+  const unknownOutcome = (what) => ({
+    ...(error?.code ? {} : { code: error?.status ? `HTTP_${error.status}` : "NETWORK_ERROR" }),
+    message:
+      `${what}, so whether this push was deployed${typeof bound === "string" ? ` to theme ${bound}` : ""} is unknown` +
+      `${earlier === "committed" ? " (an earlier attempt's answer said it was committed)" : ""}. ` +
+      `Run the same command again with \`--idempotency-key ${idempotencyKey ?? "<the same key>"}\`: if this push was deployed, the server reports that deploy instead of writing it again.`,
+    details: withEarlier({ phase: "apply", outcome: "unknown", idempotencyKey, ...(error?.status ? { status: error.status } : {}), ...(bound !== undefined ? { expectedTargetInstance: bound } : {}) }),
+  });
   switch (error?.code) {
     case "pointer_version_conflict":
       return {
@@ -1190,11 +1201,15 @@ function themePushRefusal(error, { draft = false } = {}) {
           details: { phase: "plan", committed: false },
         };
       }
+      if (body.outcomeUnknown === true) return unknownOutcome("The server could not read the control plane's answer to the write");
       // The write went to the theme the dry run bound it to; a plain --diff compares with the live theme only.
       return {
         message: `The server could not read back the files it wrote${body.committed === true ? " (the deploy was committed)" : body.committed === false ? " (nothing was committed)" : ""}. Check ${target} with ${check}.`,
         details: { phase: "apply", committed: typeof body.committed === "boolean" ? body.committed : null, ...(bound !== undefined ? { expectedTargetInstance: bound } : {}) },
       };
+  }
+  if (error?.phase === "apply" && (error.status == null || error.status >= 500)) {
+    return unknownOutcome(error.status == null ? "The write got no answer" : `The write got no definite answer (HTTP ${error.status}${error.code ? ` ${error.code}` : ""})`);
   }
   // The 6.5 preflight names the file it refused (reserved_path, path_too_long, invalid_json…).
   if (error?.status === 422 && typeof body.path === "string") {

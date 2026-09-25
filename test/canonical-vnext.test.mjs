@@ -928,6 +928,54 @@ test("cli-fix3: an apply's readback_unverified points the check at the theme the
   }
 });
 
+// cli-fix3 (round 5, tpush round-5 semantics) — a write whose last answer is transient (a 5xx the platform passes
+// through, a 503 fail-closed, 502 readback_unverified with outcomeUnknown, or no answer at all) has an UNKNOWN
+// outcome: it is retryable under the SAME key (it converges if the write committed). The CLI's keys are per run, so
+// the message names this push's key and how to reuse it; it never says "Nothing was written" or "use a new key".
+test("cli-fix3: an apply that ends without a definite answer is an unknown outcome, retryable with the same key", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  const lastError = (r) => JSON.parse(r.stderr.trim().split("\n").pop()).error;
+  const transient = {
+    "500 internal_error": (res) => json(res, 500, { error: "internal_error" }),
+    "503 control_plane_unavailable": (res) => json(res, 503, { error: "control_plane_unavailable" }, { "retry-after": "0" }),
+    "504 empty body": (res) => { res.writeHead(504, { "retry-after": "0" }); res.end(); },
+    "502 readback_unverified outcomeUnknown": (res) => json(res, 502, { error: "readback_unverified", outcomeUnknown: true }, { "retry-after": "0" }),
+    "no answer": lostAnswer,
+  };
+  try {
+    for (const [label, apply] of Object.entries(transient)) {
+      await withFake({ postResponder: planningServer({ targetInstance: "t7draft", apply }) }, async (url, seen) => {
+        const j = await runBin(url, ["theme", "push", dir, "--draft", "--json", "--idempotency-key", "cli-k-7"]);
+        assert.equal(j.code, 1, `${label}: ${j.stderr}`);
+        const e = lastError(j);
+        assert.match(e.message, /unknown/, label);
+        assert.match(e.message, /--idempotency-key cli-k-7/, `${label}: the retry reuses this push's key`);
+        assert.doesNotMatch(e.message, /Nothing was written|new key/, label);
+        assert.equal(e.details.outcome, "unknown", label);
+        assert.equal(e.details.idempotencyKey, "cli-k-7", label);
+        assert.equal(e.details.phase, "apply", label);
+        const applies = seen.posts.filter((p) => !p.body.dryRun);
+        assert.ok(applies.every((p) => p.headers["x-idempotency-key"] === "cli-k-7"), label);
+      });
+    }
+    // Without --idempotency-key the generated key is the one to reuse (human output).
+    await withFake({ postResponder: planningServer({ targetInstance: "t7draft", apply: transient["500 internal_error"] }) }, async (url, seen) => {
+      const r = await runBin(url, ["theme", "push", dir, "--draft"]);
+      assert.equal(r.code, 1, r.stderr);
+      const key = seen.posts.find((p) => !p.body.dryRun).headers["x-idempotency-key"];
+      assert.match(key, /^cli-/);
+      assert.ok(r.stderr.includes(`--idempotency-key ${key}`), r.stderr);
+    });
+    // A dry run's 5xx is not a write: no unknown-outcome advice.
+    await withFake({ postResponder: planningServer({ dry: transient["500 internal_error"] }) }, async (url) => {
+      const e = lastError(await runBin(url, ["theme", "push", dir, "--draft", "--json"]));
+      assert.doesNotMatch(e.message, /idempotency-key/);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // cli-fix T2 — THEME_PUSH_TARGET_CHANGED advice is truthful. A planned removal the push did not carry is either a
 // file added while the push ran (a re-run reads and keeps it) or a row the push can never carry: one the merge probe
 // returned under a path the push cannot send (outside the merge mirror, e.g. a bare `layout`), or one the probe

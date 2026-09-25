@@ -118,7 +118,11 @@ what the earlier attempt did: the message says whether it was committed or its o
 unknown (`details.earlierAttempt`), never "Nothing was written". Check the theme the dry run bound
 the write to (`details.expectedTargetInstance`, not the current target a refusal names) with
 `blocofy theme push --diff --instance <handle>` — or, for a new draft, find it with `blocofy status` —
-before running the push again.
+before running the push again. A write whose last answer is still not definite (HTTP 500 or another
+5xx, a 503, a 502 `readback_unverified` with `outcomeUnknown`, or no answer) has an unknown outcome
+(`details.outcome: "unknown"`): the message names the push's key (`details.idempotencyKey`); run the
+same command again with `--idempotency-key <that key>`, and a push that was deployed is reported as
+deployed instead of being written again.
 If the dry run would remove a file the push did not carry, the push stops
 (`THEME_PUSH_TARGET_CHANGED`). The message says which case each file is:
 - a path the push cannot send (not a file inside a theme folder, e.g. a bare `layout` row; listed in
