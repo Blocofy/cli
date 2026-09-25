@@ -107,7 +107,9 @@ the admin panel, never touching the live site. Publish it with `blocofy theme pu
 
 Every push first runs that dry run, then writes the same files. On a current platform the write is
 bound to the dry run: it is refused, with nothing written, if the files differ from what was checked
-(`manifest_mismatch`) or the target theme was deployed again in between (`pointer_version_conflict`).
+(`manifest_mismatch`), the target theme was deployed again in between (`pointer_version_conflict`),
+or the push would now write to another theme than the one its dry run planned against — the live
+theme was switched, or the draft to reuse changed (`target_changed`; run the push again).
 If the dry run finds a file on the target that the push would remove although it was not there when
 the push read the target, the push stops (`THEME_PUSH_TARGET_CHANGED`); run it again, or add
 `--prune`. `Deployed atomically` is printed only when the server read the written files back and
@@ -416,7 +418,9 @@ on stderr.
   - Theme push preflight bound to the write (customer item 6.5):
     - `theme push` checks the MERGED payload (local files plus the remote-only files it keeps) in its
       dry run, then writes exactly those files with the dry run's `manifestHash` and
-      `expectedPointerVersion`. The dry run carries its own throwaway idempotency key, so
+      `expectedPointerVersion`, and — when the platform names it — the theme the dry run planned
+      against (`expectedTargetInstance`; refused with `target_changed` if the target moved). The dry
+      run carries its own throwaway idempotency key, so
       `--idempotency-key` retries of a committed push still converge.
     - Per-file outcomes are printed for the push and for `--dry-run`. `Deployed atomically` appears only
       with a verified readback. New refusals with messages: `pointer_version_conflict`,

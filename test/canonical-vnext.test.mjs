@@ -453,12 +453,14 @@ const json = (res, status, body, headers = {}) => {
 const outcomes = (entries) => entries.map(([path, outcome]) => ({ path, outcome, ...(outcome === "removed" ? {} : { digest: "cd".repeat(32) }) }));
 
 /** A server with the 6.5 contract: the dry run is a plan, the apply reports outcomes + readback. */
-function planningServer({ pointerVersion = 4, newDraft = false, plan = [["section/Hero", "updated"]], apply = null, dry = null } = {}) {
+function planningServer({ pointerVersion = 4, newDraft = false, plan = [["section/Hero", "updated"]], apply = null, dry = null, targetInstance } = {}) {
   return (res, n, body) => {
     if (body.dryRun) {
       if (dry) return dry(res, body);
       return json(res, 200, {
         ok: true, dryRun: true, warnings: [], manifestHash: HASH, target: body.draft ? "draft" : "live", newDraft,
+        // Remediation round 3 server: the instance planned against (null with newDraft); absent on an older 6.5 server.
+        ...(targetInstance !== undefined ? { targetInstance } : {}),
         pointerVersion: newDraft ? null : pointerVersion, files: outcomes(plan), ...(newDraft ? {} : { readback: { verified: true, files: plan.length, settings: true } }),
       });
     }
@@ -658,6 +660,75 @@ test("TPUSH-5: refusals are explained — pointer conflict, a preflight path err
       assert.equal(lastError(r).details.committed, true);
       assert.match(lastError(r).message, /could not read back/);
       assert.doesNotMatch(r.stdout, /Deployed/);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// cli-fix T1 — the apply is bound to the INSTANCE its dry run planned against. pointer_version is per instance, so
+// manifestHash + expectedPointerVersion alone let the merged payload land on another instance whose pointer has the
+// same version (the live theme switched, another reusable draft). A server that answers `targetInstance` gets it
+// back as `expectedTargetInstance` (null = "a new draft", sent explicitly); an older server gets no such field; a
+// different target is refused 409 `target_changed` before anything is written, and the CLI says so.
+
+test("cli-fix T1: the apply sends the dry run's targetInstance back as expectedTargetInstance; the dry run binds nothing", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  try {
+    await withFake({ postResponder: planningServer({ targetInstance: "t7live" }) }, async (url, seen) => {
+      await pushTheme({ dir, url, token: TOKEN, idempotencyKey: "cli-ti-1" });
+      const [dry, real] = seen.posts;
+      assert.ok(!("expectedTargetInstance" in dry.body), "the dry run asks; it binds nothing");
+      assert.equal(real.body.expectedTargetInstance, "t7live");
+      assert.equal(real.body.manifestHash, HASH);
+      assert.equal(real.body.expectedPointerVersion, 4);
+    });
+    await withFake({ postResponder: planningServer({ newDraft: true, targetInstance: null, plan: [["section/Hero", "created"]] }) }, async (url, seen) => {
+      await pushTheme({ dir, url, token: TOKEN, draft: true, idempotencyKey: "cli-ti-2" });
+      const real = seen.posts.find((p) => !p.body.dryRun);
+      assert.ok("expectedTargetInstance" in real.body, "null ('a new draft') is sent explicitly");
+      assert.equal(real.body.expectedTargetInstance, null);
+    });
+    await withFake({ postResponder: planningServer() }, async (url, seen) => {
+      await pushTheme({ dir, url, token: TOKEN, idempotencyKey: "cli-ti-3" });
+      const real = seen.posts.find((p) => !p.body.dryRun);
+      assert.ok(!("expectedTargetInstance" in real.body), "a server that names no target gets no target binding");
+      assert.equal(real.body.manifestHash, HASH);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cli-fix T1: a 409 target_changed apply is explained (human and --json) and names both targets", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  const lastError = (r) => JSON.parse(r.stderr.trim().split("\n").pop()).error;
+  try {
+    const changed = planningServer({ targetInstance: "t7draft", apply: (res) => json(res, 409, { error: "target_changed", targetInstance: "t8other" }) });
+    await withFake({ postResponder: changed }, async (url, seen) => {
+      const r = await runBin(url, ["theme", "push", dir, "--draft"]);
+      assert.equal(r.code, 2, r.stderr);
+      assert.match(r.stderr, /target_changed/);
+      assert.match(r.stderr, /t7draft/);
+      assert.match(r.stderr, /t8other/);
+      assert.match(r.stderr, /Nothing was written/);
+      assert.doesNotMatch(r.stdout, /Deployed/);
+      assert.equal(seen.posts.filter((p) => !p.body.dryRun).length, 1, "a 409 is not retried");
+      const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+      assert.equal(j.code, 2);
+      const e = lastError(j);
+      assert.equal(e.code, "target_changed");
+      assert.deepEqual([e.details.expectedTargetInstance, e.details.targetInstance], ["t7draft", "t8other"]);
+      assert.match(e.message, /Nothing was written/);
+    });
+    const gone = planningServer({ targetInstance: "t7draft", apply: (res) => json(res, 409, { error: "target_changed", targetInstance: null }) });
+    await withFake({ postResponder: gone }, async (url) => {
+      const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+      const e = lastError(j);
+      assert.equal(e.code, "target_changed");
+      assert.equal(e.details.targetInstance, null);
+      assert.match(e.message, /no draft to reuse|a new draft/);
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });

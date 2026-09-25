@@ -1148,6 +1148,14 @@ function themePushRefusal(error) {
       return { message: "The theme's settings were saved on the site while this push was running. Nothing was written. Run the push again.", details: {} };
     case "manifest_mismatch":
       return { message: "The files sent for writing differ from the files the dry run checked. Nothing was written. Run the push again.", details: {} };
+    case "target_changed": {
+      const was = error.expectedTargetInstance === undefined ? "the theme its dry run planned against" : error.expectedTargetInstance === null ? "a new draft (its dry run planned one)" : `theme ${error.expectedTargetInstance}`;
+      const now = typeof body.targetInstance === "string" ? `theme ${body.targetInstance}` : "a new draft (there is no draft to reuse any more)";
+      return {
+        message: `The push's target changed after its dry run: it planned against ${was}, but it would now write to ${now} (the live theme was switched, or the draft to reuse changed). Nothing was written. Run the push again to plan against the current target.`,
+        details: { expectedTargetInstance: error.expectedTargetInstance ?? null, targetInstance: typeof body.targetInstance === "string" ? body.targetInstance : null },
+      };
+    }
     case "readback_unverified":
       return {
         message: `The server could not read back the files it wrote${body.committed === true ? " (the deploy was committed)" : body.committed === false ? " (nothing was committed)" : ""}. Compare with \`blocofy theme push --diff\`.`,
