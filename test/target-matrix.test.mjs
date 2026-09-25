@@ -553,7 +553,8 @@ test("[16] two processes, same project + context, concurrently: both succeed, sa
   const [r1, r2] = await Promise.all([run(home, ["theme", "push", projA]), run(home, ["theme", "push", projA])]);
   assert.equal(r1.code, 0, r1.stderr);
   assert.equal(r2.code, 0, r2.stderr);
-  for (const r of [r1, r2]) assert.match(r.stdout, /Deployed atomically/);
+  // TPUSH-5: this fake reports no readback, so the CLI claims the commit, never "atomically".
+  for (const r of [r1, r2]) assert.match(r.stdout, /✓ Deployed: /);
   assert.equal(count(A, "POST", "/api/dev/theme"), 4, "preflight + real POST per push");
   assert.equal(B.state.requests.length, 0);
   assert.equal(treeHash(join(home, ".blocofy")), homeHash);
