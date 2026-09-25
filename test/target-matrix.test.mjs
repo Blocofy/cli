@@ -39,7 +39,7 @@ const pageV2 = (label) => JSON.stringify({ format_version: 2, slug: "/", locale:
 
 function fakeSite(key, { id, slug, name }) {
   const s = SECRETS[key];
-  const state = { requests: [], mutations: 0, whoami: "ok", ping: "ok", platformOrigin: ORIGIN, url: null, themeFiles: null, identitySite: null, whoamiDelayMs: 0 };
+  const state = { requests: [], mutations: 0, whoami: "ok", ping: "ok", platformOrigin: ORIGIN, url: null, themeFiles: null, identitySite: null, whoamiDelayMs: 0, siteApplied: false };
   const json = (res, status, body, headers = {}) => {
     res.writeHead(status, { "content-type": "application/json", ...headers });
     res.end(typeof body === "string" ? body : JSON.stringify(body));
@@ -98,9 +98,8 @@ function fakeSite(key, { id, slug, name }) {
       if (body.protocol_version !== 2) return json(res, 200, { settingsUpdated: true, schemesUpserted: 0 });
       return json(res, 200, { ok: true, protocol_version: 2, dry_run: Boolean(body.dry_run), pagesUpdated: body.dry_run ? 0 : 1, pagesSkipped: 0, pages: [{ path: "pages/en-US/index.json", locale: "en-US", slug: "/", action: "publish", outcome: "published" }], diagnostics: [] });
     }
-    // cli-fix2: the site-state endpoints, in their steady state (the site already holds this state as a complete
-    // draft), so a `site *` cell shows the command completing on the right site. Their state machine is exercised
-    // in test/site-state.test.mjs.
+    // cli-fix2: the site-state endpoints, minimal (one step to apply, then a complete draft), so a `site *` cell
+    // shows the command completing on the right site. Their state machine is exercised in test/site-state.test.mjs.
     if (url.pathname === "/api/v1/site-state" && req.method === "GET") {
       return json(res, 200, {
         schema_version: 1,
@@ -110,12 +109,17 @@ function fakeSite(key, { id, slug, name }) {
         diagnostics: [],
       });
     }
+    // cli-fix3: until this site has been applied (per reset), the plan has one step, so `site apply` must reach its
+    // own apply endpoint on this site, with the plan hash this site gave it.
     const siteState = { plan_hash: `h${key}`, target_instance: `t${key}draft` };
     if (url.pathname === "/api/v1/site-state/plan" && req.method === "POST") {
-      return json(res, 200, { ...siteState, manifest_digest: `d${key}`, status: "draft_complete", steps: [], assets_missing: [], theme_source: null, preconditions: [], diagnostics: [] });
+      const steps = state.siteApplied ? [] : [{ seq: 1, owner: "site", action: "update", key: "site/locales.json", live_effect: false }];
+      return json(res, 200, { ...siteState, manifest_digest: `d${key}`, status: steps.length ? "planned" : "draft_complete", steps, assets_missing: [], theme_source: null, preconditions: [], diagnostics: [] });
     }
     if (url.pathname === "/api/v1/site-state/apply" && req.method === "POST") {
-      return json(res, 200, { ...siteState, status: "draft_complete", applied: [], not_applied: [], report: [], theme_source: null });
+      if (JSON.parse(raw || "{}").expected_plan_hash !== siteState.plan_hash) return json(res, 409, { error: { code: "plan_changed", message: "not this site's plan" } });
+      state.siteApplied = true;
+      return json(res, 200, { ...siteState, status: "draft_complete", applied: [1], not_applied: [], report: [], theme_source: null });
     }
     if (url.pathname === "/api/v1/site-state/publish" && req.method === "POST") {
       return json(res, 200, { ...siteState, status: "published", swapped: true, navigation: [], globals: false });
@@ -141,6 +145,7 @@ function fakeSite(key, { id, slug, name }) {
       state.themeFiles = null;
       state.identitySite = null;
       state.whoamiDelayMs = 0;
+      state.siteApplied = false;
     },
     async start() {
       server.listen(0, "127.0.0.1");
@@ -998,7 +1003,7 @@ test("[31] 1.8 closure matrix: every remote command × {conflicting authorities,
     // exit 0 for every command, and a `site *` command completed through its own endpoint on that site.
     assert.equal(r.code, 0, `${label}: exit ${r.code}\n${r.stderr}`);
     if (name.startsWith("site ")) {
-      const endpoint = { "site export": "GET /api/v1/site-state", "site plan": "POST /api/v1/site-state/plan", "site apply": "POST /api/v1/site-state/plan", "site publish": "POST /api/v1/site-state/publish" }[name];
+      const endpoint = { "site export": "GET /api/v1/site-state", "site plan": "POST /api/v1/site-state/plan", "site apply": "POST /api/v1/site-state/apply", "site publish": "POST /api/v1/site-state/publish" }[name];
       assert.ok(site.state.requests.some((q) => `${q.method} ${q.url}` === endpoint), `${label}: ${endpoint} was not reached`);
     }
     assert.ok(count(site, "GET", "/api/dev/whoami") + count(site, "GET", "/api/v1/ping") >= 1, `${label}: identity not verified`);
