@@ -110,6 +110,12 @@ bound to the dry run: it is refused, with nothing written, if the files differ f
 (`manifest_mismatch`), the target theme was deployed again in between (`pointer_version_conflict`),
 or the push would now write to another theme than the one its dry run planned against — the live
 theme was switched, or the draft to reuse changed (`target_changed`; run the push again).
+A write that gets no answer (network error, 429/502/503/504) is resent (up to 3 times) under the same
+key; a push the platform already committed is then reported as deployed (`already applied by an
+earlier push with the same idempotency key`). If that resend is refused, the refusal cannot say
+what the earlier attempt did: the message says whether it was committed or its outcome is
+unknown (`details.earlierAttempt`), never "Nothing was written". Check the target with
+`blocofy theme push --diff --instance <handle>` before running the push again.
 If the dry run would remove a file the push did not carry, the push stops
 (`THEME_PUSH_TARGET_CHANGED`). A file added while the push was running is kept by running it
 again. A file the push cannot read (for example a theme file that is not published) or a path it
@@ -427,6 +433,9 @@ Each retry prints a notice on stderr.
       against (`expectedTargetInstance`; refused with `target_changed` if the target moved). The dry
       run carries its own throwaway idempotency key, so
       `--idempotency-key` retries of a committed push still converge.
+    - A write resent after an attempt without an answer is reported as deployed when the platform
+      had committed it. A refusal of such a resend says the earlier attempt's outcome is unknown (or
+      that it was committed) instead of "Nothing was written", and `details.earlierAttempt` names it.
     - Per-file outcomes are printed for the push and for `--dry-run`. `Deployed atomically` appears only
       with a verified readback. New refusals with messages: `pointer_version_conflict`,
       `site_state_version_conflict`, `manifest_mismatch`, `readback_unverified` (worded for the dry

@@ -735,6 +735,115 @@ test("cli-fix T1: a 409 target_changed apply is explained (human and --json) and
   }
 });
 
+// cli-fix2 (remediation round 4) — a same-key retry of an apply whose earlier attempt got no certain answer. A
+// fix4 server answers a retry of a committed bound push 200 converged, and the CLI reports that deploy. A refusal on
+// such a retry (e.g. 409 target_changed) says nothing about the earlier attempt, so the CLI must not say "Nothing
+// was written": it says the earlier attempt's outcome is unknown (or committed, when the server said so).
+
+/** Per push (counted from its dry run): the first apply attempt fails with `first`, every later one gets `then`. */
+function retriedApply(first, then) {
+  let applies = 0;
+  const server = planningServer({
+    newDraft: true,
+    targetInstance: null,
+    plan: [["section/Hero", "created"]],
+    apply: (res, body) => ((applies += 1) === 1 ? first(res, body) : then(res, body)),
+  });
+  return (res, n, body) => {
+    if (body.dryRun) applies = 0;
+    return server(res, n, body);
+  };
+}
+const gateway504 = (res) => json(res, 504, { error: "gateway_timeout" }, { "retry-after": "0" });
+const lostAnswer = (res) => res.socket.destroy();
+const committedUnverified = (res) => json(res, 502, { error: "readback_unverified", committed: true, convergence: "converged" }, { "retry-after": "0" });
+const converged = (res) =>
+  json(res, 200, {
+    committed: true, convergence: "converged", deploymentId: 11, sourceRevisionId: 12, eventId: 13, pointerVersion: 1, siteStateVersion: 2,
+    contentHash: "ef".repeat(32), files: outcomes([["section/Hero", "unchanged"]]), readback: { verified: true, files: 1, settings: true }, manifestHash: HASH,
+  });
+const moved = (res) => json(res, 409, { error: "target_changed", targetInstance: "t42" });
+
+test("cli-fix2: a same-key retry of a committed new-draft apply reports the committed deploy", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  try {
+    for (const first of [gateway504, lostAnswer, committedUnverified]) {
+      await withFake({ postResponder: retriedApply(first, converged) }, async (url, seen) => {
+        const r = await runBin(url, ["theme", "push", dir, "--draft"]);
+        assert.equal(r.code, 0, r.stderr);
+        const applies = seen.posts.filter((p) => !p.body.dryRun);
+        assert.equal(applies.length, 2, "the apply is resent once");
+        assert.equal(applies[0].headers["x-idempotency-key"], applies[1].headers["x-idempotency-key"], "under the same key");
+        assert.deepEqual(applies[1].body, applies[0].body, "the identical request, expectedTargetInstance:null included");
+        assert.equal(applies[1].body.expectedTargetInstance, null);
+        assert.match(r.stdout, /Deployed atomically/);
+        assert.match(r.stdout, /already applied by an earlier push with the same idempotency key/);
+        assert.doesNotMatch(r.stderr, /Nothing was written/);
+      });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cli-fix2: a refusal on a retry after an unknown outcome never says 'Nothing was written'", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  const lastError = (r) => JSON.parse(r.stderr.trim().split("\n").pop()).error;
+  try {
+    for (const first of [gateway504, lostAnswer]) {
+      await withFake({ postResponder: retriedApply(first, moved) }, async (url) => {
+        const r = await runBin(url, ["theme", "push", dir, "--draft"]);
+        assert.equal(r.code, 2, r.stderr);
+        assert.match(r.stderr, /target_changed/);
+        assert.doesNotMatch(r.stderr, /Nothing was written/);
+        assert.match(r.stderr, /earlier attempt/);
+        assert.match(r.stderr, /unknown/);
+        assert.match(r.stderr, /theme push --diff/);
+        const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+        const e = lastError(j);
+        assert.equal(e.code, "target_changed");
+        assert.doesNotMatch(e.message, /Nothing was written/);
+        assert.equal(e.details.earlierAttempt, "unknown");
+        assert.equal(e.details.targetInstance, "t42");
+      });
+    }
+    // The server said the earlier attempt committed: the refusal reports that, not "unknown" and not "nothing".
+    await withFake({ postResponder: retriedApply(committedUnverified, moved) }, async (url) => {
+      const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+      const e = lastError(j);
+      assert.equal(e.code, "target_changed");
+      assert.doesNotMatch(e.message, /Nothing was written/);
+      assert.match(e.message, /earlier attempt of this push was committed/);
+      assert.equal(e.details.earlierAttempt, "committed");
+    });
+    // Every apply refusal that says "Nothing was written" follows the same rule on a retry.
+    const refusals = [
+      (res) => json(res, 409, { error: "pointer_version_conflict", currentVersion: 5 }),
+      (res) => json(res, 409, { error: "site_state_version_conflict" }),
+      (res) => json(res, 409, { error: "manifest_mismatch" }),
+      (res) => json(res, 422, { error: "reserved_path", path: "asset/x.css", message: "reserved" }),
+    ];
+    for (const refuse of refusals) {
+      await withFake({ postResponder: retriedApply(gateway504, refuse) }, async (url) => {
+        const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+        const e = lastError(j);
+        assert.equal(j.code, 2);
+        assert.doesNotMatch(e.message, /Nothing was written/, e.code);
+        assert.equal(e.details.earlierAttempt, "unknown", e.code);
+      });
+    }
+    // Without a retry a refusal is still certain: nothing was written.
+    await withFake({ postResponder: retriedApply(moved, moved) }, async (url) => {
+      const j = await runBin(url, ["theme", "push", dir, "--draft", "--json"]);
+      const e = lastError(j);
+      assert.match(e.message, /Nothing was written/);
+      assert.ok(!("earlierAttempt" in e.details));
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // cli-fix T2 — THEME_PUSH_TARGET_CHANGED advice is truthful. A planned removal the push did not carry is either a
 // file added while the push ran (a re-run reads and keeps it) or a row the push can never carry: one the merge probe
 // returned under a path the push cannot send (outside the merge mirror, e.g. a bare `layout`), or one the probe

@@ -1135,25 +1135,38 @@ function printThemeOutcomes(files) {
   console.log(`Files: ${count.created} created, ${count.updated} updated, ${count.removed} removed, ${count.unchanged} unchanged.`);
 }
 
-/** TPUSH-5 — the 6.5 theme push refusals, in words. `null` = not one of them. */
+/**
+ * TPUSH-5 — the 6.5 theme push refusals, in words. `null` = not one of them. A refusal writes nothing, but when the
+ * apply was resent after an attempt without a certain answer (`error.earlierAttempt`), that earlier attempt may have
+ * written: then the message says so instead of "Nothing was written", and `details.earlierAttempt` names it.
+ */
 function themePushRefusal(error) {
   const body = error?.body ?? {};
+  const earlier = error?.phase === "apply" && (error.earlierAttempt === "unknown" || error.earlierAttempt === "committed") ? error.earlierAttempt : null;
+  const check = typeof body.targetInstance === "string" ? `\`blocofy theme push --diff --instance ${body.targetInstance}\`` : "`blocofy status` and `blocofy theme push --diff --instance <handle>`";
+  const nothing = (next) =>
+    earlier === "committed"
+      ? `This attempt wrote nothing, but an earlier attempt of this push was committed (its answer said so). Check the target with ${check} before running the push again.`
+      : earlier === "unknown"
+        ? `This attempt wrote nothing, but an earlier attempt of this push got no answer, so whether it wrote is unknown. Check the target with ${check} before running the push again.`
+        : `Nothing was written. ${next}`;
+  const withEarlier = (details) => (earlier ? { ...details, earlierAttempt: earlier } : details);
   switch (error?.code) {
     case "pointer_version_conflict":
       return {
-        message: `The target theme was deployed again after this push checked it (now at pointer ${body.currentVersion == null ? "none" : `v${body.currentVersion}`}). Nothing was written. Run the push again.`,
-        details: { currentVersion: body.currentVersion ?? null },
+        message: `The target theme was deployed again after this push checked it (now at pointer ${body.currentVersion == null ? "none" : `v${body.currentVersion}`}). ${nothing("Run the push again.")}`,
+        details: withEarlier({ currentVersion: body.currentVersion ?? null }),
       };
     case "site_state_version_conflict":
-      return { message: "The theme's settings were saved on the site while this push was running. Nothing was written. Run the push again.", details: {} };
+      return { message: `The theme's settings were saved on the site while this push was running. ${nothing("Run the push again.")}`, details: withEarlier({}) };
     case "manifest_mismatch":
-      return { message: "The files sent for writing differ from the files the dry run checked. Nothing was written. Run the push again.", details: {} };
+      return { message: `The files sent for writing differ from the files the dry run checked. ${nothing("Run the push again.")}`, details: withEarlier({}) };
     case "target_changed": {
       const was = error.expectedTargetInstance === undefined ? "the theme its dry run planned against" : error.expectedTargetInstance === null ? "a new draft (its dry run planned one)" : `theme ${error.expectedTargetInstance}`;
       const now = typeof body.targetInstance === "string" ? `theme ${body.targetInstance}` : "a new draft (there is no draft to reuse any more)";
       return {
-        message: `The push's target changed after its dry run: it planned against ${was}, but it would now write to ${now} (the live theme was switched, or the draft to reuse changed). Nothing was written. Run the push again to plan against the current target.`,
-        details: { expectedTargetInstance: error.expectedTargetInstance ?? null, targetInstance: typeof body.targetInstance === "string" ? body.targetInstance : null },
+        message: `The push's target changed after its dry run: it planned against ${was}, but it would now write to ${now} (the live theme was switched, or the draft to reuse changed). ${nothing("Run the push again to plan against the current target.")}`,
+        details: withEarlier({ expectedTargetInstance: error.expectedTargetInstance ?? null, targetInstance: typeof body.targetInstance === "string" ? body.targetInstance : null }),
       };
     }
     case "readback_unverified":
@@ -1171,7 +1184,7 @@ function themePushRefusal(error) {
   }
   // The 6.5 preflight names the file it refused (reserved_path, path_too_long, invalid_json…).
   if (error?.status === 422 && typeof body.path === "string") {
-    return { message: `${body.path}: ${typeof body.message === "string" ? body.message : error.code}. Nothing was written.`, details: { path: body.path } };
+    return { message: `${body.path}: ${typeof body.message === "string" ? body.message : error.code}. ${nothing("").trim()}`, details: withEarlier({ path: body.path }) };
   }
   return null;
 }
