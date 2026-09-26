@@ -412,7 +412,7 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
-- **0.11.0** (unreleased) — One named context per site, one explicit target (customer item 1.8).
+- **0.11.0** — One named context per site, one explicit target (customer item 1.8).
   The dev token and the v1 API key remain two separate credentials; a context references both.
   - **Breaking:** conflicting context choices now fail closed. When `BLOCOFY_CONTEXT`, the env
     credentials (`BLOCOFY_URL`/`BLOCOFY_TOKEN`, `BLOCOFY_API_URL`/`BLOCOFY_API_KEY`) and a
@@ -448,6 +448,16 @@ Each retry prints a notice on stderr.
     - A write resent after an attempt without an answer is reported as deployed when the platform
       had committed it. A refusal of such a resend says the earlier attempt's outcome is unknown (or
       that it was committed) instead of "Nothing was written", and `details.earlierAttempt` names it.
+    - A write that gets no definite answer (a 5xx, a 503, `readback_unverified` with an unknown
+      outcome, or no answer after the resends) is reported as an unknown outcome, not a failure: the
+      message names this push's key, to run the same command again with `--idempotency-key <key>`
+      (the platform then reports the committed deploy instead of writing it again); `--json` details
+      carry `outcome: "unknown"` and `idempotencyKey`.
+    - A `target_changed` refusal names the theme the dry run planned against and the current target,
+      and says "Nothing was deployed" (a `--draft` push may have created a new, empty draft, which
+      the next push reuses). After a write's `readback_unverified` the CLI points at
+      `theme push --diff --instance <handle>` for the theme the write was bound to (or `blocofy status`
+      for a new draft), not at a plain `--diff`, which compares with the live theme only.
     - Per-file outcomes are printed for the push and for `--dry-run`. `Deployed atomically` appears only
       with a verified readback. New refusals with messages: `pointer_version_conflict`,
       `site_state_version_conflict`, `manifest_mismatch`, `readback_unverified` (worded for the dry
