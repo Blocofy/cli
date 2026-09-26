@@ -32,17 +32,65 @@ const code = async (promise) => {
 const dirs = [];
 after(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
 
-test("order: --context beats BLOCOFY_CONTEXT beats env beats local.json beats the binding match", async () => {
+test("order: --context → BLOCOFY_CONTEXT → env pair → local.json → the binding match; each result names its source", async () => {
   const s = store({ a: ctx(siteA), a2: ctx(siteA), b: ctx(siteB) }, "b");
-  const binding = bindingFor(siteA, "a2");
-  const base = { getStore: () => s, binding, commandClass: "remote-mutation" };
-  assert.equal((await resolveContext({ ...base, flagContext: "b", envContextName: "a", envCtx })).name, "b");
-  assert.equal((await resolveContext({ ...base, envContextName: "a", envCtx })).name, "a");
+  const base = { getStore: () => s, binding: bindingFor(siteA), commandClass: "remote-mutation" };
+  const flag = await resolveContext({ ...base, flagContext: "b" });
+  assert.deepEqual([flag.name, flag.source, flag.ignored], ["b", "--context", []]);
+  const envName = await resolveContext({ ...base, envContextName: "a" });
+  assert.deepEqual([envName.name, envName.source, envName.ignored], ["a", "BLOCOFY_CONTEXT", []]);
   const env = await resolveContext({ ...base, envCtx });
-  assert.equal(env.name, "env");
-  assert.equal(env.source, "env");
-  assert.equal((await resolveContext(base)).name, "a2");
-  assert.equal((await resolveContext({ ...base, binding: bindingFor(siteB) })).name, "b");
+  assert.deepEqual([env.name, env.source, env.ignored], ["env", "env", []]);
+  const local = await resolveContext({ ...base, binding: bindingFor(siteA, "a2") });
+  assert.deepEqual([local.name, local.source, local.ignored], ["a2", ".blocofy/local.json", []]);
+  const match = await resolveContext({ ...base, binding: bindingFor(siteB) });
+  assert.deepEqual([match.name, match.source, match.ignored], ["b", "binding", []]);
+  // Two authorities that name the SAME context agree: no conflict, nothing overridden.
+  const agree = await resolveContext({ ...base, envContextName: "a2", binding: bindingFor(siteA, "a2") });
+  assert.deepEqual([agree.name, agree.source, agree.ignored], ["a2", "BLOCOFY_CONTEXT", []]);
+  const agreeEnv = await resolveContext({ ...base, envContextName: "env", envCtx });
+  assert.deepEqual([agreeEnv.name, agreeEnv.ignored], ["env", []]);
+});
+
+test("1.8: conflicting implicit authorities fail closed (TARGET_CONTEXT_CONFLICT, exit 3) — env pair + BLOCOFY_CONTEXT, env pair + local.json, BLOCOFY_CONTEXT ≠ local.json", async () => {
+  const s = store({ a: ctx(siteA), a2: ctx(siteA), b: ctx(siteB) }, "b");
+  const cases = [
+    [{ envContextName: "a", envCtx }, ["BLOCOFY_CONTEXT", "env"]],
+    [{ envCtx, binding: bindingFor(siteA, "a2") }, ["env", ".blocofy/local.json"]],
+    [{ envContextName: "b", binding: bindingFor(siteA, "a2") }, ["BLOCOFY_CONTEXT", ".blocofy/local.json"]],
+    [{ envContextName: "a", envCtx, binding: bindingFor(siteA, "a2") }, ["BLOCOFY_CONTEXT", "env", ".blocofy/local.json"]],
+  ];
+  for (const [extra, sources] of cases) {
+    let err;
+    try {
+      await resolveContext({ getStore: () => assert.fail("store loaded before the conflict was refused"), commandClass: "read", ...extra });
+    } catch (e) {
+      err = e;
+    }
+    assert.ok(err, `no refusal for ${sources.join(" + ")}`);
+    assert.equal(err.code, "TARGET_CONTEXT_CONFLICT", sources.join(" + "));
+    assert.equal(err.exitCode, 3);
+    assert.deepEqual(err.details.authorities.map((a) => a.source), sources);
+    assert.match(err.message, /--context/);
+    assert.match(err.message, /Nothing was read or written/);
+  }
+  // Unbound dir: the same env pair + BLOCOFY_CONTEXT conflict (nothing pins the site).
+  assert.equal(await code(resolveContext({ getStore: () => s, envContextName: "b", envCtx, commandClass: "read" })), "TARGET_CONTEXT_CONFLICT");
+});
+
+test("1.8: an explicit --context settles a conflict and REPORTS every authority it overrode", async () => {
+  const s = store({ a: ctx(siteA), a2: ctx(siteA), b: ctx(siteB) }, "b");
+  const r = await resolveContext({ getStore: () => s, flagContext: "a", envContextName: "b", envCtx, binding: bindingFor(siteA, "a2"), commandClass: "remote-mutation" });
+  assert.equal(r.name, "a");
+  assert.equal(r.source, "--context");
+  assert.deepEqual(r.ignored, [
+    { source: "BLOCOFY_CONTEXT", name: "b" },
+    { source: "env", name: "env" },
+    { source: ".blocofy/local.json", name: "a2" },
+  ]);
+  // --context env selects the env pair; a local.json naming another context is still reported.
+  const e = await resolveContext({ getStore: () => s, flagContext: "env", envCtx, binding: bindingFor(siteA, "a2"), commandClass: "read" });
+  assert.deepEqual([e.name, e.source, e.ignored], ["env", "--context", [{ source: ".blocofy/local.json", name: "a2" }]]);
 });
 
 test("with a binding current_context is IGNORED; the unique matching context wins", async () => {
@@ -77,13 +125,18 @@ test("several matches: non-TTY → TARGET_CONTEXT_REQUIRED (candidates listed); 
   assert.equal(await code(resolveContext({ getStore: () => s, binding, commandClass: "remote-mutation", isTTY: true, prompt: async () => "b" })), "TARGET_CONTEXT_REQUIRED");
 });
 
-test("no binding: current_context serves read commands only; no contexts at all → LOGIN_REQUIRED (exit 1)", async () => {
+test("contract C2: without a binding current_context serves ONLY the commands that opt in (status, target, pages check); no contexts at all → LOGIN_REQUIRED (exit 1)", async () => {
   const s = store({ a: ctx(siteA) }, "a");
-  assert.equal((await resolveContext({ getStore: () => s, commandClass: "read" })).name, "a");
-  assert.equal(await code(resolveContext({ getStore: () => s, commandClass: "local-write" })), "TARGET_CONTEXT_REQUIRED");
-  assert.equal(await code(resolveContext({ getStore: () => s, commandClass: "remote-mutation" })), "TARGET_CONTEXT_REQUIRED");
+  const cur = await resolveContext({ getStore: () => s, allowCurrentContext: true });
+  assert.deepEqual([cur.name, cur.source, cur.ignored], ["a", "current_context", []]);
+  // Every other command — reads that compare a local tree with the site included — needs an explicit choice.
+  for (const commandClass of ["read", "local-write", "remote-mutation"]) {
+    assert.equal(await code(resolveContext({ getStore: () => s, commandClass })), "TARGET_CONTEXT_REQUIRED", commandClass);
+  }
+  // With a binding current_context is never used, even by an opted-in command.
+  assert.equal(await code(resolveContext({ getStore: () => s, binding: bindingFor(siteB), allowCurrentContext: true })), "TARGET_CONTEXT_REQUIRED");
   try {
-    await resolveContext({ getStore: () => store({}), commandClass: "read" });
+    await resolveContext({ getStore: () => store({}), allowCurrentContext: true });
     assert.fail("expected LOGIN_REQUIRED");
   } catch (e) {
     assert.equal(e.code, "LOGIN_REQUIRED");
@@ -233,13 +286,38 @@ test("null platform origin rule: binding × server origin, all four combinations
   assert.equal((await resolveContext({ getStore: () => s, binding: withOrigin(siteA, null), commandClass: "remote-mutation" })).name, "a");
 });
 
-test("output: the target block format, the error envelope, and secret redaction", () => {
-  const t = targetData({ site: siteA, url: "https://alpha.test", contextName: "alpha", bindingLabel: ".blocofy/project.json", operation: "pages push · live" });
+test("output: the target block format (site, platform, context + its source, binding, operation/mode), the error envelope, and secret redaction", () => {
+  const t = targetData({ site: siteA, url: "https://alpha.test", platformOrigin: ORIGIN, contextName: "alpha", contextSource: ".blocofy/local.json", bindingLabel: ".blocofy/project.json", command: "pages push", mode: "live" });
   assert.equal(
     formatTargetBlock(t),
-    ["Target:    Alpha · sA1 · alpha.myblocofy.test", "Context:   alpha", "Binding:   .blocofy/project.json", "Operation: pages push · live"].join("\n"),
+    [
+      "Target:    Alpha · sA1 · alpha.myblocofy.test",
+      `Platform:  ${ORIGIN}`,
+      "Context:   alpha (from .blocofy/local.json)",
+      "Binding:   .blocofy/project.json",
+      "Operation: pages push · live",
+    ].join("\n"),
   );
-  assert.match(formatTargetBlock(targetData({ site: siteB, url: "https://beta.test", contextName: "env", bindingLabel: "none (new pull)", operation: "theme pull · live" })), /Beta · sB2 · https:\/\/beta\.test/);
+  assert.deepEqual(t, {
+    site: { id: "sA1", slug: "alpha", name: "Alpha", domain: "alpha.myblocofy.test" },
+    url: "https://alpha.test",
+    platform_origin: ORIGIN,
+    context: "alpha",
+    context_source: ".blocofy/local.json",
+    context_overrides: [],
+    binding: ".blocofy/project.json",
+    command: "pages push",
+    mode: "live",
+    operation: "pages push · live",
+  });
+  // An explicit --context names what it overrode; the default context and the env pair are labelled; a server
+  // that reports no platform origin is said so (never blank).
+  const over = targetData({ site: siteB, url: "https://beta.test", platformOrigin: null, contextName: "beta", contextSource: "--context", contextOverrides: [{ source: "BLOCOFY_CONTEXT", name: "a" }, { source: "env", name: "env" }], bindingLabel: "none", command: "status", mode: "read" });
+  assert.match(formatTargetBlock(over), /^Platform:  \(not reported by the server\)$/m);
+  assert.match(formatTargetBlock(over), /^Context:   beta \(from --context; overrides BLOCOFY_CONTEXT=a, env credentials\)$/m);
+  assert.deepEqual(over.context_overrides, [{ source: "BLOCOFY_CONTEXT", context: "a" }, { source: "env", context: "env" }]);
+  assert.match(formatTargetBlock(targetData({ site: siteA, url: null, platformOrigin: ORIGIN, contextName: "alpha", contextSource: "current_context", bindingLabel: "none", command: "status", mode: "read" })), /^Context:   alpha \(from default context \(blocofy use\)\)$/m);
+  assert.match(formatTargetBlock(targetData({ site: siteB, url: "https://beta.test", platformOrigin: ORIGIN, contextName: "env", contextSource: "env", bindingLabel: "none (new pull)", command: "theme pull", mode: "live" })), /Beta · sB2 · https:\/\/beta\.test[\s\S]*Context:   env \(from env credentials\)/);
   registerSecret("bcf_supersecret_value_123");
   assert.equal(redact("x bcf_supersecret_value_123 y"), "x [redacted] y");
   let out = "";

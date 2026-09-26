@@ -34,6 +34,7 @@ import { printError, printTarget, printWarning, redact, registerSecret, targetDa
 import {
   CONTEXT_NAME_RE,
   TargetError,
+  assertCredentialTypes,
   claimNewBinding,
   compareOrigin,
   enforceBindingPolicy,
@@ -70,12 +71,12 @@ const args = process.argv.slice(2);
 // BLOCOFY_API_KEY'den gelir, argv'ye asla girmez. `pages media-uses` / `media-decide` v1 API komutlarıdır.
 const KNOWN = {
   login: ["url", "token", "api-key", "api-url", "keychain"],
-  pages: ["decisions", "expected-revision-id", "expected-version", "json"],
+  pages: ["decisions", "expected-revision-id", "expected-version", "json", "dir"],
   themePull: ["draft", "instance"],
   themePush: ["diff", "draft", "instance", "name", "live", "yes", "confirm", "dry-run", "validate", "idempotency-key", "prune"],
   themeDev: ["port", "dry", "no-sync", "name"],
   themePublish: ["instance"],
-  themeRename: ["name"],
+  themeRename: ["name", "dir"],
   content: [],
   settingsPush: ["instance", "live", "yes", "confirm"],
   pagesPull: ["strict"],
@@ -101,6 +102,24 @@ function parseArgsOrExit(rest, known) {
     process.exit(1);
   }
   return parsed;
+}
+
+/**
+ * 1.8: the project directory a command resolves its binding from — the explicit argument (`[dir]` or `--dir <dir>`)
+ * when given, else cwd. A missing directory is a usage error before any request.
+ */
+function commandDir(explicit) {
+  if (explicit === undefined) return process.cwd();
+  if (typeof explicit !== "string" || explicit === "") throw new TargetError("USAGE", "--dir needs a directory. Nothing was read or written.", {}, 1);
+  const dir = resolve(explicit);
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new TargetError("USAGE", `Directory not found: ${dir}. Nothing was read or written.`, { dir }, 1);
+  return dir;
+}
+
+/** Commands whose only positional is the optional `[dir]`. */
+function singleDirArg(positionals, usage) {
+  if (positionals.length > 1) throw new TargetError("USAGE", `Usage: ${usage}`, {}, 1);
+  return commandDir(positionals[0]);
 }
 
 /** Human label for a resolved site: "Name (slug)" or just the slug. */
@@ -130,7 +149,8 @@ Usage
       Non-interactive shells: set BLOCOFY_API_KEY + BLOCOFY_API_URL instead.
 
   blocofy contexts [--json]          list saved contexts (never prints secrets)
-  blocofy use <name>                 default context for read-only commands outside a project
+  blocofy use <name>                 default context for status / target / pages check outside a
+                                     project (never used by any other command)
   blocofy logout --context <name>    remove a context and its secrets
   blocofy link [dir] --context <name> [--adopt]
       Bind a project directory to the context's (verified) site: writes .blocofy/project.json
@@ -176,17 +196,20 @@ Usage
                      (lists them first; on the live theme asks to confirm — non-interactive
                      shells must add --yes)
 
-  blocofy theme rename <handle> <new name>
+  blocofy theme rename <handle> <new name> [--dir <dir>]
       Rename a theme (the name is just a label). Works on any of your themes,
       including the live one. Handle comes from the panel theme card or 'blocofy status'.
+        --dir <dir>  the bound project whose site this is (default: cwd)
 
-  blocofy theme publish [--instance <handle>]
+  blocofy theme publish [dir] [--instance <handle>]
       Publish a draft theme to the LIVE site: it REPLACES the live theme for every visitor.
+      The site is the one [dir]'s project is bound to (dir defaults to cwd), so
+      'theme push ./shop && theme publish ./shop' always publishes ./shop's site.
       With no flag, publishes the draft that 'theme dev' / 'theme push --draft' writes into.
       The server refuses to publish a theme that has no pages (it would 404); preview first.
         --instance <handle>  publish a specific theme (handle from the panel / status)
 
-  blocofy status
+  blocofy status [dir]
       Show the live theme, page distribution per instance, drafts, and a health flag
       (ok / live_instance_empty / pages_split). For a problem it names the theme holding the
       pages, the missing pages, why, and safe preview-first next steps — never a one-line fix.
@@ -229,12 +252,13 @@ Usage
       is moved, exit 1. Files without "locale" use the site's default language (login needed;
       with --write outside a bound project only an explicit --context/env credentials are used).
 
-  blocofy pages media-uses <page-handle> [--json]
+  blocofy pages media-uses <page-handle> [--dir <dir>] [--json]
       List a page's localized-media decisions on its newest DRAFT (v1 API, pages:read).
       Prints the draft's revision id/version needed by media-decide. --json: raw response.
+      --dir <dir> (both media commands): the bound project whose site the page is on (default: cwd).
 
   blocofy pages media-decide <page-handle> --decisions <file.json>
-                             [--expected-revision-id <n> --expected-version <n>] [--json]
+                             [--expected-revision-id <n> --expected-version <n>] [--dir <dir>] [--json]
       Apply one or more media decisions to the page's draft atomically (v1 API, pages:write).
       The file is { "decisions": [ { path, facet, decision, target_asset?, alt?, caption?,
       decorative?, idempotency_key?, witness? } ] } (max 20). Without the two --expected-*
@@ -317,19 +341,31 @@ Examples
   blocofy theme pull store-theme --context store && cd store-theme && blocofy theme dev
   blocofy link ~/code/store-theme --context store     (an existing checkout)
   blocofy theme push && blocofy theme publish          (inside the bound project)
+  blocofy theme push ./shop && blocofy theme publish ./shop   (from anywhere: ./shop's site)
   blocofy target && blocofy status
   blocofy login --api-key --context store
   blocofy pages media-uses pg_abc123 --json
   blocofy pages media-decide pg_abc123 --decisions decisions.json
 
 Targets (which site a command talks to)
-  Every remote command verifies its site first and prints a Target block on stderr.
+  Every remote command verifies its site first and prints a Target block on stderr: the site,
+  the Platform it was verified on, the Context and where that choice came from (--context,
+  BLOCOFY_CONTEXT, env credentials, .blocofy/local.json, the project's site, the \`use\`
+  default), the Binding and the Operation (command · mode). --json: the same as {"target":…}.
   The context is chosen in this order: --context → BLOCOFY_CONTEXT → env credentials
   (BLOCOFY_URL+BLOCOFY_TOKEN and/or BLOCOFY_API_URL+BLOCOFY_API_KEY) → .blocofy/local.json
   → the one saved context matching the project's site → (terminal) pick from the matches.
-  Inside a bound project \`use\` is ignored. Commands that change a site (theme push/publish/
-  rename/dev sync, pages push, settings push, pages media-decide) need a bound project;
-  pulls into a new empty directory bind it. A wrong project/site pairing changes nothing.
+  BLOCOFY_CONTEXT, the env credentials and .blocofy/local.json are each a choice: if two of them
+  name different contexts the command is refused before anything is read or written
+  (TARGET_CONTEXT_CONFLICT) — pass --context <name> to settle it (the Target block then lists
+  what it overrode). Inside a bound project \`use\` is ignored; outside one it is used only by
+  status, target and pages check — every other command needs --context/BLOCOFY_CONTEXT/env.
+  Commands that change a site (theme push/publish/rename/dev sync, pages push, settings push,
+  pages media-decide) need a bound project; pulls into a new empty directory bind it. A wrong project/site pairing changes nothing.
+  A context holds two SEPARATE credentials — the theme dev token (bcf_…, BLOCOFY_TOKEN) and the
+  v1 API key (blcf_live_…, BLOCOFY_API_KEY); one in the other's place is refused before any
+  request (TARGET_CREDENTIAL_WRONG_TYPE, exit 1). Each is verified with its own endpoint
+  (/api/dev/whoami, /api/v1/ping) and both must resolve to the same site.
   A binding made against an older server has no platform origin: it still matches the same site
   (one warning; run \`blocofy link --adopt\` to record it). A server that reports no origin cannot
   serve a binding that records one (TARGET_UNVERIFIED).
@@ -554,7 +590,11 @@ async function login(rest) {
     process.exit(1);
   }
   if (token && !isValidToken(token)) {
-    console.error("Invalid --token — must start with bcf_.");
+    console.error(
+      token.startsWith("blcf_")
+        ? "Invalid --token — that is a v1 API key (blcf_…), not a theme dev token (bcf_…). The two are separate credentials: add the API key with `blocofy login --api-key`. Nothing was written."
+        : "Invalid --token — must start with bcf_.",
+    );
     process.exit(1);
   }
 
@@ -637,7 +677,7 @@ async function useCommand(rest) {
     store.current_context = name;
     saveStore(store);
   });
-  console.log(`✓ Default context for read-only commands outside a project: ${name}`);
+  console.log(`✓ Default context for status / target / pages check outside a project: ${name}`);
   console.log("  (Inside a bound project the project's site decides; `use` never retargets it.)");
 }
 
@@ -666,10 +706,11 @@ async function linkCommand(rest) {
   if (!flagContext && !process.env.BLOCOFY_CONTEXT && !envCtx) {
     throw new TargetError("TARGET_CONTEXT_REQUIRED", "`blocofy link` needs the context to bind: pass --context <name> (see `blocofy contexts`).", {});
   }
-  const resolved = await resolveContext({ flagContext, envContextName: process.env.BLOCOFY_CONTEXT || null, envCtx, getStore: () => loadStore(), binding: null, commandClass: "read" });
+  const resolved = await resolveContext({ flagContext, envContextName: process.env.BLOCOFY_CONTEXT || null, envCtx, getStore: () => loadStore(), binding: null });
   const secrets = resolved.env ? resolved.env.secrets : readSecrets(resolved.name, resolved.context);
   registerSecret(secrets.devToken);
   registerSecret(secrets.apiKey);
+  assertCredentialTypes({ resolved, secrets });
   const identity = await verifyTarget({ resolved, secrets, binding: null, retry });
   for (const w of identity.warnings ?? []) printWarning(w, { json: JSON_MODE });
 
@@ -694,15 +735,21 @@ async function linkCommand(rest) {
   const projectPath = writeBinding(dir, { site: identity.site, platformOrigin: identity.platformOrigin, contextName: resolved.name, staleLocal: true });
   recordVerifiedSite(resolved, identity);
   console.log(`✓ Bound ${dir} to ${siteLabel(identity.site) || identity.site.id} (${identity.site.id}) via context "${resolved.name}".`);
+  if (resolved.ignored.length) console.log(`  ${resolved.source} ${resolved.name} overrode ${overridesLabel(resolved.ignored)}.`);
   console.log(`  ${relative(process.cwd(), projectPath) || projectPath} — commit it; .blocofy/local.json stays private (git-ignored).`);
 }
 
 async function targetCommand(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, []);
-  const dir = resolve(positionals[0] ?? process.cwd());
-  const t = await prepareTarget({ command: "target", commandClass: "read", dir, flags, needs: "any", mode: "read", record: false, quiet: true });
+  const dir = singleDirArg(positionals, "blocofy target [dir]");
+  const t = await prepareTarget({ command: "target", commandClass: "read", dir, flags, needs: "any", mode: "read", record: false, quiet: true, allowCurrentContext: true });
   if (JSON_MODE) console.log(JSON.stringify({ target: t.display }, null, 2));
   else printTarget(t.display, { stream: process.stdout });
+}
+
+/** "BLOCOFY_CONTEXT=beta, env credentials" — the stated context choices an explicit --context overrode. */
+function overridesLabel(ignored) {
+  return ignored.map((a) => (a.source === "env" ? "env credentials" : `${a.source}=${a.name}`)).join(", ");
 }
 
 /** An unverified (migrated) named context gets the verified site recorded once. */
@@ -735,9 +782,10 @@ async function promptContext(candidates) {
  * resolution → offline precheck → required pair → remote identity (both pairs when present) → binding match →
  * target block. Throws TargetError / CredentialsError; never returns an unverified target.
  *
- * `needs`: "dev" | "api" | "any". Returns `{ name, dev, api, identity, binding, newBinding, display }`.
+ * `needs`: "dev" | "api" | "any". `allowCurrentContext`: only `status`, `target` and `pages check` may fall back to
+ * the `blocofy use` default outside a project (contract C2). Returns `{ name, dev, api, identity, binding, newBinding, display }`.
  */
-async function prepareTarget({ command, commandClass, dir, flags, needs, mode, record = true, quiet = false, resolveClass = commandClass }) {
+async function prepareTarget({ command, commandClass, dir, flags, needs, mode, record = true, quiet = false, allowCurrentContext = false }) {
   const binding = findBinding(dir);
   const { newBinding } = enforceBindingPolicy({ commandClass, binding, dir, command });
   const envCtx = envContext();
@@ -748,7 +796,7 @@ async function prepareTarget({ command, commandClass, dir, flags, needs, mode, r
     envCtx,
     getStore: () => (cachedStore ??= loadStore()),
     binding,
-    commandClass: resolveClass,
+    allowCurrentContext,
     isTTY: Boolean(process.stdin.isTTY && process.stderr.isTTY),
     prompt: promptContext,
   });
@@ -756,6 +804,7 @@ async function prepareTarget({ command, commandClass, dir, flags, needs, mode, r
   const secrets = resolved.env ? resolved.env.secrets : readSecrets(resolved.name, resolved.context);
   registerSecret(secrets.devToken);
   registerSecret(secrets.apiKey);
+  assertCredentialTypes({ resolved, secrets });
 
   const hasDev = Boolean(resolved.context.dev && secrets.devToken);
   const hasApi = Boolean(resolved.context.api && secrets.apiKey);
@@ -765,9 +814,6 @@ async function prepareTarget({ command, commandClass, dir, flags, needs, mode, r
   if (needs === "api" || needs === "both") {
     if (!hasApi) {
       throw new TargetError("LOGIN_REQUIRED", `API key required: run \`blocofy login --api-key\` (or set BLOCOFY_API_KEY + BLOCOFY_API_URL). The dev token (bcf_) is not accepted for the v1 API.`, { context: resolved.name }, 1);
-    }
-    if (!isValidApiKey(secrets.apiKey)) {
-      throw new TargetError("LOGIN_REQUIRED", `The API key of context "${resolved.name}" is not a v1 key — it must start with blcf_live_. Run \`blocofy login --api-key\`.`, { context: resolved.name }, 1);
     }
   }
   // CF-T4 — site plan/apply need BOTH pairs: the v1 API for the site-state endpoints, the dev token for the
@@ -788,7 +834,7 @@ async function prepareTarget({ command, commandClass, dir, flags, needs, mode, r
 
   const url = needs === "api" ? resolved.context.api?.url : resolved.context.dev?.url ?? resolved.context.api?.url;
   const bindingLabel = binding ? relative(process.cwd(), binding.projectPath) || binding.projectPath : newBinding ? "none (new pull)" : "none";
-  const display = targetData({ site: identity.site, url, contextName: resolved.name, bindingLabel, operation: `${command} · ${mode}` });
+  const display = targetData({ site: identity.site, url, platformOrigin: identity.platformOrigin, contextName: resolved.name, contextSource: resolved.source, contextOverrides: resolved.ignored, bindingLabel, command, mode });
   if (!quiet) printTarget(display, { json: JSON_MODE });
   return {
     name: resolved.name,
@@ -930,10 +976,11 @@ async function themePush(rest) {
   // PS-13 `--prune`: canlı temadan dosya SİLER. Hedef canlıysa (`--live` ya da canlı temanın handle'ı
   // verilmiş `--instance`; whoami çözülemediyse canlı sayılır) canlı-push onay kuralı aynen uygulanır:
   // `--yes`/`--confirm` → onaylı, TTY → liste basıldıktan sonra y/N, non-TTY → yazımsız çıkış.
-  const prune = Boolean(flags.prune) && !dryRun;
+  // TPUSH-5: `--dry-run --prune` plans the pruned payload (it writes nothing, so it asks nothing).
+  const prune = Boolean(flags.prune);
   const liveTarget = mode === "live" || (mode === "instance" && (whoami.liveThemeId == null || String(instance) === String(whoami.liveThemeId)));
   const pruneDecision = livePushDecision({
-    draft: !prune || !liveTarget,
+    draft: !prune || dryRun || !liveTarget,
     yes: Boolean(flags.yes),
     confirm: Boolean(flags.confirm),
     isTTY: Boolean(process.stdin.isTTY),
@@ -1003,6 +1050,8 @@ async function themePush(rest) {
       }
       failAndExit({ code: "idempotency_conflict", status: error.status, message: "The idempotency key was already used with different content. Retry with a new key (or omit --idempotency-key).", details: {} });
     }
+    const refusal = themePushRefusal(error, { draft: mode === "draft", idempotencyKey });
+    if (refusal) failAndExit({ code: error.code, status: error.status, ...refusal });
     throw error;
   }
 
@@ -1016,6 +1065,12 @@ async function themePush(rest) {
     const warnings = Array.isArray(result.warnings) ? result.warnings : [];
     console.log(`✓ Validation passed (dry run — nothing written).${warnings.length ? ` ${warnings.length} warning(s).` : ""}`);
     for (const w of warnings) console.log(`  ⚠ ${w}`);
+    // TPUSH-5: a 6.5 server plans the push on the control plane; an older one only validated.
+    if (result.newDraft === true) console.log("Plan against a new draft (created by the push):");
+    else if (result.target === "live" || result.target === "draft") {
+      console.log(`Plan against the ${result.target} theme, pointer ${result.pointerVersion == null ? "none yet" : `v${result.pointerVersion}`}:`);
+    }
+    printThemeOutcomes(result.files);
     return;
   }
 
@@ -1027,7 +1082,15 @@ async function themePush(rest) {
     if (Array.isArray(result.remoteOnlyRemoved) && result.remoteOnlyRemoved.length) {
       console.log(`  (removed ${result.remoteOnlyRemoved.length} file(s) absent locally — --prune)`);
     }
-    console.log(`✓ Deployed atomically: deployment #${result.deploymentId}, revision #${result.sourceRevisionId}, pointer v${result.pointerVersion}.`);
+    printThemeOutcomes(result.files);
+    const ids = `deployment #${result.deploymentId}, revision #${result.sourceRevisionId}, pointer v${result.pointerVersion}`;
+    // TPUSH-5: "atomically" only when the server read the written files back and they match what was sent.
+    if (result.readback?.verified === true) {
+      console.log(`✓ Deployed atomically and read back (${result.readback.files} file${result.readback.files === 1 ? "" : "s"} verified): ${ids}.`);
+    } else {
+      console.log(`✓ Deployed: ${ids}. The written files were not verified (this server does not read them back).`);
+    }
+    if (result.convergence === "converged") console.log("  (already applied by an earlier push with the same idempotency key)");
     if (mode === "draft") {
       console.log("Preview & publish it in the admin panel: Theme -> Theme library -> \"Open in editor\".");
       console.log("Publish it live with:  blocofy theme publish");
@@ -1054,6 +1117,105 @@ async function themePush(rest) {
       : "";
     console.log(`Push: ${result.created} created, ${result.updated} updated${extra}.`);
   }
+}
+
+/**
+ * TPUSH-5 — per-file outcomes of a theme push or its plan (6.5 server; an older one sends none). Changed files are
+ * listed, unchanged ones only counted.
+ */
+function printThemeOutcomes(files) {
+  if (!Array.isArray(files)) return;
+  const count = { created: 0, updated: 0, removed: 0, unchanged: 0 };
+  const mark = { created: "+", updated: "~", removed: "-" };
+  for (const f of files) {
+    if (!(f?.outcome in count)) continue;
+    count[f.outcome] += 1;
+    if (f.outcome !== "unchanged") console.log(`  ${mark[f.outcome]} ${f.path}`);
+  }
+  console.log(`Files: ${count.created} created, ${count.updated} updated, ${count.removed} removed, ${count.unchanged} unchanged.`);
+}
+
+/**
+ * TPUSH-5 — the 6.5 theme push refusals, in words. `null` = not one of them. A refusal writes nothing, but when the
+ * apply was resent after an attempt without a certain answer (`error.earlierAttempt`), that earlier attempt may have
+ * written: then the message says so instead of "Nothing was written", and `details.earlierAttempt` names it.
+ */
+function themePushRefusal(error, { draft = false, idempotencyKey = null } = {}) {
+  const body = error?.body ?? {};
+  const earlier = error?.phase === "apply" && (error.earlierAttempt === "unknown" || error.earlierAttempt === "committed") ? error.earlierAttempt : null;
+  // Where an earlier attempt of this push could have written: the theme its dry run bound it to (every attempt is the
+  // same request), never the current target a refusal may name. A new-draft binding (null) is found via the drafts.
+  const bound = error?.expectedTargetInstance;
+  const check =
+    typeof bound === "string"
+      ? `\`blocofy theme push --diff --instance ${bound}\``
+      : bound === null
+        ? "`blocofy status` (it lists the drafts; one this push created would be there) and `blocofy theme push --diff --instance <handle>`"
+        : "`blocofy status` and `blocofy theme push --diff --instance <handle>`";
+  const target = typeof bound === "string" ? `theme ${bound}` : "the target";
+  // `wrote`/`none`: what this refusal certainly did not do ("deployed" for target_changed, see below).
+  const nothing = (next, { wrote = "wrote", none = "Nothing was written." } = {}) =>
+    earlier === "committed"
+      ? `This attempt ${wrote} nothing, but an earlier attempt of this push was committed (its answer said so). Check ${target} with ${check} before running the push again.`
+      : earlier === "unknown"
+        ? `This attempt ${wrote} nothing, but an earlier attempt of this push got no answer, so whether it wrote is unknown. Check ${target} with ${check} before running the push again.`
+        : `${none} ${next}`;
+  const withEarlier = (details) => (earlier ? { ...details, earlierAttempt: earlier } : details);
+  // tpush round 5: a write whose last answer is transient (a passed-through 5xx, a 503 fail-closed, 502
+  // readback_unverified with outcomeUnknown, or no answer) has an unknown outcome. It is retryable under the SAME key:
+  // the platform then reports the committed deploy instead of writing it again. Keys are per run, so name this one.
+  const unknownOutcome = (what) => ({
+    ...(error?.code ? {} : { code: error?.status ? `HTTP_${error.status}` : "NETWORK_ERROR" }),
+    message:
+      `${what}, so whether this push was deployed${typeof bound === "string" ? ` to theme ${bound}` : ""} is unknown` +
+      `${earlier === "committed" ? " (an earlier attempt's answer said it was committed)" : ""}. ` +
+      `Run the same command again with \`--idempotency-key ${idempotencyKey ?? "<the same key>"}\`: if this push was deployed, the server reports that deploy instead of writing it again.`,
+    details: withEarlier({ phase: "apply", outcome: "unknown", idempotencyKey, ...(error?.status ? { status: error.status } : {}), ...(bound !== undefined ? { expectedTargetInstance: bound } : {}) }),
+  });
+  switch (error?.code) {
+    case "pointer_version_conflict":
+      return {
+        message: `The target theme was deployed again after this push checked it (now at pointer ${body.currentVersion == null ? "none" : `v${body.currentVersion}`}). ${nothing("Run the push again.")}`,
+        details: withEarlier({ currentVersion: body.currentVersion ?? null }),
+      };
+    case "site_state_version_conflict":
+      return { message: `The theme's settings were saved on the site while this push was running. ${nothing("Run the push again.")}`, details: withEarlier({}) };
+    case "manifest_mismatch":
+      return { message: `The files sent for writing differ from the files the dry run checked. ${nothing("Run the push again.")}`, details: withEarlier({}) };
+    case "target_changed": {
+      const was = error.expectedTargetInstance === undefined ? "the theme its dry run planned against" : error.expectedTargetInstance === null ? "a new draft (its dry run planned one)" : `theme ${error.expectedTargetInstance}`;
+      const now = typeof body.targetInstance === "string" ? `theme ${body.targetInstance}` : "a new draft (there is no draft to reuse any more)";
+      // Definitive, but "nothing written" is not true of it: a draft push that lost the read/provision race may have
+      // provisioned a new empty draft first (kept; the next draft push reuses it). No theme file was deployed.
+      const none = `Nothing was deployed${draft ? " (at most a new, empty draft was created, which the next push reuses)" : ""}.`;
+      return {
+        message: `The push's target changed after its dry run: it planned against ${was}, but it would now write to ${now} (the live theme was switched, or the draft to reuse changed). ${nothing("Run the push again to plan against the current target.", { wrote: "deployed", none })}`,
+        details: withEarlier({ expectedTargetInstance: error.expectedTargetInstance ?? null, targetInstance: typeof body.targetInstance === "string" ? body.targetInstance : null }),
+      };
+    }
+    case "readback_unverified":
+      // The dry run's plan is rolled back on the server: nothing was written, whatever `committed` says.
+      if (error.phase === "plan") {
+        return {
+          message: "The server could not verify the plan of this push's dry run (a plan is rolled back). Nothing was written. Run the push again.",
+          details: { phase: "plan", committed: false },
+        };
+      }
+      if (body.outcomeUnknown === true) return unknownOutcome("The server could not read the control plane's answer to the write");
+      // The write went to the theme the dry run bound it to; a plain --diff compares with the live theme only.
+      return {
+        message: `The server could not read back the files it wrote${body.committed === true ? " (the deploy was committed)" : body.committed === false ? " (nothing was committed)" : ""}. Check ${target} with ${check}.`,
+        details: { phase: "apply", committed: typeof body.committed === "boolean" ? body.committed : null, ...(bound !== undefined ? { expectedTargetInstance: bound } : {}) },
+      };
+  }
+  if (error?.phase === "apply" && (error.status == null || error.status >= 500)) {
+    return unknownOutcome(error.status == null ? "The write got no answer" : `The write got no definite answer (HTTP ${error.status}${error.code ? ` ${error.code}` : ""})`);
+  }
+  // The 6.5 preflight names the file it refused (reserved_path, path_too_long, invalid_json…).
+  if (error?.status === 422 && typeof body.path === "string") {
+    return { message: `${body.path}: ${typeof body.message === "string" ? body.message : error.code}. ${nothing("").trim()}`, details: withEarlier({ path: body.path }) };
+  }
+  return null;
 }
 
 /** PS-19 — print platform/CLI findings; returns the exit code they imply. */
@@ -1190,7 +1352,7 @@ async function pagesCheck(rest) {
     console.error(`Directory not found: ${dir}`);
     process.exit(1);
   }
-  const creds = (await optionalTarget({ command: "pages check", dir, flags }))?.dev;
+  const creds = (await optionalTarget({ command: "pages check", dir, flags, allowCurrentContext: true }))?.dev;
   const online = Boolean(creds);
   const r = await checkPages({ dir, onRetry, ...(online ? { url: creds.url, token: creds.token } : {}) });
   const code = reportPageDiagnostics(r.diagnostics, { strict: Boolean(flags.strict) });
@@ -1641,11 +1803,11 @@ async function contentPull(scope, rest) {
  * Optional online mode for offline-capable reads (`pages check`, `pages migrate-layout`): no credentials at all, or
  * no context choosable outside a project → offline. Inside a bound project every other refusal still applies.
  */
-async function optionalTarget({ command, dir, flags, localWrite = false }) {
+async function optionalTarget({ command, dir, flags, localWrite = false, allowCurrentContext = false }) {
   try {
-    // Review I3: a command that writes local files (migrate-layout --write) never borrows the global default
-    // context — outside a binding it needs an explicit --context/env, else it runs offline.
-    return await prepareTarget({ command, commandClass: "read", resolveClass: localWrite ? "local-write" : "read", dir, flags, needs: "dev", mode: localWrite ? "read · local write" : "read" });
+    // Review I3 / contract C2: only `pages check` may borrow the global default context outside a binding;
+    // migrate-layout (dry run or --write) needs an explicit --context/env there, else it runs offline.
+    return await prepareTarget({ command, commandClass: "read", allowCurrentContext, dir, flags, needs: "dev", mode: localWrite ? "read · local write" : "read" });
   } catch (error) {
     if (error instanceof TargetError && (error.code === "LOGIN_REQUIRED" || (error.code === "TARGET_CONTEXT_REQUIRED" && !findBinding(dir)))) return null;
     throw error;
@@ -1671,11 +1833,14 @@ function printMediaUsesView(view) {
 async function pagesMediaUses(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, KNOWN.pages);
   const page = positionals[0];
+  const usage = "blocofy pages media-uses <page-handle> [--dir <dir>] [--json]";
   if (!page) {
-    console.error("Usage: blocofy pages media-uses <page-handle> [--json]");
+    console.error(`Usage: ${usage}`);
     process.exit(1);
   }
-  const { apiUrl, apiKey } = (await prepareTarget({ command: "pages media-uses", commandClass: "read", dir: process.cwd(), flags, needs: "api", mode: `read · page ${page}` })).api;
+  // 1.8: the project directory is `--dir`; a directory given as a positional is refused, never dropped for cwd's.
+  if (positionals.length > 1) throw new TargetError("USAGE", `Usage: ${usage}`, {}, 1);
+  const { apiUrl, apiKey } = (await prepareTarget({ command: "pages media-uses", commandClass: "read", dir: commandDir(flags.dir), flags, needs: "api", mode: `read · page ${page}` })).api;
   const view = await fetchPageMediaUses({ apiUrl, apiKey, page, onRetry });
   if (flags.json) console.log(JSON.stringify(view, null, 2));
   else printMediaUsesView(view);
@@ -1696,10 +1861,12 @@ async function pagesMediaDecide(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, KNOWN.pages);
   const page = positionals[0];
   const file = typeof flags.decisions === "string" ? resolve(flags.decisions) : null;
+  const usage = "blocofy pages media-decide <page-handle> --decisions <file.json> [--expected-revision-id <n> --expected-version <n>] [--dir <dir>] [--json]";
   if (!page || !file) {
-    console.error("Usage: blocofy pages media-decide <page-handle> --decisions <file.json> [--expected-revision-id <n> --expected-version <n>] [--json]");
+    console.error(`Usage: ${usage}`);
     process.exit(1);
   }
+  if (positionals.length > 1) throw new TargetError("USAGE", `Usage: ${usage}`, {}, 1);
   let parsed;
   try {
     parsed = JSON.parse(readFileSync(file, "utf8"));
@@ -1718,7 +1885,7 @@ async function pagesMediaDecide(rest) {
     process.exit(1);
   }
 
-  const { apiUrl, apiKey } = (await prepareTarget({ command: "pages media-decide", commandClass: "remote-mutation", dir: process.cwd(), flags, needs: "api", mode: `draft · page ${page}` })).api;
+  const { apiUrl, apiKey } = (await prepareTarget({ command: "pages media-decide", commandClass: "remote-mutation", dir: commandDir(flags.dir), flags, needs: "api", mode: `draft · page ${page}` })).api;
   if (expectedRevisionId === null) {
     const view = await fetchPageMediaUses({ apiUrl, apiKey, page, onRetry });
     if (view.applicable === false) {
@@ -1895,8 +2062,9 @@ async function themeDev(rest) {
 }
 
 async function themePublish(rest) {
-  const { flags } = parseArgsOrExit(rest, KNOWN.themePublish);
-  const target = await prepareTarget({ command: "theme publish", commandClass: "remote-mutation", dir: process.cwd(), flags, needs: "dev", mode: `live${typeof flags.instance === "string" ? ` · instance ${flags.instance}` : " · CLI draft"}` });
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.themePublish);
+  const dir = singleDirArg(positionals, "blocofy theme publish [dir] [--instance <handle>]");
+  const target = await prepareTarget({ command: "theme publish", commandClass: "remote-mutation", dir, flags, needs: "dev", mode: `live${typeof flags.instance === "string" ? ` · instance ${flags.instance}` : " · CLI draft"}` });
   const creds = target.dev;
   let instance = typeof flags.instance === "string" ? flags.instance : null;
   if (!instance) {
@@ -1932,18 +2100,18 @@ async function themeRename(rest) {
   const handle = positionals[0];
   const name = positionals.slice(1).join(" ") || (typeof flags.name === "string" ? flags.name : null);
   if (!handle || !name) {
-    console.error("Usage: blocofy theme rename <handle> <new name>");
+    console.error("Usage: blocofy theme rename <handle> <new name> [--dir <dir>]");
     console.error("  Rename a theme (handle from the panel theme card or `blocofy status`).");
     process.exit(1);
   }
-  const creds = (await prepareTarget({ command: "theme rename", commandClass: "remote-mutation", dir: process.cwd(), flags, needs: "dev", mode: `instance ${handle}` })).dev;
+  const creds = (await prepareTarget({ command: "theme rename", commandClass: "remote-mutation", dir: commandDir(flags.dir), flags, needs: "dev", mode: `instance ${handle}` })).dev;
   const result = await renameInstance({ url: creds.url, token: creds.token, instance: handle, name, onRetry });
   console.log(`✓ Renamed to "${result.name}" (${result.id}).`);
 }
 
 async function status(rest) {
-  const { flags } = parseArgsOrExit(rest, []);
-  const creds = (await prepareTarget({ command: "status", commandClass: "read", dir: process.cwd(), flags, needs: "dev", mode: "read" })).dev;
+  const { flags, positionals } = parseArgsOrExit(rest, []);
+  const creds = (await prepareTarget({ command: "status", commandClass: "read", dir: singleDirArg(positionals, "blocofy status [dir]"), flags, needs: "dev", mode: "read", allowCurrentContext: true })).dev;
   const s = await fetchSiteStatus({ url: creds.url, token: creds.token, onRetry });
   const live = s.live_theme_instance;
   console.log(`\nSite: ${s.site.slug}${s.url ? ` · ${s.url}` : ""}`);

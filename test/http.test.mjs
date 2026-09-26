@@ -155,3 +155,18 @@ test("parseRetryAfter: seconds, HTTP-date, past date → 0, garbage/absent → n
   assert.equal(parseRetryAfter("-1", now), null);
   assert.equal(parseRetryAfter(null, now), null);
 });
+
+test("isFinal: a retry-status answer the caller calls a verdict is returned at once, body intact; others still retry", async () => {
+  const s = await fake((n) => (n === 1 ? { status: 502, body: '{"error":"bad_gateway"}' } : { status: 502, body: '{"error":"readback_unverified"}' }));
+  const r = recorder();
+  const isFinal = async (res) => (await res.json()).error === "readback_unverified";
+  try {
+    const res = await fetchWithRetry(s.url, {}, { ...r, isFinal });
+    assert.equal(res.status, 502);
+    assert.deepEqual(await res.json(), { error: "readback_unverified" }, "the caller still reads the body");
+    assert.equal(s.reqs.length, 2, "the plain 502 was retried once, the verdict was not");
+    assert.equal(r.notices.length, 1);
+  } finally {
+    await s.close();
+  }
+});

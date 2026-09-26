@@ -26,6 +26,11 @@ function themeDir(files) {
 test("pushTheme sends the canonical handshake headers + dryRun + idempotency-key", async () => {
   let seen = null;
   const fake = createServer((req, res) => {
+    if (req.method === "GET") {
+      // TPUSH-5: a keyed dry run plans the merged payload, so it reads the target first.
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ files: {}, protocol: 1 }));
+    }
     let body = "";
     req.on("data", (d) => (body += d));
     req.on("end", () => {
@@ -51,7 +56,8 @@ test("pushTheme sends the canonical handshake headers + dryRun + idempotency-key
   });
   assert.equal(seen.headers["x-blocofy-protocol"], "1");
   assert.equal(seen.headers["x-blocofy-capabilities"], EXPECTED_CAPS);
-  assert.equal(seen.headers["x-idempotency-key"], "idem-xyz");
+  // TPUSH-5: the dry run is a rolled-back plan; it carries its own key and never spends the push's.
+  assert.match(seen.headers["x-idempotency-key"], /^cli-plan-[0-9a-f-]{36}$/);
   assert.equal(seen.body.dryRun, true);
   assert.deepEqual(result, { ok: true, dryRun: true, warnings: [] });
 });

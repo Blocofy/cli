@@ -40,7 +40,7 @@ history. If the context already has a dev token for another site, nothing is sav
 
 ```
 blocofy contexts [--json]          # list saved contexts (never prints secrets)
-blocofy use <name>                 # default context for read-only commands outside a project
+blocofy use <name>                 # default context for status / target / pages check outside a project
 blocofy logout --context <name>    # remove a context and its secrets
 ```
 
@@ -95,30 +95,66 @@ the admin panel, never touching the live site. Publish it with `blocofy theme pu
 - `--instance <handle>` — push to a specific theme by its handle (safe targeted write — no
   live-confirmation prompt).
 - `--name <name>` — name the new draft (draft mode only; ignored on `--live`/`--instance`).
-- `--dry-run` / `--validate` — validate on the server without writing (auth + snapshot + Liquid
-  check); the two flags are aliases.
+- `--dry-run` / `--validate` — check the push on the server without writing; the two flags are
+  aliases. The dry run covers exactly the files the push would send (remote-only files it keeps
+  included; with `--prune`, without the ones it would remove). A current platform plans the whole
+  deploy and prints the target, its pointer version and what happens to each file
+  (`+` created, `~` updated, `-` removed; unchanged files are counted).
 - `--diff` — show what a push would change vs the target (read-only), then stop.
 - `--idempotency-key <k>` — attach a key so a retried push is not double-applied.
 - `--prune` — also remove target files that no longer exist locally (`locales/` included);
   lists them first, and on the live theme asks to confirm (non-interactive shells add `--yes`).
 
-```
-blocofy theme rename <handle> <new name>
-```
-Rename a theme (the name is just a label). Works on any of your themes, including the live one.
+Every push first runs that dry run, then writes the same files. On a current platform the write is
+bound to the dry run: it is refused, with nothing written, if the files differ from what was checked
+(`manifest_mismatch`), the target theme was deployed again in between (`pointer_version_conflict`),
+or the push would now write to another theme than the one its dry run planned against — the live
+theme was switched, or the draft to reuse changed (`target_changed`: nothing was deployed, though a
+draft push may have created a new, empty draft that the next push reuses; run the push again).
+A write that gets no answer (network error, 429/502/503/504) is resent (up to 3 times) under the same
+key; a push the platform already committed is then reported as deployed (`already applied by an
+earlier push with the same idempotency key`). If that resend is refused, the refusal cannot say
+what the earlier attempt did: the message says whether it was committed or its outcome is
+unknown (`details.earlierAttempt`), never "Nothing was written". Check the theme the dry run bound
+the write to (`details.expectedTargetInstance`, not the current target a refusal names) with
+`blocofy theme push --diff --instance <handle>` — or, for a new draft, find it with `blocofy status` —
+before running the push again. A write whose last answer is still not definite (HTTP 500 or another
+5xx, a 503, a 502 `readback_unverified` with `outcomeUnknown`, or no answer) has an unknown outcome
+(`details.outcome: "unknown"`): the message names the push's key (`details.idempotencyKey`); run the
+same command again with `--idempotency-key <that key>`, and a push that was deployed is reported as
+deployed instead of being written again.
+If the dry run would remove a file the push did not carry, the push stops
+(`THEME_PUSH_TARGET_CHANGED`). The message says which case each file is:
+- a path the push cannot send (not a file inside a theme folder, e.g. a bare `layout` row; listed in
+  `details.notCarryable`) stops every run the same way, and only `--prune` gets past it (it removes
+  the file);
+- any other file was either added while the push was running, and running the push again keeps it,
+  or the push cannot read it (for example a theme file that is not published): then it stops every
+  run the same way, and you add `--prune` to remove it or add a local file at that path to replace it.
+
+`Deployed atomically` is printed only when the server read the written files back and they match;
+an older platform that does not read back gets `Deployed: … not verified`.
 
 ```
-blocofy theme publish [--instance <handle>]
+blocofy theme rename <handle> <new name> [--dir <dir>]
+```
+Rename a theme (the name is just a label). Works on any of your themes, including the live one.
+- `--dir <dir>` — the bound project whose site the theme is on (default: cwd).
+
+```
+blocofy theme publish [dir] [--instance <handle>]
 ```
 Publish a draft theme to the LIVE site: it replaces the live theme for every visitor. With no
 flag, publishes the draft that `theme dev` / `theme push --draft` writes into. The server
-refuses to publish a theme that has no pages (it would 404); preview first.
+refuses to publish a theme that has no pages (it would 404); preview first. The site is the one
+`[dir]`'s project is bound to (`dir` defaults to cwd), so `blocofy theme push ./shop && blocofy
+theme publish ./shop` always publishes `./shop`'s site, whatever directory you run it from.
 - `--instance <handle>` — publish a specific theme.
 
 ### Status
 
 ```
-blocofy status
+blocofy status [dir]
 ```
 Show the live theme, page distribution per instance, drafts, and a health flag (`ok` /
 `live_instance_empty` / `pages_split`). For a problem it names the theme holding the pages, the
@@ -172,14 +208,15 @@ exit 1. Files without `"locale"` use the site's default language (needs login); 
 outside a bound project only explicit `--context`/env credentials are used.
 
 ```
-blocofy pages media-uses <page-handle> [--json]
+blocofy pages media-uses <page-handle> [--dir <dir>] [--json]
 ```
 List a page's localized-media decisions on its newest **draft** (v1 API, `pages:read`). Prints
-the draft's revision id/version needed by `media-decide`.
+the draft's revision id/version needed by `media-decide`. `--dir <dir>` (both media commands):
+the bound project whose site the page is on (default: cwd).
 
 ```
 blocofy pages media-decide <page-handle> --decisions <file.json>
-                            [--expected-revision-id <n> --expected-version <n>] [--json]
+                            [--expected-revision-id <n> --expected-version <n>] [--dir <dir>] [--json]
 ```
 Apply one or more media decisions to the page's draft atomically (v1 API, `pages:write`). The
 file is `{ "decisions": [ { path, facet, decision, target_asset?, alt?, caption?, decorative?,
@@ -283,8 +320,28 @@ blocofy --help
 
 ## Contexts and project binding
 
-Every remote command verifies its site first and prints a `Target` block on stderr. The context
-is chosen in this order:
+A **context** is one named operator profile for one site. It references two **separate**
+credentials, each kept in the secret store and never printed: the theme dev token (`bcf_…`,
+verified with `GET /api/dev/whoami`) and the v1 API key (`blcf_live_…`, verified with
+`GET /api/v1/ping`). They stay two credentials with their own scopes — the CLI never merges them
+into one token and never sends one to the other's endpoint. Both pairs of a context must resolve
+to the same site (`TARGET_CREDENTIAL_MISMATCH`); a secret of the wrong type in either slot is
+refused before any request (`TARGET_CREDENTIAL_WRONG_TYPE`, exit 1 — e.g. a `blcf_live_…` key in
+`BLOCOFY_TOKEN`).
+
+Every remote command verifies its site first and prints a `Target` block on stderr (`--json`:
+the same as a `{"target":…}` line with `platform_origin`, `context_source`,
+`context_overrides`, `command` and `mode`):
+
+```
+Target:    Alpha Bakery · s1a2b3 · alpha.myblocofy.com
+Platform:  https://app.blocofy.com
+Context:   alpha (from .blocofy/local.json)
+Binding:   .blocofy/project.json
+Operation: theme push · draft
+```
+
+The context is chosen in this order:
 
 1. `--context <name>`
 2. `BLOCOFY_CONTEXT`
@@ -292,12 +349,32 @@ is chosen in this order:
 4. `.blocofy/local.json` (the project's own context choice)
 5. the one saved context matching the project's site
 6. (terminal) pick from the matches
+7. outside a project, and only for `status`, `target` and `pages check`: the `blocofy use` default
+
+**Conflicts fail closed.** `BLOCOFY_CONTEXT`, the env credentials and `.blocofy/local.json` are
+each a choice. When two of them name different contexts, the command is refused before
+anything is read or written (`TARGET_CONTEXT_CONFLICT`, exit 3) — e.g. `BLOCOFY_URL`/
+`BLOCOFY_TOKEN` exported in a shell that then runs inside a project whose `local.json` names a
+context. Settle it with `--context <name>` (or unset the others); the `Context` line then lists
+what it overrode, e.g. `alpha (from --context; overrides env credentials)`.
 
 Inside a **bound project**, `blocofy use` is ignored — the project's binding decides, not the
-global default context. Commands that change a site (`theme push`/`publish`/`rename`, `theme
-dev` sync, `pages push`, `settings push`, `pages media-decide`) need a bound project; a pull into
-a new empty directory binds it automatically. A wrong project/site pairing changes nothing
-(`TARGET_SITE_MISMATCH` — pass `--adopt` on `link` to rebind deliberately).
+global default context. Outside one, the `use` default serves only `status`, `target` and
+`pages check`, and the `Context` line says so (`from default context (blocofy use)`); every other
+command in an unbound directory needs `--context`, `BLOCOFY_CONTEXT` or env credentials, so a
+`use` in another terminal never changes what a diff, dry run or plan compares against. Commands
+that change a site (`theme push`/`publish`/`rename`, `theme dev` sync, `pages push`, `settings
+push`, `pages media-decide`) need a bound project; a pull into a new empty directory binds it
+automatically. A wrong project/site pairing changes nothing (`TARGET_SITE_MISMATCH` — pass
+`--adopt` on `link` to rebind deliberately).
+
+Every command resolves its binding from the directory it acts on — the `[dir]` argument (or
+`--dir <dir>` for `theme rename` and `pages media-uses|media-decide`), else cwd.
+
+**CI:** commit `.blocofy/project.json` (never `local.json`) and set the env pairs the job needs
+(`BLOCOFY_URL` + `BLOCOFY_TOKEN` for theme/pages/settings, plus `BLOCOFY_API_URL` +
+`BLOCOFY_API_KEY` for the v1 commands and `site plan`/`apply`). The env credentials are then the
+only choice, and each command still verifies they belong to the committed binding's site.
 
 A binding made against an older server has no recorded `platform_origin`: it still matches the
 same site (one warning printed; run `blocofy link --adopt` to record it). A server that reports
@@ -305,7 +382,8 @@ no origin cannot serve a binding that records one — that refuses with `TARGET_
 server cannot prove it is the platform the binding was made against).
 
 A refusal in this area (`TARGET_SITE_MISMATCH`, `TARGET_UNVERIFIED`, `TARGET_CREDENTIAL_MISMATCH`,
-`TARGET_CONTEXT_REQUIRED`, `TARGET_CONTEXT_UNKNOWN`, `TARGET_BINDING_INVALID`) always means:
+`TARGET_CONTEXT_CONFLICT`, `TARGET_CONTEXT_REQUIRED`, `TARGET_CONTEXT_UNKNOWN`,
+`TARGET_BINDING_INVALID`, and `TARGET_CREDENTIAL_WRONG_TYPE` with exit 1) always means:
 **nothing was read or written** — the command stops before it touches the site or the local
 project files, and exits 3 (see [Exit codes](#exit-codes)).
 
@@ -328,11 +406,68 @@ line; the target block (`{"target":…}`) and any warning lines are printed on s
 
 Retries: network errors and HTTP 429/502/503/504 are retried up to 3 times (`Retry-After`
 honoured, max 30s per wait; else 0.3s/0.9s/2s), resending the identical request (`pages push`
-carries one `x-idempotency-key` per push). HTTP 500 is never retried. Each retry prints a notice
-on stderr.
+carries one `x-idempotency-key` per push). HTTP 500 is never retried, nor is a `theme push` dry
+run answered 502 `readback_unverified` (a verdict on a rolled-back plan, not a transient failure).
+Each retry prints a notice on stderr.
 
 ## Changelog
 
+- **0.11.0** — One named context per site, one explicit target (customer item 1.8).
+  The dev token and the v1 API key remain two separate credentials; a context references both.
+  - **Breaking:** conflicting context choices now fail closed. When `BLOCOFY_CONTEXT`, the env
+    credentials (`BLOCOFY_URL`/`BLOCOFY_TOKEN`, `BLOCOFY_API_URL`/`BLOCOFY_API_KEY`) and a
+    project's `.blocofy/local.json` name different contexts, the command stops with
+    `TARGET_CONTEXT_CONFLICT` (exit 3) instead of silently taking the first. A shell that exports
+    the env credentials inside a project with a `local.json` must pass `--context <name>` (or
+    unset them). An explicit `--context` still wins, and the target block lists what it overrode.
+  - **Breaking:** outside a bound project the `blocofy use` default is used only by `status`,
+    `target` and `pages check` (as contract C2 specified). `theme push --diff/--dry-run`,
+    `pages push --dry-run`, `site plan`, `theme dev --no-sync` and `pages media-uses` in an unbound
+    directory now need `--context`, `BLOCOFY_CONTEXT` or env credentials
+    (`TARGET_CONTEXT_REQUIRED`).
+  - The target block shows the platform the site was verified on and where the context choice
+    came from (`Platform:` line; `Context: <name> (from …)`); `--json` adds `platform_origin`,
+    `context_source`, `context_overrides`, `command` and `mode`.
+  - `theme publish [dir]` and `status [dir]` take the project directory as an argument, and
+    `theme rename` / `pages media-uses|media-decide` take `--dir <dir>`. Before, they always used
+    cwd, so `theme push ./a && theme publish` run from another project published that project's
+    draft. A directory that does not exist, or one given where the command takes none (a second
+    positional to `target`/`status`/`theme publish`, any directory positional to
+    `pages media-uses|media-decide`), is a usage error (exit 1) before any request.
+  - A secret of the wrong type (a `blcf_live_…` key as the dev token, a `bcf_…` token as the API
+    key) is refused before any request with `TARGET_CREDENTIAL_WRONG_TYPE`, naming the variable
+    or context — it was sent to the wrong endpoint and reported as `TARGET_UNVERIFIED`.
+    `login --token blcf_…` points at `login --api-key`.
+  - Theme push preflight bound to the write (customer item 6.5):
+    - `theme push` checks the MERGED payload (local files plus the remote-only files it keeps) in its
+      dry run, then writes exactly those files with the dry run's `manifestHash` and
+      `expectedPointerVersion`, and — when the platform names it — the theme the dry run planned
+      against (`expectedTargetInstance`; refused with `target_changed` if the target moved). The dry
+      run carries its own throwaway idempotency key, so
+      `--idempotency-key` retries of a committed push still converge.
+    - A write resent after an attempt without an answer is reported as deployed when the platform
+      had committed it. A refusal of such a resend says the earlier attempt's outcome is unknown (or
+      that it was committed) instead of "Nothing was written", and `details.earlierAttempt` names it.
+    - A write that gets no definite answer (a 5xx, a 503, `readback_unverified` with an unknown
+      outcome, or no answer after the resends) is reported as an unknown outcome, not a failure: the
+      message names this push's key, to run the same command again with `--idempotency-key <key>`
+      (the platform then reports the committed deploy instead of writing it again); `--json` details
+      carry `outcome: "unknown"` and `idempotencyKey`.
+    - A `target_changed` refusal names the theme the dry run planned against and the current target,
+      and says "Nothing was deployed" (a `--draft` push may have created a new, empty draft, which
+      the next push reuses). After a write's `readback_unverified` the CLI points at
+      `theme push --diff --instance <handle>` for the theme the write was bound to (or `blocofy status`
+      for a new draft), not at a plain `--diff`, which compares with the live theme only.
+    - Per-file outcomes are printed for the push and for `--dry-run`. `Deployed atomically` appears only
+      with a verified readback. New refusals with messages: `pointer_version_conflict`,
+      `site_state_version_conflict`, `manifest_mismatch`, `readback_unverified` (worded for the dry
+      run, where nothing was written, or for the write; `details.phase` says which) and the preflight path
+      errors (`path_too_long`, `reserved_path`, `binary_content_rejected`…, naming the file).
+    - A push stops with `THEME_PUSH_TARGET_CHANGED` when the dry run would remove a file the push did
+      not carry; the message says whether a re-run can keep it or only `--prune` gets past it, and
+      `details.notCarryable` lists the paths the push cannot send. `--prune` lists them for
+      confirmation instead. `--dry-run --prune` now plans the pruned set.
+    - Against an older platform the write body is unchanged from 0.10.
 - **0.10.0** — Named contexts + verified project binding, and a declarative whole-site state.
   - `login` now saves a **named context** (`--context <name>`, default the site's slug) instead
     of one global credentials pair; `blocofy contexts` / `use` / `logout` manage them, and
