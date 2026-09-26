@@ -10,6 +10,8 @@ on:
 
 permissions:
   contents: read
+  # npm provenance: the registry records a signed statement that this workflow, on this tag's commit, built the tarball.
+  id-token: write
 
 jobs:
   publish:
@@ -34,6 +36,6 @@ jobs:
         run: node --test
 
       - name: Publish to npm
-        run: npm publish --access public
+        run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
