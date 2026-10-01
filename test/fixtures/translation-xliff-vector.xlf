@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xliff version="1.2" xmlns="urn:oasis:names:tc:xliff:document:1.2" xmlns:bf="https://blocofy.com/ns/translation/1">
+  <file original="blocofy" datatype="plaintext" source-language="tr-TR" target-language="en-US" bf:format="blocofy-translation/1" bf:exported-at="2026-09-30T10:00:00.000Z" bf:by="human" bf:next-cursor="entry:haberler:900">
+    <body>
+      <trans-unit id="page:p1j4vv:hero1.heading" resname="page:p1j4vv:hero1.heading" bf:kind="page" bf:group="page:p1j4vv" bf:type="text" bf:source-hash="9f2c11aa" bf:target-hash="811c9dc5">
+        <source>Hoş geldiniz &amp; &quot;merhaba&quot; &lt;dünya&gt; &apos;çok&apos;&#13;
+ikinci satır&#9;sekme</source>
+        <target state="new"></target>
+        <note>Ana sayfa › Hero › Başlık</note>
+      </trans-unit>
+      <trans-unit id="page:p1j4vv:hero1.body" resname="page:p1j4vv:hero1.body" datatype="html" bf:kind="page" bf:group="page:p1j4vv" bf:type="richtext" bf:source-hash="0a1b2c3d" bf:target-hash="4e5f6a7b">
+        <source>&lt;p&gt;Merhaba &lt;b&gt;dünya&lt;/b&gt;&lt;/p&gt;</source>
+        <target state="needs-review-translation">&lt;p&gt;Hello &lt;b&gt;world&lt;/b&gt;&lt;/p&gt;</target>
+        <note>Ana sayfa › Hero › Metin</note>
+      </trans-unit>
+      <trans-unit id="option:haberler:kategori:a &amp; b" resname="option:haberler:kategori:a &amp; b" bf:kind="option" bf:group="option:haberler" bf:type="text" bf:source-hash="11223344" bf:target-hash="55667788">
+        <source>A &amp; B</source>
+        <target state="translated">A and B</target>
+        <note>Haberler › Kategori › Seçenek</note>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>

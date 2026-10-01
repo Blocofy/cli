@@ -1,0 +1,208 @@
+{
+  "_about": "Shared with the Blocofy CLI: every implementation of the XLIFF dialect must accept `accept` and refuse `reject` (bodies go into `envelope` at {{BODY}}; {{FILE_EXTRA}} is empty) and every entry of `documents`.",
+  "envelope": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<xliff version=\"1.2\" xmlns=\"urn:oasis:names:tc:xliff:document:1.2\" xmlns:bf=\"https://blocofy.com/ns/translation/1\">\n  <file original=\"blocofy\" datatype=\"plaintext\" source-language=\"tr-TR\" target-language=\"en-US\"{{FILE_EXTRA}}>\n    <body>{{BODY}}</body>\n  </file>\n</xliff>\n",
+  "accept": [
+    {
+      "name": "numeric decimal and hex references",
+      "body": "<trans-unit id=\"settings:a\"><source>&#65;&#x42;</source><target>&#67;</target></trans-unit>",
+      "source": "AB",
+      "target": "C"
+    },
+    {
+      "name": "numeric reference above the BMP",
+      "body": "<trans-unit id=\"settings:a\"><source>&#x1F600;</source><target>&#128512;</target></trans-unit>",
+      "source": "\ud83d\ude00",
+      "target": "\ud83d\ude00"
+    },
+    {
+      "name": "the five XML entities",
+      "body": "<trans-unit id=\"settings:a\"><source>&amp;&lt;&gt;&quot;&apos;</source><target>&amp;&lt;&gt;&quot;&apos;</target></trans-unit>",
+      "source": "&<>\"'",
+      "target": "&<>\"'"
+    },
+    {
+      "name": "a double-escaped ampersand is one level only",
+      "body": "<trans-unit id=\"settings:a\"><source>&amp;lt;</source><target>&amp;amp;</target></trans-unit>",
+      "source": "&lt;",
+      "target": "&amp;"
+    },
+    {
+      "name": "escaped CR and tab",
+      "body": "<trans-unit id=\"settings:a\"><source>a&#13;b&#9;c</source><target>y</target></trans-unit>",
+      "source": "a\rb\tc",
+      "target": "y"
+    },
+    {
+      "name": "a literal CRLF is a newline",
+      "body": "<trans-unit id=\"settings:a\"><source>a\r\nb</source><target>y</target></trans-unit>",
+      "source": "a\nb",
+      "target": "y"
+    },
+    {
+      "name": "a comment outside text is ignored",
+      "body": "<!-- a & b --><trans-unit id=\"settings:a\"><source>x</source><target>y</target></trans-unit>",
+      "source": "x",
+      "target": "y"
+    },
+    {
+      "name": "a comment inside text is dropped",
+      "body": "<trans-unit id=\"settings:a\"><source>a<!--x-->b</source><target>y</target></trans-unit>",
+      "source": "ab",
+      "target": "y"
+    },
+    {
+      "name": "numeric reference with leading zeros",
+      "body": "<trans-unit id=\"settings:a\"><source>&#x0000041;&#000066;</source><target>y</target></trans-unit>",
+      "source": "AB",
+      "target": "y"
+    }
+  ],
+  "reject": [
+    {
+      "name": "bare ampersand followed by a space",
+      "body": "<trans-unit id=\"settings:a\"><source>A & B</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "bare ampersand before a word",
+      "body": "<trans-unit id=\"settings:a\"><source>A &b c</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "bare ampersand in a target",
+      "body": "<trans-unit id=\"settings:a\"><source>x</source><target>Tom & Jerry</target></trans-unit>"
+    },
+    {
+      "name": "bare ampersand in an attribute",
+      "body": "<trans-unit id=\"settings:a&b\"><source>x</source></trans-unit>"
+    },
+    {
+      "name": "named HTML entity nbsp",
+      "body": "<trans-unit id=\"settings:a\"><source>a&nbsp;b</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "named HTML entity copy",
+      "body": "<trans-unit id=\"settings:a\"><source>x</source><target>&copy; 2026</target></trans-unit>"
+    },
+    {
+      "name": "named HTML entity euro",
+      "body": "<trans-unit id=\"settings:a\"><source>&euro;</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "upper-case AMP is not an XML entity",
+      "body": "<trans-unit id=\"settings:a\"><source>&AMP;</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "empty numeric reference",
+      "body": "<trans-unit id=\"settings:a\"><source>&#;</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "empty hex reference",
+      "body": "<trans-unit id=\"settings:a\"><source>&#x;</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "upper-case hex marker",
+      "body": "<trans-unit id=\"settings:a\"><source>&#X41;</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "reference to NUL",
+      "body": "<trans-unit id=\"settings:a\"><source>&#0;</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "reference to a control character",
+      "body": "<trans-unit id=\"settings:a\"><source>&#1;</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "reference to a lone surrogate",
+      "body": "<trans-unit id=\"settings:a\"><source>&#xD800;</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "reference beyond U+10FFFF",
+      "body": "<trans-unit id=\"settings:a\"><source>&#1114112;</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "reference to U+FFFE",
+      "body": "<trans-unit id=\"settings:a\"><source>&#xFFFE;</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "attribute hides a comment opener (bypass)",
+      "body": "<trans-unit id=\"settings:a\" foo=\"<!--\"><source>a&copy;b &#0;</source><target bar=\"-->\">y</target></trans-unit>"
+    },
+    {
+      "name": "less-than inside an attribute value",
+      "body": "<trans-unit id=\"settings:a\" foo=\"a<b\"><source>x</source></trans-unit>"
+    },
+    {
+      "name": "closing CDATA marker in text",
+      "body": "<trans-unit id=\"settings:a\"><source>a]]>b</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "raw NUL",
+      "body": "<trans-unit id=\"settings:a\"><source>a\u0000b</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "raw control character",
+      "body": "<trans-unit id=\"settings:a\"><source>a\u0001b</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "raw U+FFFE",
+      "body": "<trans-unit id=\"settings:a\"><source>a\ufffeb</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "raw lone surrogate",
+      "body": "<trans-unit id=\"settings:a\"><source>a\ud800b</source><target>y</target></trans-unit>"
+    },
+    {
+      "name": "unclosed comment",
+      "body": "<trans-unit id=\"settings:a\"><source>x</source><target>y</target></trans-unit><!-- never closed"
+    },
+    {
+      "name": "double hyphen in a comment",
+      "body": "<!-- a -- b --><trans-unit id=\"settings:a\"><source>x</source></trans-unit>"
+    },
+    {
+      "name": "stray equals signs in a tag",
+      "body": "<trans-unit id=\"settings:a\"=====><source>x</source></trans-unit>"
+    }
+  ],
+  "documents": [
+    {
+      "name": "DOCTYPE with an entity",
+      "xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE xliff [<!ENTITY a \"b\">]>\n<xliff version=\"1.2\" xmlns=\"urn:oasis:names:tc:xliff:document:1.2\" xmlns:bf=\"https://blocofy.com/ns/translation/1\">\n  <file original=\"blocofy\" datatype=\"plaintext\" source-language=\"tr-TR\" target-language=\"en-US\">\n    <body></body>\n  </file>\n</xliff>\n"
+    },
+    {
+      "name": "external DOCTYPE",
+      "xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE xliff SYSTEM \"x.dtd\">\n<xliff version=\"1.2\" xmlns=\"urn:oasis:names:tc:xliff:document:1.2\" xmlns:bf=\"https://blocofy.com/ns/translation/1\">\n  <file original=\"blocofy\" datatype=\"plaintext\" source-language=\"tr-TR\" target-language=\"en-US\">\n    <body></body>\n  </file>\n</xliff>\n"
+    },
+    {
+      "name": "ELEMENT declaration",
+      "xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!ELEMENT xliff ANY>\n<xliff version=\"1.2\" xmlns=\"urn:oasis:names:tc:xliff:document:1.2\" xmlns:bf=\"https://blocofy.com/ns/translation/1\">\n  <file original=\"blocofy\" datatype=\"plaintext\" source-language=\"tr-TR\" target-language=\"en-US\">\n    <body></body>\n  </file>\n</xliff>\n"
+    },
+    {
+      "name": "DOCTYPE and entity behind a comment opener hidden in an attribute",
+      "xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE xliff [<!ENTITY e \"x\">]><!-- -->\n<xliff version=\"1.2\" xmlns=\"urn:oasis:names:tc:xliff:document:1.2\" xmlns:bf=\"https://blocofy.com/ns/translation/1\">\n  <file original=\"blocofy\" datatype=\"plaintext\" source-language=\"tr-TR\" target-language=\"en-US\">\n    <body><trans-unit id=\"settings:a\" foo=\"<!--\"><source>&e;</source><target bar=\"-->\">y</target></trans-unit></body>\n  </file>\n</xliff>\n"
+    },
+    {
+      "name": "processing instruction",
+      "xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<xliff version=\"1.2\" xmlns=\"urn:oasis:names:tc:xliff:document:1.2\" xmlns:bf=\"https://blocofy.com/ns/translation/1\">\n  <file original=\"blocofy\" datatype=\"plaintext\" source-language=\"tr-TR\" target-language=\"en-US\">\n    <body><?xml-stylesheet href=\"a.css\"?></body>\n  </file>\n</xliff>\n"
+    },
+    {
+      "name": "CDATA",
+      "xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<xliff version=\"1.2\" xmlns=\"urn:oasis:names:tc:xliff:document:1.2\" xmlns:bf=\"https://blocofy.com/ns/translation/1\">\n  <file original=\"blocofy\" datatype=\"plaintext\" source-language=\"tr-TR\" target-language=\"en-US\">\n    <body><trans-unit id=\"settings:a\"><source><![CDATA[x]]></source><target>y</target></trans-unit></body>\n  </file>\n</xliff>\n"
+    },
+    {
+      "name": "two files",
+      "xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<xliff version=\"1.2\" xmlns=\"urn:oasis:names:tc:xliff:document:1.2\" xmlns:bf=\"https://blocofy.com/ns/translation/1\">\n  <file original=\"blocofy\" datatype=\"plaintext\" source-language=\"tr-TR\" target-language=\"en-US\">\n    <body></body>\n  </file><file original=\"b\" source-language=\"tr-TR\" target-language=\"en-US\"><body></body></file>\n</xliff>\n"
+    },
+    {
+      "name": "unknown bf attribute",
+      "xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<xliff version=\"1.2\" xmlns=\"urn:oasis:names:tc:xliff:document:1.2\" xmlns:bf=\"https://blocofy.com/ns/translation/1\">\n  <file original=\"blocofy\" datatype=\"plaintext\" source-language=\"tr-TR\" target-language=\"en-US\" bf:extra=\"1\">\n    <body></body>\n  </file>\n</xliff>\n"
+    },
+    {
+      "name": "encoding other than UTF-8",
+      "xml": "<?xml version=\"1.0\" encoding=\"ISO-8859-9\"?>\n<xliff version=\"1.2\" xmlns=\"urn:oasis:names:tc:xliff:document:1.2\" xmlns:bf=\"https://blocofy.com/ns/translation/1\">\n  <file original=\"blocofy\" datatype=\"plaintext\" source-language=\"tr-TR\" target-language=\"en-US\">\n    <body></body>\n  </file>\n</xliff>\n"
+    },
+    {
+      "name": "XML version 1.1",
+      "xml": "<?xml version=\"1.1\" encoding=\"UTF-8\"?>\n<xliff version=\"1.2\" xmlns=\"urn:oasis:names:tc:xliff:document:1.2\" xmlns:bf=\"https://blocofy.com/ns/translation/1\">\n  <file original=\"blocofy\" datatype=\"plaintext\" source-language=\"tr-TR\" target-language=\"en-US\">\n    <body></body>\n  </file>\n</xliff>\n"
+    }
+  ]
+}
