@@ -452,7 +452,7 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
-- **Unreleased** — Translation packages (#925).
+- **0.12.0** — Translation packages (#925).
   - `blocofy translations export --locale <tag> --out <file> [--format json|xliff] [--only …]`
     writes every text of one language that needs translating to one JSON or XLIFF 1.2 file. It
     follows every export window and lists what the platform left out, by reason.
