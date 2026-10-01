@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { chunkPackage, fitChunksToBodyCap, fromXliff, readPackageFile, readTranslationPackage, toXliff, XLIFF_MAX_CHARS, XliffError } from "../lib/translations.mjs";
+import { chunkPackage, exportAllTranslations, fitChunksToBodyCap, fromXliff, readPackageFile, readTranslationPackage, toXliff, XLIFF_MAX_CHARS, XliffError } from "../lib/translations.mjs";
 
 /**
  * #925 — `blocofy translations export|import`. The XLIFF fixtures are the platform's
@@ -369,6 +369,8 @@ test("[P2] readPackageFile reads JSON and XLIFF (by extension or a leading <) an
   assert.throws(() => readPackageFile("{", "en.json"), /JSON/);
   assert.throws(() => readPackageFile(JSON.stringify({ hello: 1 }), "en.json"), /format/);
   assert.throws(() => readPackageFile("<xliff>", "en.xlf"), XliffError);
+  // M7: a JSON package saved with a UTF-8 byte order mark (common on Windows) is read.
+  assert.deepEqual(readPackageFile(`\uFEFF${JSON.stringify(VECTOR)}`, "en.json"), VECTOR);
 });
 
 const u = (id, target = "T") => ({ id, kind: "settings", group: "", context: "", type: "text", source: "s", source_hash: "h", target, target_hash: "", state: "missing" });
@@ -705,5 +707,178 @@ test("[T10] a wet --publish import is never resent after a retryable failure; ot
     assert.equal(envelope.error.details.chunks, 1);
   } finally {
     await dropped.close();
+  }
+});
+
+// ── fix round 2 ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const entryUnits = (n, text = (i) => `T${i}`) => Array.from({ length: n }, (_, i) => ({ id: `entry:haberler:${i + 1}:baslik`, target: text(i), source_hash: "h" }));
+const pkgOf = (units) => ({ format: "blocofy-translation/1", source_locale: "tr-TR", target_locale: "en-US", units });
+
+test("[R1] a run that stops part-way still reports what the earlier chunks did (publication, cache), human and --json", async () => {
+  const first = {
+    ...report(Array(500).fill("applied")),
+    dry_run: false,
+    groups: [{ group: "entry:haberler:1", kind: "entry", created: true, updated: true, published: true }],
+    publication: { published: 40, blocked: 3 },
+    cache: { ok: false, code: "accelerator_degraded", reason: "flush_failed" },
+  };
+  const refusal = { status: 422, body: { error: { code: "validation_failed", message: "1 unit is invalid", details: { units: [{ id: "entry:haberler:501:baslik", result: "invalid", message: "bad" }] } } } };
+  const s = await fakeV1((rec, n) => (n % 2 === 1 ? { status: 200, body: first } : refusal));
+  try {
+    const file = join(home, "big.json");
+    writeFileSync(file, JSON.stringify(pkgOf(entryUnits(600))));
+    const res = await runCli(["translations", "import", file, "--publish"], envFor(s));
+    assert.equal(res.code, 2);
+    assert.match(res.stdout, /Imported en-US: 500 applied/);
+    assert.match(res.stdout, /Published 40 page\(s\) and record\(s\)\. 3 could not be published and stay drafts\./);
+    assert.match(res.stdout, /site cache could not be refreshed/);
+    assert.match(res.stdout, /accelerator_degraded: flush_failed/);
+    assert.match(res.stderr, /Import stopped after 1 of 2 chunks/);
+
+    const json = await runCli(["translations", "import", file, "--publish", "--json"], envFor(s));
+    assert.equal(json.code, 2);
+    const partial = JSON.parse(json.stdout.trim().split("\n").pop());
+    assert.equal(partial.stopped, true);
+    assert.equal(partial.chunks_done, 1);
+    assert.equal(partial.chunks, 2);
+    assert.equal(partial.counts.applied, 500);
+    assert.deepEqual(partial.publication, { published: 40, blocked: 3 });
+    assert.deepEqual(partial.cache, [{ ok: false, code: "accelerator_degraded", reason: "flush_failed" }]);
+    assert.equal(JSON.parse(json.stderr.trim().split("\n").pop()).error.code, "validation_failed");
+  } finally {
+    await s.close();
+  }
+});
+
+test("[R2] export never overwrites an existing --out file unless --force; the write goes through a temp file", async () => {
+  const s = await fakeV1(() => ({ status: 200, body: { ...VECTOR, next_cursor: null, skipped: NO_SKIPS } }));
+  try {
+    const out = join(home, "en.json");
+    writeFileSync(out, "translated by hand");
+    const refused = await runCli(["translations", "export", "--locale", "en-US", "--out", out], envFor(s));
+    assert.notEqual(refused.code, 0);
+    assert.match(refused.stderr, /already exists/);
+    assert.match(refused.stderr, /--force/);
+    assert.equal(readFileSync(out, "utf8"), "translated by hand");
+    assert.equal(s.reqs.length, 0, "refused before any request");
+    const forced = await runCli(["translations", "export", "--locale", "en-US", "--out", out, "--force"], envFor(s));
+    assert.equal(forced.code, 0, forced.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(out, "utf8")), { ...VECTOR, next_cursor: null });
+    const { readdirSync } = await import("node:fs");
+    assert.deepEqual(readdirSync(home).filter((f) => f.includes("blocofy-tmp")), []);
+  } finally {
+    await s.close();
+  }
+});
+
+test("[R3a] import re-splits a chunk over the 8M-character body cap before sending", async () => {
+  const s = await fakeV1((rec) => ({ status: 200, body: report(rec.body.package.units.map(() => "applied")) }));
+  try {
+    const file = join(home, "large.json");
+    writeFileSync(file, JSON.stringify(pkgOf(entryUnits(3, () => "x".repeat(3_000_000)))));
+    const res = await runCli(["translations", "import", file, "--dry-run"], envFor(s));
+    assert.equal(res.code, 0, res.stderr);
+    assert.deepEqual(s.reqs.map((r) => r.body.package.units.length), [2, 1]);
+    for (const r of s.reqs) assert.ok(JSON.stringify(r.body).length <= 8_000_000);
+  } finally {
+    await s.close();
+  }
+});
+
+test("[R3b] export stops when the server repeats a cursor (twice in a row, or in a cycle), and after 1,000 windows at most", async () => {
+  const window = (next_cursor) => ({ status: 200, body: { ...VECTOR, units: [], next_cursor, skipped: NO_SKIPS } });
+  const same = await fakeV1(() => window("A"));
+  try {
+    const res = await runCli(["translations", "export", "--locale", "en-US", "--out", join(home, "a.json")], envFor(same));
+    assert.equal(res.code, 1);
+    assert.match(res.stderr, /returned a cursor it had already returned/);
+    assert.equal(same.reqs.length, 2);
+  } finally {
+    await same.close();
+  }
+  const cycle = await fakeV1((rec, n) => window(["A", "B"][(n - 1) % 2]));
+  try {
+    const res = await runCli(["translations", "export", "--locale", "en-US", "--out", join(home, "b.json")], envFor(cycle));
+    assert.equal(res.code, 1);
+    assert.match(res.stderr, /returned a cursor it had already returned/);
+    assert.equal(cycle.reqs.length, 3);
+    assert.equal(existsSync(join(home, "b.json")), false);
+  } finally {
+    await cycle.close();
+  }
+  const endless = await fakeV1((rec, n) => window(`C${n}`));
+  try {
+    await assert.rejects(exportAllTranslations({ apiUrl: endless.apiUrl, apiKey: KEY, locale: "en-US", maxWindows: 5 }), /more than 5 windows/);
+    assert.equal(endless.reqs.length, 5);
+  } finally {
+    await endless.close();
+  }
+});
+
+test("[R3c] an exported XLIFF file over 8M characters is written with a warning that it cannot be imported back", async () => {
+  const huge = { ...VECTOR.units[2], source: "s".repeat(XLIFF_MAX_CHARS) };
+  const s = await fakeV1(() => ({ status: 200, body: { ...VECTOR, units: [huge], next_cursor: null, skipped: NO_SKIPS } }));
+  try {
+    const out = join(home, "huge.xlf");
+    const res = await runCli(["translations", "export", "--locale", "en-US", "--out", out, "--format", "xliff"], envFor(s));
+    assert.equal(res.code, 0, res.stderr);
+    assert.ok(readFileSync(out, "utf8").length > XLIFF_MAX_CHARS);
+    assert.match(res.stderr, /cannot be imported back/);
+  } finally {
+    await s.close();
+  }
+});
+
+test("[R3d] a group over 5,000 units is sliced and the summary says it is not marked translated", async () => {
+  const units = Array.from({ length: 5001 }, (_, i) => ({ id: `page:p1j4vv:n${i}.heading`, target: "T", source_hash: "h" }));
+  const s = await fakeV1((rec) => ({ status: 200, body: report(rec.body.package.units.map(() => "applied")) }));
+  try {
+    const file = join(home, "page.json");
+    writeFileSync(file, JSON.stringify(pkgOf(units)));
+    const res = await runCli(["translations", "import", file, "--dry-run"], envFor(s));
+    assert.equal(res.code, 0, res.stderr);
+    assert.equal(s.reqs.length, 11);
+    assert.match(res.stdout, /1 page\(s\) or record\(s\) hold more than 5,000 texts and would be sent in several calls, so they are not marked translated\./);
+  } finally {
+    await s.close();
+  }
+});
+
+test("[R4] a publishing chunk answered 429 was not applied and says so; a 500 has an unknown outcome; neither is resent", async () => {
+  const s = await fakeV1((rec, n) => (n === 1 ? { status: 429, headers: { "retry-after": "0" }, body: { error: { code: "rate_limited", message: "slow down" } } } : { status: 500, body: { error: { code: "internal", message: "boom" } } }));
+  try {
+    const file = join(home, "en.json");
+    writeFileSync(file, JSON.stringify(VECTOR));
+    const limited = await runCli(["translations", "import", file, "--publish"], envFor(s));
+    assert.equal(s.reqs.length, 1);
+    assert.notEqual(limited.code, 0);
+    assert.match(limited.stderr, /chunk 1 of 1/);
+    assert.match(limited.stderr, /was not applied/);
+    assert.doesNotMatch(limited.stderr, /may or may not/);
+    const failed = await runCli(["translations", "import", file, "--publish"], envFor(s));
+    assert.equal(s.reqs.length, 2);
+    assert.equal(failed.code, 1);
+    assert.match(failed.stderr, /\(HTTP 500\).*may or may not have been applied and published/);
+  } finally {
+    await s.close();
+  }
+});
+
+test("[R5] --json has one shape: an all-empty file reports the same keys as a normal run", async () => {
+  const s = await fakeV1(() => ({ status: 200, body: report(["applied", "applied"]) }));
+  try {
+    const empty = join(home, "empty.json");
+    writeFileSync(empty, JSON.stringify({ ...VECTOR, units: VECTOR.units.map((x) => ({ ...x, target: "" })) }));
+    const full = join(home, "full.json");
+    writeFileSync(full, JSON.stringify(VECTOR));
+    const a = JSON.parse((await runCli(["translations", "import", empty, "--dry-run", "--json"], envFor(s))).stdout.trim().split("\n").pop());
+    const b = JSON.parse((await runCli(["translations", "import", full, "--dry-run", "--json"], envFor(s))).stdout.trim().split("\n").pop());
+    assert.deepEqual(Object.keys(a).sort(), Object.keys(b).sort());
+    assert.equal(a.chunks, 0);
+    assert.equal(a.counts.skipped_empty, 3);
+    assert.deepEqual([a.created, a.stamped, a.notes, a.cache, a.split_groups], [0, 0, [], [], []]);
+  } finally {
+    await s.close();
   }
 });

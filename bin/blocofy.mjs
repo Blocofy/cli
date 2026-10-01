@@ -9,7 +9,7 @@
  * livereload. No monorepo required.
  */
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -50,6 +50,7 @@ import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
 import { CliRefusal, DEFAULT_API_URL, decidePageMediaUses, fetchPageMediaUses, isValidApiKey } from "../lib/media-uses.mjs";
 import {
+  ImportNotApplied,
   ImportOutcomeUnknown,
   TRANSLATION_ONLY,
   XLIFF_MAX_CHARS,
@@ -104,7 +105,7 @@ const KNOWN = {
   sitePlan: ["target", "mode", "accept-live-effects"],
   siteApply: ["target", "mode", "accept-live-effects"],
   sitePublish: ["target", "mode", "yes"],
-  translationsExport: ["locale", "out", "format", "only"],
+  translationsExport: ["locale", "out", "format", "only", "force"],
   translationsImport: ["dry-run", "publish", "on-source-change"],
 };
 // CF-T1/T2: every command accepts the global `--context <name>` and `--json` (machine-readable refusals).
@@ -287,13 +288,16 @@ Usage
       1 usage/auth/network/5xx; 2 the server refused (4xx) — the {error} JSON
       is printed to stderr.
 
-  blocofy translations export --locale <tag> --out <file> [--format json|xliff]
+  blocofy translations export --locale <tag> --out <file> [--force] [--format json|xliff]
                               [--only all|missing|stale|pending] [--json]
       Write every text of one language that needs translating (pages, image texts, records,
-      menus, site settings, theme texts) to ONE file (v1 API; the read scopes of the kinds).
+      menus, site settings, theme texts) to ONE file (v1 API). The export asks for every kind,
+      so the API key needs the read scopes of all of them: pages:read, content:read,
+      navigation:write (menus have no read scope), settings:read, themes:read and models:read.
       The platform answers in windows; the command follows every window and merges them, then
       lists what was left out and why. --format xliff writes XLIFF 1.2 for translation tools.
         --only pending   only texts that are missing or need an update
+        --force          replace --out if it already exists (refused otherwise, before any request)
 
   blocofy translations import <file.json|file.xlf> [--dry-run] [--publish]
                               [--on-source-change skip|apply] [--json]
@@ -305,12 +309,14 @@ Usage
       and SEO texts change at once.
         --dry-run        write nothing; report what would change
         --publish        also publish the pages and records this import wrote. A publishing
-                         chunk is never resent automatically: if it gets no definite answer the
-                         command stops and says so; running it again is safe.
+                         chunk is never resent automatically: if it gets no definite answer (or a
+                         429) the command stops and says so; running it again is safe.
         --on-source-change apply  also write texts whose source changed since the export
                                   (default: skip)
-      Exit codes: 0 done; 1 usage/file/network/5xx (or a publishing chunk with an unknown
-      outcome); 2 the server refused (4xx) — the {error} JSON is printed to stderr.
+      If a chunk fails, the report of the chunks done before it is printed first (--json: one
+      object with "stopped": true on stdout).
+      Exit codes: 0 done; 1 usage/file/network/5xx (or a publishing chunk that was stopped);
+      2 the server refused (4xx) — the {error} JSON is printed to stderr.
 
   blocofy settings pull [dir]
   blocofy settings push [dir] (--instance <handle> | --live [--yes])
@@ -2173,12 +2179,28 @@ async function status(rest) {
 
 // ── translations (#925): one language's texts as a package file, and back ──────────────────────────────────
 
-const TRANSLATIONS_EXPORT_USAGE = "blocofy translations export --locale <tag> --out <file> [--format json|xliff] [--only all|missing|stale|pending] [--json]";
+const TRANSLATIONS_EXPORT_USAGE = "blocofy translations export --locale <tag> --out <file> [--force] [--format json|xliff] [--only all|missing|stale|pending] [--json]";
 const TRANSLATIONS_IMPORT_USAGE = "blocofy translations import <file.json|file.xlf> [--dry-run] [--publish] [--on-source-change skip|apply] [--json]";
 
 function usageExit(usage) {
   console.error(`Usage: ${usage}`);
   process.exit(1);
+}
+
+const outExists = (out) =>
+  Object.assign(new Error(`${out} already exists. Nothing was requested or written. Choose another --out file, or add --force to replace it.`), { code: "TRANSLATIONS_OUT_EXISTS", details: { file: out } });
+
+/** Write `text` to `out` through a temp file + rename, so `out` is never left half-written. */
+function writeOutFile(out, text, force) {
+  const temp = `${out}.${process.pid}.blocofy-tmp`;
+  writeFileSync(temp, text, { flag: "wx" });
+  try {
+    if (!force && existsSync(out)) throw outExists(out);
+    renameSync(temp, out);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
 }
 
 async function translationsExport(rest) {
@@ -2187,13 +2209,16 @@ async function translationsExport(rest) {
   const out = typeof flags.out === "string" ? resolve(flags.out) : null;
   const format = flags.format === undefined ? "json" : flags.format;
   const only = flags.only === undefined ? "all" : flags.only;
+  const force = flags.force === true;
   if (!locale || !out || positionals.length > 0 || (format !== "json" && format !== "xliff") || !TRANSLATION_ONLY.includes(only)) usageExit(TRANSLATIONS_EXPORT_USAGE);
+  // A file the customer may have filled in is never replaced silently.
+  if (!force && existsSync(out)) throw outExists(out);
   // A read of the site; the package goes to --out, never into the project tree (so no binding is needed or written).
   const { apiUrl, apiKey } = (await prepareTarget({ command: "translations export", commandClass: "read", dir: process.cwd(), flags, needs: "api", mode: `read · ${locale}` })).api;
   const { pkg, skipped } = await exportAllTranslations({ apiUrl, apiKey, locale, only, onRetry, onPage: ({ page, units }) => console.error(`Export: request ${page}, ${units} unit(s) so far`) });
   // toXliff refuses a text XML cannot carry BEFORE anything is written.
   const text = format === "xliff" ? toXliff(pkg) : `${JSON.stringify(pkg, null, 2)}\n`;
-  writeFileSync(out, text);
+  writeOutFile(out, text, force);
   if (format === "xliff" && text.length > XLIFF_MAX_CHARS) {
     console.error(`Warning: this XLIFF file is over ${XLIFF_MAX_CHARS.toLocaleString("en-US")} characters and cannot be imported back. Export with --format json, or a smaller scope such as --only pending.`);
   }
@@ -2207,6 +2232,26 @@ async function translationsExport(rest) {
     console.log("Left out:");
     for (const line of skipLines) console.log(`  - ${line}`);
   }
+}
+
+/** The one `--json` shape of an import run: complete, stopped part-way, or with nothing to send. */
+function importJson(tally, { dryRun, publish, locale, chunks, chunksDone, caches, splitGroups, stopped }) {
+  return {
+    dry_run: dryRun,
+    target_locale: locale,
+    chunks,
+    chunks_done: chunksDone,
+    stopped,
+    counts: tally.counts,
+    created: tally.created,
+    stamped: tally.stamped,
+    publication: !dryRun && publish ? { published: tally.published, blocked: tally.publishBlocked } : null,
+    publish_skipped: tally.publishSkipped,
+    notes: tally.notes,
+    hints: tally.hints,
+    cache: caches,
+    split_groups: splitGroups,
+  };
 }
 
 async function translationsImport(rest) {
@@ -2228,17 +2273,18 @@ async function translationsImport(rest) {
     process.exit(1);
   }
   const { chunks, skippedEmpty, splitGroups } = chunked;
+  let tally = emptyImportTally();
+  tally.counts.skipped_empty += skippedEmpty;
+  const caches = [];
+  let done = 0;
+  const shape = { dryRun, publish, locale: pkg.target_locale, chunks: chunks.length, caches, splitGroups };
   if (chunks.length === 0) {
-    if (flags.json) console.log(JSON.stringify({ dry_run: dryRun, target_locale: pkg.target_locale, chunks: 0, counts: { ...emptyImportTally().counts, skipped_empty: skippedEmpty } }));
+    if (flags.json) console.log(JSON.stringify(importJson(tally, { ...shape, chunksDone: 0, stopped: false })));
     else console.log("Every translation in the file is empty; nothing to import. Nothing was sent.");
     return;
   }
   const mode = `${dryRun ? "dry run" : publish ? "write + publish" : "write"} · ${pkg.target_locale}`;
   const { apiUrl, apiKey } = (await prepareTarget({ command: "translations import", commandClass: dryRun ? "read" : "remote-mutation", dir: process.cwd(), flags, needs: "api", mode })).api;
-  let tally = emptyImportTally();
-  tally.counts.skipped_empty += skippedEmpty;
-  const caches = [];
-  let done = 0;
   try {
     for (const chunk of chunks) {
       const answer = await importTranslationChunk({ apiUrl, apiKey, chunk, dryRun, publish, onSourceChange, onRetry });
@@ -2248,6 +2294,15 @@ async function translationsImport(rest) {
       if (chunks.length > 1) console.error(`${dryRun ? "Checked" : "Imported"} ${done} of ${chunks.length} chunks`);
     }
   } catch (error) {
+    // What the chunks before the failure did (published pages, held drafts, a failed cache flush) is reported in
+    // full: a rerun answers `unchanged` for them and could never tell it again.
+    if (done > 0) {
+      if (flags.json) console.log(JSON.stringify(importJson(tally, { ...shape, chunksDone: done, stopped: true })));
+      else {
+        console.log(`Report for the ${done} of ${chunks.length} chunks done before the stop:`);
+        for (const line of importSummaryLines(tally, { dryRun, publish, locale: pkg.target_locale, splitGroups })) console.log(line);
+      }
+    }
     if (!JSON_MODE) {
       const invalid = error instanceof CliRefusal && Array.isArray(error.error?.details?.units) ? error.error.details.units : [];
       if (invalid.length > 0) {
@@ -2259,33 +2314,27 @@ async function translationsImport(rest) {
         console.error(`Import stopped after ${done} of ${chunks.length} chunks. The chunks before it were saved; running the same command again is safe (units already applied report as unchanged).`);
       }
     }
+    const details = { chunk: done + 1, chunks: chunks.length, reason: error?.reason };
     if (error instanceof ImportOutcomeUnknown) {
       throw Object.assign(
         new Error(
           `The import of chunk ${done + 1} of ${chunks.length} got no definite answer (${error.reason}) and was not resent, because it publishes: that chunk may or may not have been applied and published. Running the same command again is safe (units already applied report as unchanged).`,
         ),
-        { code: "TRANSLATIONS_IMPORT_OUTCOME_UNKNOWN", details: { chunk: done + 1, chunks: chunks.length, reason: error.reason } },
+        { code: "TRANSLATIONS_IMPORT_OUTCOME_UNKNOWN", details },
+      );
+    }
+    if (error instanceof ImportNotApplied) {
+      throw Object.assign(
+        new Error(
+          `The import of chunk ${done + 1} of ${chunks.length} was refused (${error.reason}, too many requests) and was not applied; it was not resent, because it publishes. Wait a moment and run the same command again (units already applied report as unchanged).`,
+        ),
+        { code: "TRANSLATIONS_IMPORT_NOT_APPLIED", details },
       );
     }
     throw error;
   }
   if (flags.json) {
-    console.log(
-      JSON.stringify({
-        dry_run: dryRun,
-        target_locale: pkg.target_locale,
-        chunks: chunks.length,
-        counts: tally.counts,
-        created: tally.created,
-        stamped: tally.stamped,
-        publication: !dryRun && publish ? { published: tally.published, blocked: tally.publishBlocked } : null,
-        publish_skipped: tally.publishSkipped,
-        notes: tally.notes,
-        hints: tally.hints,
-        cache: caches,
-        split_groups: splitGroups,
-      }),
-    );
+    console.log(JSON.stringify(importJson(tally, { ...shape, chunksDone: done, stopped: false })));
     return;
   }
   for (const line of importSummaryLines(tally, { dryRun, publish, locale: pkg.target_locale, splitGroups })) console.log(line);

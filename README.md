@@ -229,16 +229,19 @@ every item was already recorded).
 ### Translations
 
 ```
-blocofy translations export --locale <tag> --out <file> [--format json|xliff] [--only all|missing|stale|pending] [--json]
+blocofy translations export --locale <tag> --out <file> [--force] [--format json|xliff] [--only all|missing|stale|pending] [--json]
 blocofy translations import <file.json|file.xlf> [--dry-run] [--publish] [--on-source-change skip|apply] [--json]
 ```
 `export` writes every text of one language that needs translating (pages, image texts, records,
 menus, site settings, theme texts) to ONE file. The platform answers in windows; the command
 follows every window until the last and merges them, then lists what was left out and why.
 `--format xliff` writes XLIFF 1.2 for translation tools (the platform's own dialect, byte for
-byte); `--only pending` limits the file to texts that are missing or need an update. The API key
-needs the read scopes of the kinds in the package (`pages:read`, `content:read`, `navigation:write`,
-`settings:read`, `themes:read`, `models:read`).
+byte); `--only pending` limits the file to texts that are missing or need an update. The export
+asks for every kind, so the API key needs the read scopes of all of them: `pages:read`,
+`content:read`, `navigation:write` (menus have no read scope), `settings:read`, `themes:read` and
+`models:read`; a key without one of them is refused for the whole export. An existing `--out` file
+is never replaced silently: the command refuses before any request unless `--force` is given, and
+the file is written through a temporary file and a rename.
 
 `import` reads a JSON or XLIFF package, drops empty translations, and sends the rest as JSON in
 chunks of at most 500 units (a page or record is never split; one group of up to 5,000 units is
@@ -250,12 +253,15 @@ with `--publish`, once that page's publish succeeded). `--publish` also publishe
 import wrote (needs `pages:write` and `content:write`) and reports what could not be published;
 `--dry-run` writes nothing and reports what would change. The API key needs the write scopes of
 the kinds in the package. A refusal (for example an invalid text) exits 2 with the server's error
-JSON on stderr; if a later chunk fails, the chunks already written stay written and running the
-command again is safe (written texts answer "unchanged"). Transient failures (429/502/503/504,
-network) are retried, except for a chunk imported with `--publish`: a resend could not see what the
-first attempt already published, so such a chunk is sent once, and when it gets no definite answer
-the command stops with `TRANSLATIONS_IMPORT_OUTCOME_UNKNOWN` (exit 1), naming the chunk that may or
-may not have been applied and published.
+JSON on stderr; if a later chunk fails, the chunks already written stay written, the report of
+those chunks (counts, what was published or held back, a failed cache refresh) is printed before the
+error (`--json`: one object with `"stopped": true` on stdout), and running the command again is safe
+(written texts answer "unchanged"). Transient failures (429/502/503/504, network) are retried, except
+for a chunk imported with `--publish`: a resend could not see what the first attempt already
+published, so such a chunk is sent once. A 5xx or a lost connection stops the command with
+`TRANSLATIONS_IMPORT_OUTCOME_UNKNOWN` (exit 1), naming the chunk that may or may not have been
+applied and published; a 429 stops it with `TRANSLATIONS_IMPORT_NOT_APPLIED` (exit 1), since that
+chunk was not applied.
 
 ### Settings
 
@@ -439,6 +445,9 @@ Retries: network errors and HTTP 429/502/503/504 are retried up to 3 times (`Ret
 honoured, max 30s per wait; else 0.3s/0.9s/2s), resending the identical request (`pages push`
 carries one `x-idempotency-key` per push). HTTP 500 is never retried, nor is a `theme push` dry
 run answered 502 `readback_unverified` (a verdict on a rolled-back plan, not a transient failure).
+`translations import --publish` is never retried either: a resend could not see what the first
+attempt already published, so a failed chunk stops the command with
+`TRANSLATIONS_IMPORT_OUTCOME_UNKNOWN` (5xx, network) or `TRANSLATIONS_IMPORT_NOT_APPLIED` (429).
 Each retry prints a notice on stderr.
 
 ## Changelog
@@ -452,7 +461,10 @@ Each retry prints a notice on stderr.
     is never split, up to 5,000 units). It prints the count per state, what was published, and
     whether the site cache could not be refreshed. A chunk imported with `--publish` is never
     resent automatically: when it gets no definite answer the command stops with
-    `TRANSLATIONS_IMPORT_OUTCOME_UNKNOWN` (exit 1), names the chunk, and running it again is safe.
+    `TRANSLATIONS_IMPORT_OUTCOME_UNKNOWN` (a 429: `TRANSLATIONS_IMPORT_NOT_APPLIED`), exit 1, names
+    the chunk, and running it again is safe. A run that stops part-way still prints the report of
+    the chunks done before it.
+  - `export` refuses an existing `--out` file unless `--force`.
 - **0.11.0** — One named context per site, one explicit target (customer item 1.8).
   The dev token and the v1 API key remain two separate credentials; a context references both.
   - **Breaking:** conflicting context choices now fail closed. When `BLOCOFY_CONTEXT`, the env
