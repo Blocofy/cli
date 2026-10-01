@@ -1,0 +1,46 @@
+{
+  "format": "blocofy-translation/1",
+  "source_locale": "tr-TR",
+  "target_locale": "en-US",
+  "exported_at": "2026-09-30T10:00:00.000Z",
+  "by": "human",
+  "units": [
+    {
+      "id": "page:p1j4vv:hero1.heading",
+      "kind": "page",
+      "group": "page:p1j4vv",
+      "context": "Ana sayfa › Hero › Başlık",
+      "type": "text",
+      "source": "Hoş geldiniz & \"merhaba\" <dünya> 'çok'\r\nikinci satır\tsekme",
+      "source_hash": "9f2c11aa",
+      "target": "",
+      "target_hash": "811c9dc5",
+      "state": "missing"
+    },
+    {
+      "id": "page:p1j4vv:hero1.body",
+      "kind": "page",
+      "group": "page:p1j4vv",
+      "context": "Ana sayfa › Hero › Metin",
+      "type": "richtext",
+      "source": "<p>Merhaba <b>dünya</b></p>",
+      "source_hash": "0a1b2c3d",
+      "target": "<p>Hello <b>world</b></p>",
+      "target_hash": "4e5f6a7b",
+      "state": "stale"
+    },
+    {
+      "id": "option:haberler:kategori:a & b",
+      "kind": "option",
+      "group": "option:haberler",
+      "context": "Haberler › Kategori › Seçenek",
+      "type": "text",
+      "source": "A & B",
+      "source_hash": "11223344",
+      "target": "A and B",
+      "target_hash": "55667788",
+      "state": "translated"
+    }
+  ],
+  "next_cursor": "entry:haberler:900"
+}

@@ -226,6 +226,33 @@ get a random UUID. Transient failures (429/502/503/504, network) are retried aga
 idempotency key, so a retry replays the same batch. Exit 0 on success (or "No changes" when
 every item was already recorded).
 
+### Translations
+
+```
+blocofy translations export --locale <tag> --out <file> [--format json|xliff] [--only all|missing|stale|pending] [--json]
+blocofy translations import <file.json|file.xlf> [--dry-run] [--publish] [--on-source-change skip|apply] [--json]
+```
+`export` writes every text of one language that needs translating (pages, image texts, records,
+menus, site settings, theme texts) to ONE file. The platform answers in windows; the command
+follows every window until the last and merges them, then lists what was left out and why.
+`--format xliff` writes XLIFF 1.2 for translation tools (the platform's own dialect, byte for
+byte); `--only pending` limits the file to texts that are missing or need an update. The API key
+needs the read scopes of the kinds in the package (`pages:read`, `content:read`, `navigation:write`,
+`settings:read`, `themes:read`, `models:read`).
+
+`import` reads a JSON or XLIFF package, drops empty translations, and sends the rest as JSON in
+chunks of at most 500 units (a page or record is never split; one group of up to 5,000 units is
+sent whole). Every chunk is checked locally before the first request. It prints the count per
+state (written, unchanged, empty, source changed, target changed, invalid, blocked). New pages and
+records are created as drafts and page content goes to the draft; menus, site settings, theme texts,
+a live record's text and a live page's title and SEO texts change at once (a live page's URL only
+with `--publish`, once that page's publish succeeded). `--publish` also publishes the pages and records this
+import wrote (needs `pages:write` and `content:write`) and reports what could not be published;
+`--dry-run` writes nothing and reports what would change. The API key needs the write scopes of
+the kinds in the package. A refusal (for example an invalid text) exits 2 with the server's error
+JSON on stderr; if a later chunk fails, the chunks already written stay written and running the
+command again is safe (written texts answer "unchanged").
+
 ### Settings
 
 ```

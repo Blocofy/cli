@@ -9,7 +9,7 @@
  * livereload. No monorepo required.
  */
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -49,6 +49,20 @@ import {
 import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
 import { CliRefusal, DEFAULT_API_URL, decidePageMediaUses, fetchPageMediaUses, isValidApiKey } from "../lib/media-uses.mjs";
+import {
+  TRANSLATION_ONLY,
+  XLIFF_MAX_CHARS,
+  addImportReport,
+  chunkPackage,
+  emptyImportTally,
+  exportAllTranslations,
+  exportSkipLines,
+  fitChunksToBodyCap,
+  importSummaryLines,
+  importTranslationChunk,
+  readPackageFile,
+  toXliff,
+} from "../lib/translations.mjs";
 import { githubNote, healthAdvice, retryNotice, statusLine, syncScopeNote } from "../lib/messages.mjs";
 import { promptSecret } from "../lib/secret-prompt.mjs";
 import { MANIFEST_PATH, buildManifest, validateSiteStateTree, verifyManifest } from "../lib/site-state.mjs";
@@ -89,6 +103,8 @@ const KNOWN = {
   sitePlan: ["target", "mode", "accept-live-effects"],
   siteApply: ["target", "mode", "accept-live-effects"],
   sitePublish: ["target", "mode", "yes"],
+  translationsExport: ["locale", "out", "format", "only"],
+  translationsImport: ["dry-run", "publish", "on-source-change"],
 };
 // CF-T1/T2: every command accepts the global `--context <name>` and `--json` (machine-readable refusals).
 function parseArgsOrExit(rest, known) {
@@ -269,6 +285,27 @@ Usage
       Exit codes: 0 applied (or "No changes" when every item was already recorded);
       1 usage/auth/network/5xx; 2 the server refused (4xx) — the {error} JSON
       is printed to stderr.
+
+  blocofy translations export --locale <dil> --out <dosya> [--format json|xliff]
+                              [--only all|missing|stale|pending] [--json]
+      Bir dilin çevrilecek bütün metinlerini (sayfalar, görsel metinleri, kayıtlar, menüler, site
+      ayarları, tema metinleri) tek bir dosyaya yazar (v1 API; türlerin okuma yetkileri). Sunucu
+      paketi parça parça verir; komut her parçayı alıp tek dosyada birleştirir ve pakete
+      girmeyenleri nedenleriyle listeler. XLIFF 1.2 çeviri araçları içindir.
+        --only pending   yalnız çevrilmemiş ya da güncellenmesi gerekenler
+
+  blocofy translations import <dosya.json|dosya.xlf> [--dry-run] [--publish]
+                              [--on-source-change skip|apply] [--json]
+      Çevrilmiş dosyayı yükler (v1 API; türlerin yazma yetkileri, --publish ile pages:write ve
+      content:write). Boş çeviriler atlanır; dosya en fazla 500 metinlik parçalar halinde
+      gönderilir (bir sayfa ya da kayıt hiçbir zaman bölünmez, 5.000 metne kadar). Sonuç her
+      durum için sayılarla yazılır. Yeni sayfa ve kayıtlar taslak olarak oluşturulur, sayfa
+      içerikleri taslağa yazılır; menüler, site ayarları, tema metinleri, yayındaki bir kaydın
+      metni ve yayındaki bir sayfanın başlığı ile SEO metinleri hemen geçerli olur.
+        --dry-run        hiçbir şey yazmadan neyin değişeceğini gösterir
+        --publish        bu yüklemenin yazdığı sayfa ve kayıtları yayınlar
+        --on-source-change apply  kaynağı paketten sonra değişmiş metinleri de yazar (varsayılan: skip)
+      Çıkış kodları: 0 tamam; 1 kullanım/dosya/ağ/5xx; 2 sunucu reddetti (4xx).
 
   blocofy settings pull [dir]
   blocofy settings push [dir] (--instance <handle> | --live [--yes])
@@ -2129,6 +2166,118 @@ async function status(rest) {
   console.log("");
 }
 
+// ── translations (#925): one language's texts as a package file, and back ──────────────────────────────────
+
+const TRANSLATIONS_EXPORT_USAGE = "blocofy translations export --locale <dil> --out <dosya> [--format json|xliff] [--only all|missing|stale|pending] [--json]";
+const TRANSLATIONS_IMPORT_USAGE = "blocofy translations import <dosya.json|dosya.xlf> [--dry-run] [--publish] [--on-source-change skip|apply] [--json]";
+
+function usageExit(usage) {
+  console.error(`Kullanım: ${usage}`);
+  process.exit(1);
+}
+
+async function translationsExport(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.translationsExport);
+  const locale = typeof flags.locale === "string" ? flags.locale : null;
+  const out = typeof flags.out === "string" ? resolve(flags.out) : null;
+  const format = flags.format === undefined ? "json" : flags.format;
+  const only = flags.only === undefined ? "all" : flags.only;
+  if (!locale || !out || positionals.length > 0 || (format !== "json" && format !== "xliff") || !TRANSLATION_ONLY.includes(only)) usageExit(TRANSLATIONS_EXPORT_USAGE);
+  // A read of the site; the package goes to --out, never into the project tree (so no binding is needed or written).
+  const { apiUrl, apiKey } = (await prepareTarget({ command: "translations export", commandClass: "read", dir: process.cwd(), flags, needs: "api", mode: `read · ${locale}` })).api;
+  const { pkg, skipped } = await exportAllTranslations({ apiUrl, apiKey, locale, only, onRetry, onPage: ({ page, units }) => console.error(`Dışa aktarım: ${page}. istek, toplam ${units} metin`) });
+  // toXliff refuses a text XML cannot carry BEFORE anything is written.
+  const text = format === "xliff" ? toXliff(pkg) : `${JSON.stringify(pkg, null, 2)}\n`;
+  writeFileSync(out, text);
+  const skipLines = exportSkipLines(skipped);
+  if (format === "xliff" && text.length > XLIFF_MAX_CHARS) {
+    console.error(`Uyarı: bu XLIFF dosyası ${XLIFF_MAX_CHARS.toLocaleString("tr-TR")} karakteri aşıyor ve geri yüklenemez. Çeviriyi --format json ile ya da --only pending gibi daha küçük bir kapsamla dışa aktarın.`);
+  }
+  if (flags.json) {
+    console.log(JSON.stringify({ file: out, format, target_locale: pkg.target_locale, units: pkg.units.length, skipped }));
+    return;
+  }
+  console.log(`${pkg.units.length} metin dışa aktarıldı: ${out} (${pkg.target_locale}, ${format === "xliff" ? "XLIFF" : "JSON"}).`);
+  if (skipLines.length > 0) {
+    console.log("Pakete girmeyenler:");
+    for (const line of skipLines) console.log(`  - ${line}`);
+  }
+}
+
+async function translationsImport(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.translationsImport);
+  const onSourceChange = flags["on-source-change"] === undefined ? "skip" : flags["on-source-change"];
+  if (positionals.length !== 1 || (onSourceChange !== "skip" && onSourceChange !== "apply")) usageExit(TRANSLATIONS_IMPORT_USAGE);
+  const file = resolve(positionals[0]);
+  const dryRun = flags["dry-run"] === true;
+  const publish = flags.publish === true;
+  // Everything local is checked before the first request: the file, its chunks, every chunk's body size.
+  let pkg;
+  let chunked;
+  try {
+    pkg = readPackageFile(readFileSync(file, "utf8"), file);
+    chunked = chunkPackage(pkg);
+    chunked.chunks = fitChunksToBodyCap(chunked.chunks);
+  } catch (error) {
+    console.error(`Çeviri dosyası okunamadı (${file}): ${String(error?.message ?? error).replace(/\.?$/, ".")} Hiçbir şey gönderilmedi.`);
+    process.exit(1);
+  }
+  const { chunks, skippedEmpty, splitGroups } = chunked;
+  if (chunks.length === 0) {
+    if (flags.json) console.log(JSON.stringify({ dry_run: dryRun, target_locale: pkg.target_locale, chunks: 0, counts: { ...emptyImportTally().counts, skipped_empty: skippedEmpty } }));
+    else console.log("Dosyadaki bütün çeviriler boş; yüklenecek bir şey yok. Hiçbir şey gönderilmedi.");
+    return;
+  }
+  const mode = `${dryRun ? "dry run" : publish ? "write + publish" : "write"} · ${pkg.target_locale}`;
+  const { apiUrl, apiKey } = (await prepareTarget({ command: "translations import", commandClass: dryRun ? "read" : "remote-mutation", dir: process.cwd(), flags, needs: "api", mode })).api;
+  let tally = emptyImportTally();
+  tally.counts.skipped_empty += skippedEmpty;
+  const caches = [];
+  let done = 0;
+  try {
+    for (const chunk of chunks) {
+      const answer = await importTranslationChunk({ apiUrl, apiKey, chunk, dryRun, publish, onSourceChange, onRetry });
+      tally = addImportReport(tally, answer);
+      if (answer?.cache !== undefined && answer.cache !== null) caches.push(answer.cache);
+      done += 1;
+      if (chunks.length > 1) console.error(`${dryRun ? "Denetlendi" : "Yüklendi"}: ${done} / ${chunks.length} parça`);
+    }
+  } catch (error) {
+    if (!JSON_MODE) {
+      const invalid = error instanceof CliRefusal && Array.isArray(error.error?.details?.units) ? error.error.details.units : [];
+      if (invalid.length > 0) {
+        console.error("Bu metinler hatalı; dosyayı düzeltip yeniden yükleyin:");
+        for (const u of invalid.slice(0, 20)) console.error(`  ${u.id}: ${u.message ?? u.reason ?? "kabul edilmedi"}`);
+        if (invalid.length > 20) console.error(`  …ve ${invalid.length - 20} hatalı metin daha.`);
+      }
+      if (!dryRun && done > 0) {
+        console.error(`Yükleme ${done} / ${chunks.length} parçada durdu. Yüklenen parçalar kaydedildi; komutu yeniden çalıştırmak güvenlidir (yazılmış metinler "zaten aynı" sayılır).`);
+      }
+    }
+    throw error;
+  }
+  if (flags.json) {
+    console.log(
+      JSON.stringify({
+        dry_run: dryRun,
+        target_locale: pkg.target_locale,
+        chunks: chunks.length,
+        counts: tally.counts,
+        created: tally.created,
+        stamped: tally.stamped,
+        publication: !dryRun && publish ? { published: tally.published, blocked: tally.publishBlocked } : null,
+        publish_skipped: tally.publishSkipped,
+        notes: tally.notes,
+        hints: tally.hints,
+        cache: caches,
+        split_groups: splitGroups,
+      }),
+    );
+    return;
+  }
+  for (const line of importSummaryLines(tally, { dryRun, publish, locale: pkg.target_locale, splitGroups })) console.log(line);
+}
+
 const [first, ...rest] = args;
 
 function commandKey(a, b) {
@@ -2163,6 +2312,8 @@ const COMMANDS = {
   "site plan": sitePlan,
   "site apply": siteApply,
   "site publish": sitePublish,
+  "translations export": translationsExport,
+  "translations import": translationsImport,
 };
 
 if (first === "--version" || first === "-v") {
