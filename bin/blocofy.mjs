@@ -2193,8 +2193,8 @@ const outExists = (out) =>
 /** Write `text` to `out` through a temp file + rename, so `out` is never left half-written. */
 function writeOutFile(out, text, force) {
   const temp = `${out}.${process.pid}.blocofy-tmp`;
-  writeFileSync(temp, text, { flag: "wx" });
   try {
+    writeFileSync(temp, text, { flag: "wx" });
     if (!force && existsSync(out)) throw outExists(out);
     renameSync(temp, out);
   } catch (error) {

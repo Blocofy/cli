@@ -809,7 +809,7 @@ test("[R3b] export stops when the server repeats a cursor (twice in a row, or in
   }
   const endless = await fakeV1((rec, n) => window(`C${n}`));
   try {
-    await assert.rejects(exportAllTranslations({ apiUrl: endless.apiUrl, apiKey: KEY, locale: "en-US", maxWindows: 5 }), /more than 5 windows/);
+    await assert.rejects(exportAllTranslations({ apiUrl: endless.apiUrl, apiKey: KEY, locale: "en-US", maxWindows: 5 }), /stopped after 5 windows/);
     assert.equal(endless.reqs.length, 5);
   } finally {
     await endless.close();
