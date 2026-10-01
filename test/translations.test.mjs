@@ -128,7 +128,7 @@ test("[X9] the errors name the problem", () => {
   };
   const one = (s) => `<trans-unit id="settings:a"><source>${s}</source></trans-unit>`;
   assert.ok(message(one("A & B")).includes('"&"'));
-  assert.ok(message(one("A & B")).includes("satır 4"));
+  assert.ok(message(one("A & B")).includes("line 4"));
   assert.ok(message(one("a&nbsp;b")).includes("&nbsp;"));
   assert.ok(message(one("&#0;")).includes("&#0;"));
 });
@@ -136,15 +136,15 @@ test("[X9] the errors name the problem", () => {
 test("[X10/X11] DOCTYPE, entity declarations, processing instructions and an entity bomb are refused; a comment that mentions them is not", () => {
   assert.throws(() => fromXliff(`<!DOCTYPE xliff SYSTEM "http://x/y.dtd">${wrap("")}`), /DOCTYPE/);
   assert.throws(() => fromXliff(`<?xml version="1.0"?><!ENTITY a "b">${wrap("")}`), /ENTITY/);
-  assert.throws(() => fromXliff(wrap(`<?xml-stylesheet href="a.css"?>`)), /işlem yönergesi/);
-  assert.throws(() => fromXliff(`<?xml version="1.0"?><?php echo 1;?>${wrap("")}`), /işlem yönergesi/);
+  assert.throws(() => fromXliff(wrap(`<?xml-stylesheet href="a.css"?>`)), /processing instruction/);
+  assert.throws(() => fromXliff(`<?xml version="1.0"?><?php echo 1;?>${wrap("")}`), /processing instruction/);
   assert.deepEqual(fromXliff(wrap(`<!-- <!DOCTYPE x> <?pi?> &nbsp; & -->`)).units, []);
   const bomb = `<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;&lol;&lol;">]>${wrap(`<trans-unit id="settings:a"><source>&lol2;</source></trans-unit>`)}`;
   assert.throws(() => fromXliff(bomb), XliffError);
 });
 
 test("[X12] the input is bounded before it is parsed", () => {
-  refused(wrap(`<trans-unit id="settings:a"><source>${"a".repeat(XLIFF_MAX_CHARS)}</source></trans-unit>`), "huge", /çok büyük/);
+  refused(wrap(`<trans-unit id="settings:a"><source>${"a".repeat(XLIFF_MAX_CHARS)}</source></trans-unit>`), "huge", /too large/);
 });
 
 test("[X13] unknown bf attributes are refused; other attributes a tool adds are tolerated", () => {
@@ -189,7 +189,7 @@ test("[X18/X19] attribute-hidden comment openers, prototype-named elements and d
   refused(wrap(`<trans-unit id="settings:a" foo="a<b"><source>x</source></trans-unit>`), "less-than in an attribute value", /</);
   refused(wrap(`<__proto__><source>x</source></__proto__>`), "__proto__ element");
   refused(wrap(`<constructor/>`), "constructor element");
-  refused(wrap(`${"<a>".repeat(200)}${"</a>".repeat(200)}`), "200-deep nesting", /iç içe|derin/i);
+  refused(wrap(`${"<a>".repeat(200)}${"</a>".repeat(200)}`), "200-deep nesting", /nested|deep/i);
   const odd = fromXliff(wrap(`<trans-unit id="settings:a" __proto__="1" constructor="2"><source>x</source></trans-unit>`));
   assert.equal(odd.units[0].source, "x");
   assert.equal({}["1"], undefined);
@@ -198,10 +198,10 @@ test("[X18/X19] attribute-hidden comment openers, prototype-named elements and d
 
 test("[X20] characters XML 1.0 forbids are refused when they are literal too", () => {
   for (const [name, ch] of [["NUL", "\u0000"], ["SOH", "\u0001"], ["U+FFFE", "￾"], ["U+FFFF", "￿"], ["lone high surrogate", "\ud800"], ["lone low surrogate", "\udc00"]]) {
-    refused(wrap(unit(`a${ch}b`)), `raw ${name} in text`, /karakter/);
-    refused(wrap(unit("x"), ` bf:next-cursor="a${ch}b"`), `raw ${name} in an attribute`, /karakter/);
+    refused(wrap(unit(`a${ch}b`)), `raw ${name} in text`, /character/);
+    refused(wrap(unit("x"), ` bf:next-cursor="a${ch}b"`), `raw ${name} in an attribute`, /character/);
   }
-  refused(wrap(`<!-- a\u0000b -->`), "raw NUL in a comment", /karakter/);
+  refused(wrap(`<!-- a\u0000b -->`), "raw NUL in a comment", /character/);
   assert.equal(fromXliff(wrap(unit("a\u{1F600}b"))).units[0].source, "a\u{1F600}b");
 });
 
@@ -211,15 +211,15 @@ test("[X21/X22] the XML declaration and declarations, unclosed constructs", () =
   assert.deepEqual(fromXliff(wrap("").replace('encoding="UTF-8"', 'encoding="utf-8"')).units, []);
   assert.deepEqual(fromXliff(wrap("").replace(' encoding="UTF-8"', "")).units, []);
   assert.deepEqual(fromXliff(wrap("").replace('<?xml version="1.0" encoding="UTF-8"?>\n', "")).units, []);
-  refused(wrap("").replace("<xliff", '<?xml version="1.0"?><xliff'), "a second declaration", /işlem yönergesi/);
-  refused(wrap("").replace("<xliff", '<!-- c --><?xml version="1.0"?><xliff'), "a declaration after a comment", /işlem yönergesi/);
+  refused(wrap("").replace("<xliff", '<?xml version="1.0"?><xliff'), "a second declaration", /processing instruction/);
+  refused(wrap("").replace("<xliff", '<!-- c --><?xml version="1.0"?><xliff'), "a declaration after a comment", /processing instruction/);
   refused(wrap("").replace("?>", "<!--"), "unclosed declaration");
   const noDecl = wrap("").replace('<?xml version="1.0" encoding="UTF-8"?>\n', "");
   refused(`<!ELEMENT xliff ANY>${noDecl}`, "ELEMENT", /ELEMENT/);
   refused(`<!ATTLIST xliff a CDATA #IMPLIED>${noDecl}`, "ATTLIST", /ATTLIST/);
   refused(`<!NOTATION n SYSTEM "x">${noDecl}`, "NOTATION", /NOTATION/);
-  refused(wrap(unit("x") + "<?pi never closed"), "unclosed PI", /işlem yönergesi/);
-  refused(wrap(unit("x") + "<!-- never closed"), "unclosed comment", /yorum/);
+  refused(wrap(unit("x") + "<?pi never closed"), "unclosed PI", /processing instruction/);
+  refused(wrap(unit("x") + "<!-- never closed"), "unclosed comment", /comment/);
   refused(wrap(unit("<![CDATA[never closed")), "unclosed CDATA", /CDATA/);
   refused(wrap(unit("a]]>b")), "closing CDATA marker in text", /\]\]>/);
 });
@@ -237,21 +237,21 @@ test("[X25] bf attributes and namespace bindings are checked on source, target a
   refused(wrap(`<trans-unit id="settings:a"><source bf:x="1">a</source></trans-unit>`), "bf on source", /bf:x/);
   refused(wrap(`<trans-unit id="settings:a"><source>a</source><target bf:state="1">b</target></trans-unit>`), "bf on target", /bf:state/);
   refused(wrap(`<trans-unit id="settings:a"><source>a</source><note bf:x="1">c</note></trans-unit>`), "bf on note", /bf:x/);
-  refused(wrap(`<trans-unit id="settings:a"><source xmlns:bf="https://evil.example/ns">a</source></trans-unit>`), "bf rebound on source", /ad alanı/);
-  refused(wrap(`<trans-unit id="settings:a" xmlns:bf="urn:other" bf:kind="settings"><source>a</source></trans-unit>`), "bf rebound on a unit", /ad alanı/);
-  refused(wrap(`<trans-unit id="settings:a"><source xmlns="urn:other">a</source></trans-unit>`), "default namespace rebound", /ad alanı/);
+  refused(wrap(`<trans-unit id="settings:a"><source xmlns:bf="https://evil.example/ns">a</source></trans-unit>`), "bf rebound on source", /namespace/);
+  refused(wrap(`<trans-unit id="settings:a" xmlns:bf="urn:other" bf:kind="settings"><source>a</source></trans-unit>`), "bf rebound on a unit", /namespace/);
+  refused(wrap(`<trans-unit id="settings:a"><source xmlns="urn:other">a</source></trans-unit>`), "default namespace rebound", /namespace/);
   assert.equal(fromXliff(wrap(`<trans-unit id="settings:a"><source xmlns:bf="https://blocofy.com/ns/translation/1">a</source></trans-unit>`)).units[0].source, "a");
 });
 
 test("[X26] structural refusals name the problem", () => {
   refused(`<?xml version="1.0"?><root><file/></root>`, "non-xliff root", /<xliff>/);
-  refused(wrap("").replace("<file ", "stray text <file "), "stray text in xliff", /beklenmeyen metin/);
-  refused(wrap(`stray <trans-unit id="settings:a"><source>x</source></trans-unit>`), "stray text in body", /beklenmeyen metin/);
-  refused(wrap(`<trans-unit id="settings:a">stray<source>x</source></trans-unit>`), "stray text in a unit", /beklenmeyen metin/);
-  refused(wrap("").replace(' xmlns:bf="https://blocofy.com/ns/translation/1"', "").replace("source-language", 'bf:by="ai" source-language'), "unbound bf prefix", /ad alanına bağlanmadan/);
+  refused(wrap("").replace("<file ", "stray text <file "), "stray text in xliff", /Unexpected text/);
+  refused(wrap(`stray <trans-unit id="settings:a"><source>x</source></trans-unit>`), "stray text in body", /Unexpected text/);
+  refused(wrap(`<trans-unit id="settings:a">stray<source>x</source></trans-unit>`), "stray text in a unit", /Unexpected text/);
+  refused(wrap("").replace(' xmlns:bf="https://blocofy.com/ns/translation/1"', "").replace("source-language", 'bf:by="ai" source-language'), "unbound bf prefix", /without being bound/);
   refused(wrap("just text"), "body that is not a node", /<body>/);
-  refused(wrap(`<trans-unit id="settings:a"><source>a <g id="1">b</g></source></trans-unit>`), "inline element in source", /satır içi/);
-  refused(wrap(`<trans-unit id="settings:a"><source>a</source><note>c <x/> d</note></trans-unit>`), "inline element in note", /satır içi/);
+  refused(wrap(`<trans-unit id="settings:a"><source>a <g id="1">b</g></source></trans-unit>`), "inline element in source", /Inline element/);
+  refused(wrap(`<trans-unit id="settings:a"><source>a</source><note>c <x/> d</note></trans-unit>`), "inline element in note", /Inline element/);
   refused(wrap("").replace("<body>", "<bogus/><body>"), "unknown child of file", /<bogus>/);
   refused(wrap(`<group id="g"/>`), "unknown child of body", /<group>/);
   refused(wrap("").replace("<file ", "<bogus/><file "), "unknown child of xliff", /<bogus>/);
@@ -262,19 +262,19 @@ test("[X26] structural refusals name the problem", () => {
 test("[X28/X31] tag caps and strict comment / attribute syntax", () => {
   const at = (ws) => wrap(`<trans-unit id="settings:a"${ws}><source>x</source><target>y</target></trans-unit>`);
   assert.equal(fromXliff(at(" ".repeat(64))).units.length, 1);
-  for (const ws of [" ", "\t", "\n", "\r\n"]) refused(at(ws.repeat(65)), `65 × ${JSON.stringify(ws)}`, /boşluk/);
-  refused(wrap(`<trans-unit id="settings:a"><source>x</source${" ".repeat(65)}></trans-unit>`), "run in an end tag", /boşluk/);
-  refused(wrap("").replace('<?xml version="1.0"', `<?xml version="1.0"${" ".repeat(65)}`), "run in the declaration", /boşluk/);
+  for (const ws of [" ", "\t", "\n", "\r\n"]) refused(at(ws.repeat(65)), `65 × ${JSON.stringify(ws)}`, /whitespace/);
+  refused(wrap(`<trans-unit id="settings:a"><source>x</source${" ".repeat(65)}></trans-unit>`), "run in an end tag", /whitespace/);
+  refused(wrap("").replace('<?xml version="1.0"', `<?xml version="1.0"${" ".repeat(65)}`), "run in the declaration", /whitespace/);
   assert.equal(fromXliff(wrap(`<trans-unit id="settings:a" x="${"v".repeat(5000)}"><source>x</source></trans-unit>`)).units.length, 1);
   const many = Array.from({ length: 30 }, (_, k) => `${"n".repeat(40)}${k}="1"`).join(" ");
-  refused(wrap(`<trans-unit id="settings:a" ${many}><source>x</source></trans-unit>`), "too much outside quotes", /1\.024/);
+  refused(wrap(`<trans-unit id="settings:a" ${many}><source>x</source></trans-unit>`), "too much outside quotes", /1,024/);
   refused(wrap(`<!-- a -- b -->${unit("x")}`), "double hyphen in a comment", /--/);
   refused(wrap(`<!-- a --->${unit("x")}`), "comment ending in --->", /--/);
   assert.equal(fromXliff(wrap(`<!--- a -->${unit("x")}`)).units.length, 1);
   assert.equal(fromXliff(wrap(`<!---->${unit("x")}`)).units.length, 1);
-  refused(wrap(`<trans-unit id="settings:a"=====><source>x</source></trans-unit>`), "stray =", /boşluk/);
+  refused(wrap(`<trans-unit id="settings:a"=====><source>x</source></trans-unit>`), "stray =", /whitespace/);
   refused(wrap(`<trans-unit id=settings:a><source>x</source></trans-unit>`), "unquoted value", /=/);
-  refused(wrap(`<trans-unit id="settings:a"x="1"><source>x</source></trans-unit>`), "no space between attributes", /boşluk/);
+  refused(wrap(`<trans-unit id="settings:a"x="1"><source>x</source></trans-unit>`), "no space between attributes", /whitespace/);
   assert.equal(fromXliff(wrap(`<trans-unit id = "settings:a" ><source>x</source></trans-unit>`)).units.length, 1);
 });
 
@@ -347,11 +347,11 @@ test("[P1] readTranslationPackage completes a hand-built package and canonicalis
     next_cursor: null,
   });
   for (const [raw, pattern] of [
-    [null, /nesne/],
-    [{ ...VECTOR, format: "x/1" }, /biçimi/],
+    [null, /object/],
+    [{ ...VECTOR, format: "x/1" }, /format/],
     [{ ...VECTOR, target_locale: " " }, /target_locale/],
-    [{ ...VECTOR, units: [{ id: "entry:haberler:01:x", target: "", source_hash: "" }] }, /tanınmıyor/],
-    [{ ...VECTOR, units: [VECTOR.units[0], VECTOR.units[0]] }, /iki kez/],
+    [{ ...VECTOR, units: [{ id: "entry:haberler:01:x", target: "", source_hash: "" }] }, /not recognised/],
+    [{ ...VECTOR, units: [VECTOR.units[0], VECTOR.units[0]] }, /twice/],
     [{ ...VECTOR, units: [{ ...VECTOR.units[0], kind: "entry" }] }, /kind/],
     [{ ...VECTOR, units: [{ ...VECTOR.units[0], type: "markdown" }] }, /type/],
     [{ ...VECTOR, units: [{ ...VECTOR.units[0], target: 1 }] }, /target/],
@@ -367,7 +367,7 @@ test("[P2] readPackageFile reads JSON and XLIFF (by extension or a leading <) an
   assert.deepEqual(readPackageFile(VECTOR_XLF, "en.xlf"), VECTOR);
   assert.deepEqual(readPackageFile(VECTOR_XLF, "en.txt"), VECTOR);
   assert.throws(() => readPackageFile("{", "en.json"), /JSON/);
-  assert.throws(() => readPackageFile(JSON.stringify({ hello: 1 }), "en.json"), /biçimi/);
+  assert.throws(() => readPackageFile(JSON.stringify({ hello: 1 }), "en.json"), /format/);
   assert.throws(() => readPackageFile("<xliff>", "en.xlf"), XliffError);
 });
 
@@ -426,7 +426,11 @@ async function fakeV1(route) {
     const rec = { method: req.method, url: req.url, headers: req.headers, body: raw ? JSON.parse(raw) : null };
     reqs.push(rec);
     const out = route(rec, reqs.length);
-    res.writeHead(out.status, { "content-type": "application/json" });
+    if (out.destroy) {
+      req.socket.destroy();
+      return;
+    }
+    res.writeHead(out.status, { "content-type": "application/json", ...(out.headers ?? {}) });
     res.end(JSON.stringify(out.body));
   });
   server.listen(0, "127.0.0.1");
@@ -486,9 +490,9 @@ test("[T5] export follows every cursor (an empty window included) into one file,
     assert.equal(s.reqs[0].url, "/api/v1/translations/export?target_locale=en-US&format=json&only=pending&limit=5000");
     assert.equal(s.reqs[1].url, "/api/v1/translations/export?target_locale=en-US&format=json&only=pending&cursor=page%3Ap1j4vv%40t1%40en-US&limit=5000");
     assert.match(s.reqs[2].url, /cursor=end%3Apage%40t1%40en-US/);
-    assert.match(res.stdout, /3 metin dışa aktarıldı/);
-    assert.match(res.stdout, /1 sayfa ya da kayıt kaynak dilde yayında olmadığı için pakete girmedi\./);
-    assert.match(res.stdout, /Adında ":" ya da "\." bulunan alanlardaki 2 metin pakete girmedi\./);
+    assert.match(res.stdout, /Exported 3 unit\(s\) for en-US to /);
+    assert.match(res.stdout, /1 page\(s\) or record\(s\) left out: not published in the source language\./);
+    assert.match(res.stdout, /2 text\(s\) left out: their field name contains ":" or "\."\./);
 
     const xlf = join(home, "en.xlf");
     const again = await runCli(["translations", "export", "--locale", "en-US", "--format", "xliff", "--out", xlf, "--json"], envFor(s));
@@ -511,12 +515,12 @@ test("[T5b] export usage errors and an XLIFF-unsafe text exit 1 and write no fil
     for (const args of [["--out", out], ["--locale", "en-US"], ["--locale", "en-US", "--out", out, "--format", "csv"], ["--locale", "en-US", "--out", out, "--only", "new"], ["--locale", "en-US", "--out", out, "extra"]]) {
       const res = await runCli(["translations", "export", ...args], envFor(s));
       assert.equal(res.code, 1, args.join(" "));
-      assert.match(res.stderr, /Kullanım: blocofy translations export/);
+      assert.match(res.stderr, /Usage: blocofy translations export/);
     }
     assert.equal(s.reqs.length, 0);
     const res = await runCli(["translations", "export", "--locale", "en-US", "--out", out, "--format", "xliff"], envFor(s));
     assert.equal(res.code, 1);
-    assert.match(res.stderr, /JSON olarak/);
+    assert.match(res.stderr, /as JSON/);
     assert.equal(existsSync(out), false);
   } finally {
     await s.close();
@@ -540,18 +544,18 @@ test("[T6] import: JSON chunks, dry run and publish flags, on-source-change, per
     assert.equal(s.reqs[0].body.dry_run, true);
     assert.equal(s.reqs[0].body.publish, false);
     assert.equal(s.reqs[0].body.on_source_change, "skip");
-    assert.match(dry.stdout, /Denetim \(en-US\): 1 metin yazılacak, 1 metin zaten aynı, 1 metin boş \(atlanacak\)\./);
+    assert.match(dry.stdout, /Dry run en-US: 1 applied, 1 unchanged, 1 skipped_empty\n/);
 
     const real = await runCli(["translations", "import", file, "--publish", "--on-source-change", "apply"], envFor(s));
     assert.equal(real.code, 0, real.stderr);
     assert.equal(s.reqs[1].body.dry_run, false);
     assert.equal(s.reqs[1].body.publish, true);
     assert.equal(s.reqs[1].body.on_source_change, "apply");
-    assert.match(real.stdout, /Yükleme \(en-US\): 1 metin yazıldı, 1 metin zaten aynıydı, 1 metin boştu \(atlandı\)\./);
+    assert.match(real.stdout, /Imported en-US: 1 applied, 1 unchanged, 1 skipped_empty\n/);
 
     const bad = await runCli(["translations", "import", file, "--on-source-change", "force"], envFor(s));
     assert.equal(bad.code, 1);
-    assert.match(bad.stderr, /Kullanım: blocofy translations import/);
+    assert.match(bad.stderr, /Usage: blocofy translations import/);
     const unknown = await runCli(["translations", "import", file, "--dryrun"], envFor(s));
     assert.equal(unknown.code, 1);
     assert.equal(s.reqs.length, 2);
@@ -567,10 +571,10 @@ test("[T6b] import prints publication, publish_reason, created and stamped group
     units: [
       { id: "u0", result: "applied" },
       { id: "u1", result: "applied" },
-      { id: "u2", result: "blocked", reason: "url_live", message: "Yayındaki sayfanın URL'si yalnız yayınlayarak değişir." },
+      { id: "u2", result: "blocked", reason: "url_live", message: "A live page's URL changes only with publish." },
     ],
     groups: [
-      { group: "page:p1j4vv", kind: "page", created: true, updated: true, published: false, blockers: [{ path: "a", locale: "en-US", reason: "x" }], message: "Sayfa görsel kararı beklediği için yayınlanmadı." },
+      { group: "page:p1j4vv", kind: "page", created: true, updated: true, published: false, blockers: [{ path: "a", locale: "en-US", reason: "x" }], message: "The page waits for a media decision and was not published." },
       { group: "entry:haberler:9", kind: "entry", created: false, updated: true, published: false, publish_reason: "target_archived" },
       { group: "page:p2", kind: "page", created: false, updated: false, published: false, stamped: true },
     ],
@@ -583,15 +587,15 @@ test("[T6b] import prints publication, publish_reason, created and stamped group
     writeFileSync(file, JSON.stringify(VECTOR));
     const res = await runCli(["translations", "import", file, "--publish"], envFor(s));
     assert.equal(res.code, 0, res.stderr);
-    assert.match(res.stdout, /Yükleme \(en-US\): 2 metin yazıldı, 1 metin boştu \(atlandı\), 1 metin yazılamadı\./);
-    assert.match(res.stdout, /Hedef dilde 1 yeni sayfa, kayıt ya da menü oluşturuldu\./);
-    assert.match(res.stdout, /1 sayfa çevrilmiş olarak işaretlendi\./);
-    assert.match(res.stdout, /2 sayfa ya da kayıt yayınlandı\. 1 öğe yayınlanamadı; taslak olarak duruyor\./);
-    assert.match(res.stdout, /1 kayıt arşivde olduğu için yayınlanmadı; çevirisi kaydedildi\./);
-    assert.match(res.stdout, /önbelleği yenilenemedi/);
+    assert.match(res.stdout, /Imported en-US: 2 applied, 1 skipped_empty, 1 blocked\n/);
+    assert.match(res.stdout, /Created 1 new page\(s\), record\(s\) or menu\(s\) in en-US\./);
+    assert.match(res.stdout, /Marked 1 page\(s\) as translated\./);
+    assert.match(res.stdout, /Published 2 page\(s\) and record\(s\)\. 1 could not be published and stay drafts\./);
+    assert.match(res.stdout, /1 record\(s\) not published: archived \(the translation was saved\)\./);
+    assert.match(res.stdout, /site cache could not be refreshed/);
     assert.match(res.stdout, /accelerator_degraded: flush_failed/);
-    assert.match(res.stdout, /- Yayındaki sayfanın URL'si yalnız yayınlayarak değişir\./);
-    assert.match(res.stdout, /- Sayfa görsel kararı beklediği için yayınlanmadı\./);
+    assert.match(res.stdout, /- A live page's URL changes only with publish\./);
+    assert.match(res.stdout, /- The page waits for a media decision and was not published\./);
 
     const json = await runCli(["translations", "import", file, "--publish", "--json"], envFor(s));
     assert.equal(json.code, 0, json.stderr);
@@ -611,20 +615,20 @@ test("[T6b] import prints publication, publish_reason, created and stamped group
 });
 
 test("[T7] a 422 refusal exits 2 with the server envelope last; an unreadable file exits 1 without a request", async () => {
-  const s = await fakeV1(() => ({ status: 422, body: { error: { code: "validation_failed", message: "1 birim geçersiz", details: { units: [{ id: "page:p1j4vv:hero1.body", result: "invalid", reason: "html_refused", message: "HTML'de izin verilmeyen öğeler var." }] } } } }));
+  const s = await fakeV1(() => ({ status: 422, body: { error: { code: "validation_failed", message: "1 unit is invalid", details: { units: [{ id: "page:p1j4vv:hero1.body", result: "invalid", reason: "html_refused", message: "The HTML holds elements that are not allowed." }] } } } }));
   try {
     const file = join(home, "en.json");
     writeFileSync(file, JSON.stringify(VECTOR));
     const res = await runCli(["translations", "import", file], envFor(s));
     assert.equal(res.code, 2);
-    assert.match(res.stderr, /page:p1j4vv:hero1\.body: HTML'de izin verilmeyen öğeler var\./);
+    assert.match(res.stderr, /page:p1j4vv:hero1\.body: The HTML holds elements that are not allowed\./);
     assert.equal(JSON.parse(res.stderr.trim().split("\n").pop()).error.code, "validation_failed");
     for (const [name, text] of [["bad.xlf", "<xliff>"], ["bad.json", "{"], ["other.json", JSON.stringify({ hello: 1 })]]) {
       const bad = join(home, name);
       writeFileSync(bad, text);
       const unreadable = await runCli(["translations", "import", bad], envFor(s));
       assert.equal(unreadable.code, 1, name);
-      assert.match(unreadable.stderr, /Hiçbir şey gönderilmedi/);
+      assert.match(unreadable.stderr, /Nothing was sent/);
     }
     const missing = await runCli(["translations", "import", join(home, "nope.json")], envFor(s));
     assert.equal(missing.code, 1);
@@ -644,7 +648,7 @@ test("[T8] a package over 500 units is sent in chunks; a failure part-way says w
     const res = await runCli(["translations", "import", file], envFor(s));
     assert.equal(res.code, 1);
     assert.deepEqual(s.reqs.map((r) => r.body.package.units.length), [500, 100]);
-    assert.match(res.stderr, /1 \/ 2 parçada durdu/);
+    assert.match(res.stderr, /Import stopped after 1 of 2 chunks/);
   } finally {
     await s.close();
   }
@@ -657,9 +661,49 @@ test("[T9] a file whose every target is empty sends nothing", async () => {
     writeFileSync(file, JSON.stringify({ ...VECTOR, units: VECTOR.units.map((x) => ({ ...x, target: "" })) }));
     const res = await runCli(["translations", "import", file], envFor(s));
     assert.equal(res.code, 0, res.stderr);
-    assert.match(res.stdout, /yüklenecek bir şey yok/);
+    assert.match(res.stdout, /nothing to import/);
     assert.equal(s.reqs.length, 0);
   } finally {
     await s.close();
+  }
+});
+
+test("[T10] a wet --publish import is never resent after a retryable failure; other imports still are", async () => {
+  const unavailable = { status: 503, headers: { "retry-after": "0" }, body: { error: { code: "unavailable", message: "try later" } } };
+  const s = await fakeV1(() => unavailable);
+  try {
+    const file = join(home, "en.json");
+    writeFileSync(file, JSON.stringify(VECTOR));
+    const publishing = await runCli(["translations", "import", file, "--publish"], envFor(s));
+    assert.equal(s.reqs.length, 1, "a publishing import is sent once");
+    assert.equal(publishing.code, 1);
+    assert.match(publishing.stderr, /chunk 1 of 1/);
+    assert.match(publishing.stderr, /may or may not have been applied and published/);
+    assert.match(publishing.stderr, /running the same command again is safe/i);
+    assert.match(publishing.stderr, /unchanged/);
+    assert.doesNotMatch(publishing.stderr, /retrying/);
+
+    const wet = await runCli(["translations", "import", file], envFor(s));
+    assert.equal(s.reqs.length, 1 + 4, "a non-publishing import is retried (1 + 3 retries)");
+    assert.equal(wet.code, 1);
+    assert.match(wet.stderr, /retrying/);
+    const dry = await runCli(["translations", "import", file, "--dry-run", "--publish"], envFor(s));
+    assert.equal(s.reqs.length, 5 + 4, "a dry run is retried even with --publish");
+    assert.equal(dry.code, 1);
+  } finally {
+    await s.close();
+  }
+  const dropped = await fakeV1(() => ({ destroy: true }));
+  try {
+    const file = join(home, "en.json");
+    const res = await runCli(["translations", "import", file, "--publish", "--json"], envFor(dropped));
+    assert.equal(dropped.reqs.length, 1, "a lost connection is not resent either");
+    assert.equal(res.code, 1);
+    const envelope = JSON.parse(res.stderr.trim().split("\n").pop());
+    assert.equal(envelope.error.code, "TRANSLATIONS_IMPORT_OUTCOME_UNKNOWN");
+    assert.equal(envelope.error.details.chunk, 1);
+    assert.equal(envelope.error.details.chunks, 1);
+  } finally {
+    await dropped.close();
   }
 });

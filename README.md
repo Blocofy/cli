@@ -251,7 +251,11 @@ import wrote (needs `pages:write` and `content:write`) and reports what could no
 `--dry-run` writes nothing and reports what would change. The API key needs the write scopes of
 the kinds in the package. A refusal (for example an invalid text) exits 2 with the server's error
 JSON on stderr; if a later chunk fails, the chunks already written stay written and running the
-command again is safe (written texts answer "unchanged").
+command again is safe (written texts answer "unchanged"). Transient failures (429/502/503/504,
+network) are retried, except for a chunk imported with `--publish`: a resend could not see what the
+first attempt already published, so such a chunk is sent once, and when it gets no definite answer
+the command stops with `TRANSLATIONS_IMPORT_OUTCOME_UNKNOWN` (exit 1), naming the chunk that may or
+may not have been applied and published.
 
 ### Settings
 
@@ -439,6 +443,16 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
+- **Unreleased** — Translation packages (#925).
+  - `blocofy translations export --locale <tag> --out <file> [--format json|xliff] [--only …]`
+    writes every text of one language that needs translating to one JSON or XLIFF 1.2 file. It
+    follows every export window and lists what the platform left out, by reason.
+  - `blocofy translations import <file> [--dry-run] [--publish] [--on-source-change skip|apply]`
+    reads a JSON or XLIFF package and imports it in chunks of at most 500 units (a page or record
+    is never split, up to 5,000 units). It prints the count per state, what was published, and
+    whether the site cache could not be refreshed. A chunk imported with `--publish` is never
+    resent automatically: when it gets no definite answer the command stops with
+    `TRANSLATIONS_IMPORT_OUTCOME_UNKNOWN` (exit 1), names the chunk, and running it again is safe.
 - **0.11.0** — One named context per site, one explicit target (customer item 1.8).
   The dev token and the v1 API key remain two separate credentials; a context references both.
   - **Breaking:** conflicting context choices now fail closed. When `BLOCOFY_CONTEXT`, the env

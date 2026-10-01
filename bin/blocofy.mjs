@@ -50,6 +50,7 @@ import { startDevServer } from "../lib/dev-server.mjs";
 import { readLocalTemplates } from "../lib/local-theme.mjs";
 import { CliRefusal, DEFAULT_API_URL, decidePageMediaUses, fetchPageMediaUses, isValidApiKey } from "../lib/media-uses.mjs";
 import {
+  ImportOutcomeUnknown,
   TRANSLATION_ONLY,
   XLIFF_MAX_CHARS,
   addImportReport,
@@ -286,26 +287,30 @@ Usage
       1 usage/auth/network/5xx; 2 the server refused (4xx) — the {error} JSON
       is printed to stderr.
 
-  blocofy translations export --locale <dil> --out <dosya> [--format json|xliff]
+  blocofy translations export --locale <tag> --out <file> [--format json|xliff]
                               [--only all|missing|stale|pending] [--json]
-      Bir dilin çevrilecek bütün metinlerini (sayfalar, görsel metinleri, kayıtlar, menüler, site
-      ayarları, tema metinleri) tek bir dosyaya yazar (v1 API; türlerin okuma yetkileri). Sunucu
-      paketi parça parça verir; komut her parçayı alıp tek dosyada birleştirir ve pakete
-      girmeyenleri nedenleriyle listeler. XLIFF 1.2 çeviri araçları içindir.
-        --only pending   yalnız çevrilmemiş ya da güncellenmesi gerekenler
+      Write every text of one language that needs translating (pages, image texts, records,
+      menus, site settings, theme texts) to ONE file (v1 API; the read scopes of the kinds).
+      The platform answers in windows; the command follows every window and merges them, then
+      lists what was left out and why. --format xliff writes XLIFF 1.2 for translation tools.
+        --only pending   only texts that are missing or need an update
 
-  blocofy translations import <dosya.json|dosya.xlf> [--dry-run] [--publish]
+  blocofy translations import <file.json|file.xlf> [--dry-run] [--publish]
                               [--on-source-change skip|apply] [--json]
-      Çevrilmiş dosyayı yükler (v1 API; türlerin yazma yetkileri, --publish ile pages:write ve
-      content:write). Boş çeviriler atlanır; dosya en fazla 500 metinlik parçalar halinde
-      gönderilir (bir sayfa ya da kayıt hiçbir zaman bölünmez, 5.000 metne kadar). Sonuç her
-      durum için sayılarla yazılır. Yeni sayfa ve kayıtlar taslak olarak oluşturulur, sayfa
-      içerikleri taslağa yazılır; menüler, site ayarları, tema metinleri, yayındaki bir kaydın
-      metni ve yayındaki bir sayfanın başlığı ile SEO metinleri hemen geçerli olur.
-        --dry-run        hiçbir şey yazmadan neyin değişeceğini gösterir
-        --publish        bu yüklemenin yazdığı sayfa ve kayıtları yayınlar
-        --on-source-change apply  kaynağı paketten sonra değişmiş metinleri de yazar (varsayılan: skip)
-      Çıkış kodları: 0 tamam; 1 kullanım/dosya/ağ/5xx; 2 sunucu reddetti (4xx).
+      Import a translated package (v1 API; the write scopes of the kinds, and with --publish
+      also pages:write and content:write). Empty translations are skipped; the rest is sent in
+      chunks of at most 500 units (a page or record is never split, up to 5,000 units). Prints
+      the count per state. New pages and records are created as drafts and page content goes to
+      the draft; menus, site settings, theme texts, a live record's text and a live page's title
+      and SEO texts change at once.
+        --dry-run        write nothing; report what would change
+        --publish        also publish the pages and records this import wrote. A publishing
+                         chunk is never resent automatically: if it gets no definite answer the
+                         command stops and says so; running it again is safe.
+        --on-source-change apply  also write texts whose source changed since the export
+                                  (default: skip)
+      Exit codes: 0 done; 1 usage/file/network/5xx (or a publishing chunk with an unknown
+      outcome); 2 the server refused (4xx) — the {error} JSON is printed to stderr.
 
   blocofy settings pull [dir]
   blocofy settings push [dir] (--instance <handle> | --live [--yes])
@@ -2168,11 +2173,11 @@ async function status(rest) {
 
 // ── translations (#925): one language's texts as a package file, and back ──────────────────────────────────
 
-const TRANSLATIONS_EXPORT_USAGE = "blocofy translations export --locale <dil> --out <dosya> [--format json|xliff] [--only all|missing|stale|pending] [--json]";
-const TRANSLATIONS_IMPORT_USAGE = "blocofy translations import <dosya.json|dosya.xlf> [--dry-run] [--publish] [--on-source-change skip|apply] [--json]";
+const TRANSLATIONS_EXPORT_USAGE = "blocofy translations export --locale <tag> --out <file> [--format json|xliff] [--only all|missing|stale|pending] [--json]";
+const TRANSLATIONS_IMPORT_USAGE = "blocofy translations import <file.json|file.xlf> [--dry-run] [--publish] [--on-source-change skip|apply] [--json]";
 
 function usageExit(usage) {
-  console.error(`Kullanım: ${usage}`);
+  console.error(`Usage: ${usage}`);
   process.exit(1);
 }
 
@@ -2185,21 +2190,21 @@ async function translationsExport(rest) {
   if (!locale || !out || positionals.length > 0 || (format !== "json" && format !== "xliff") || !TRANSLATION_ONLY.includes(only)) usageExit(TRANSLATIONS_EXPORT_USAGE);
   // A read of the site; the package goes to --out, never into the project tree (so no binding is needed or written).
   const { apiUrl, apiKey } = (await prepareTarget({ command: "translations export", commandClass: "read", dir: process.cwd(), flags, needs: "api", mode: `read · ${locale}` })).api;
-  const { pkg, skipped } = await exportAllTranslations({ apiUrl, apiKey, locale, only, onRetry, onPage: ({ page, units }) => console.error(`Dışa aktarım: ${page}. istek, toplam ${units} metin`) });
+  const { pkg, skipped } = await exportAllTranslations({ apiUrl, apiKey, locale, only, onRetry, onPage: ({ page, units }) => console.error(`Export: request ${page}, ${units} unit(s) so far`) });
   // toXliff refuses a text XML cannot carry BEFORE anything is written.
   const text = format === "xliff" ? toXliff(pkg) : `${JSON.stringify(pkg, null, 2)}\n`;
   writeFileSync(out, text);
-  const skipLines = exportSkipLines(skipped);
   if (format === "xliff" && text.length > XLIFF_MAX_CHARS) {
-    console.error(`Uyarı: bu XLIFF dosyası ${XLIFF_MAX_CHARS.toLocaleString("tr-TR")} karakteri aşıyor ve geri yüklenemez. Çeviriyi --format json ile ya da --only pending gibi daha küçük bir kapsamla dışa aktarın.`);
+    console.error(`Warning: this XLIFF file is over ${XLIFF_MAX_CHARS.toLocaleString("en-US")} characters and cannot be imported back. Export with --format json, or a smaller scope such as --only pending.`);
   }
   if (flags.json) {
     console.log(JSON.stringify({ file: out, format, target_locale: pkg.target_locale, units: pkg.units.length, skipped }));
     return;
   }
-  console.log(`${pkg.units.length} metin dışa aktarıldı: ${out} (${pkg.target_locale}, ${format === "xliff" ? "XLIFF" : "JSON"}).`);
+  console.log(`Exported ${pkg.units.length} unit(s) for ${pkg.target_locale} to ${out} (${format === "xliff" ? "XLIFF" : "JSON"}).`);
+  const skipLines = exportSkipLines(skipped);
   if (skipLines.length > 0) {
-    console.log("Pakete girmeyenler:");
+    console.log("Left out:");
     for (const line of skipLines) console.log(`  - ${line}`);
   }
 }
@@ -2219,13 +2224,13 @@ async function translationsImport(rest) {
     chunked = chunkPackage(pkg);
     chunked.chunks = fitChunksToBodyCap(chunked.chunks);
   } catch (error) {
-    console.error(`Çeviri dosyası okunamadı (${file}): ${String(error?.message ?? error).replace(/\.?$/, ".")} Hiçbir şey gönderilmedi.`);
+    console.error(`Cannot read translation package ${file}: ${String(error?.message ?? error).replace(/\.?$/, ".")} Nothing was sent.`);
     process.exit(1);
   }
   const { chunks, skippedEmpty, splitGroups } = chunked;
   if (chunks.length === 0) {
     if (flags.json) console.log(JSON.stringify({ dry_run: dryRun, target_locale: pkg.target_locale, chunks: 0, counts: { ...emptyImportTally().counts, skipped_empty: skippedEmpty } }));
-    else console.log("Dosyadaki bütün çeviriler boş; yüklenecek bir şey yok. Hiçbir şey gönderilmedi.");
+    else console.log("Every translation in the file is empty; nothing to import. Nothing was sent.");
     return;
   }
   const mode = `${dryRun ? "dry run" : publish ? "write + publish" : "write"} · ${pkg.target_locale}`;
@@ -2240,19 +2245,27 @@ async function translationsImport(rest) {
       tally = addImportReport(tally, answer);
       if (answer?.cache !== undefined && answer.cache !== null) caches.push(answer.cache);
       done += 1;
-      if (chunks.length > 1) console.error(`${dryRun ? "Denetlendi" : "Yüklendi"}: ${done} / ${chunks.length} parça`);
+      if (chunks.length > 1) console.error(`${dryRun ? "Checked" : "Imported"} ${done} of ${chunks.length} chunks`);
     }
   } catch (error) {
     if (!JSON_MODE) {
       const invalid = error instanceof CliRefusal && Array.isArray(error.error?.details?.units) ? error.error.details.units : [];
       if (invalid.length > 0) {
-        console.error("Bu metinler hatalı; dosyayı düzeltip yeniden yükleyin:");
-        for (const u of invalid.slice(0, 20)) console.error(`  ${u.id}: ${u.message ?? u.reason ?? "kabul edilmedi"}`);
-        if (invalid.length > 20) console.error(`  …ve ${invalid.length - 20} hatalı metin daha.`);
+        console.error("These texts were refused; fix the file and import again:");
+        for (const u of invalid.slice(0, 20)) console.error(`  ${u.id}: ${u.message ?? u.reason ?? "refused"}`);
+        if (invalid.length > 20) console.error(`  …and ${invalid.length - 20} more.`);
       }
       if (!dryRun && done > 0) {
-        console.error(`Yükleme ${done} / ${chunks.length} parçada durdu. Yüklenen parçalar kaydedildi; komutu yeniden çalıştırmak güvenlidir (yazılmış metinler "zaten aynı" sayılır).`);
+        console.error(`Import stopped after ${done} of ${chunks.length} chunks. The chunks before it were saved; running the same command again is safe (units already applied report as unchanged).`);
       }
+    }
+    if (error instanceof ImportOutcomeUnknown) {
+      throw Object.assign(
+        new Error(
+          `The import of chunk ${done + 1} of ${chunks.length} got no definite answer (${error.reason}) and was not resent, because it publishes: that chunk may or may not have been applied and published. Running the same command again is safe (units already applied report as unchanged).`,
+        ),
+        { code: "TRANSLATIONS_IMPORT_OUTCOME_UNKNOWN", details: { chunk: done + 1, chunks: chunks.length, reason: error.reason } },
+      );
     }
     throw error;
   }
