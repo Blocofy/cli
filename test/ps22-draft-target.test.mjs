@@ -37,7 +37,7 @@ const json = (res, status, body) => {
 const outcomes = (plan) => plan.map(([path, outcome]) => ({ path, outcome, digest: "cd".repeat(32) }));
 
 /** A 6.5 platform: `/api/dev/site` lists `drafts`; the dry run plans against `planTarget`; the apply may name its target. */
-function platform({ drafts = [], newDraft = false, planTarget = null, applyTarget, getFiles = {} }) {
+function platform({ drafts = [], newDraft = false, planTarget = null, applyTarget, getFiles = {}, omitNewDraft = false }) {
   const seen = { getUrls: [], posts: [] };
   const server = createServer((req, res) => {
     if (req.method === "GET" && req.url.includes("/api/dev/site")) return json(res, 200, { drafts });
@@ -55,7 +55,8 @@ function platform({ drafts = [], newDraft = false, planTarget = null, applyTarge
         const plan = [["section/Hero", newDraft ? "created" : "updated"]];
         if (body.dryRun) {
           return json(res, 200, {
-            ok: true, dryRun: true, warnings: [], manifestHash: HASH, target: "draft", targetInstance: planTarget, newDraft,
+            ok: true, dryRun: true, warnings: [], manifestHash: HASH, target: "draft", targetInstance: planTarget,
+            ...(omitNewDraft ? {} : { newDraft }),
             pointerVersion: newDraft ? null : 9, files: outcomes(plan),
           });
         }
@@ -129,6 +130,20 @@ test("PS-22: an older server that names no target still prints the reused draft 
       const r = await runBin(url, ["theme", "push", dir, "--draft"]);
       assert.equal(r.code, 0, r.stderr);
       assert.match(r.stdout, /Draft: t1b5b1n1 "Re-test draft" \(existing CLI draft, updated\)/);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("PS-22: a server whose plan has no newDraft field and no CLI draft to reuse — --name is not reported as dropped", async () => {
+  const dir = themeDir({ "section/Hero": "H" });
+  try {
+    await withPlatform({ drafts: [], newDraft: true, omitNewDraft: true, planTarget: undefined, applyTarget: undefined }, async (url) => {
+      const r = await runBin(url, ["theme", "push", dir, "--draft", "--name", "Mockup v2"]);
+      assert.equal(r.code, 0, r.stderr);
+      assert.doesNotMatch(r.stdout + r.stderr, /--name was not applied/, "no CLI draft existed: the push created one with that name");
+      assert.doesNotMatch(r.stdout, /existing CLI draft/);
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
