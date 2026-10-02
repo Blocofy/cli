@@ -63,13 +63,15 @@ Show which site a command in `[dir]` would hit (verified), without writing anyth
 ```
 blocofy theme dev [dir] [--port <n>] [--no-sync] [--name <name>]
 ```
-Start a dev server and print 3 auto-reloading views — Local, live-domain Preview, and the theme
-Editor. Press `l` / `p` / `e` to open each, `q` to quit. Edit a file and save → every open view
-reloads. Saves sync to a **draft** theme only (never the live site). `dir` defaults to cwd.
+Start a local dev server that renders your local theme files with the site's live content.
+Press `l` to open it, `q` to quit. Edit a file and save → the view reloads. Saves sync to a
+**draft** theme only (never the live site). `dir` defaults to cwd. The platform's remote preview
+and editor views for this command are retired; to share a draft page, create a preview link for
+it (v1 API `POST /themes/{id}/preview-links` or MCP `create_preview_link`; one page per link).
 The target site is verified once at start; a long session keeps that target (restart it after
 changing credentials, context or the project binding).
 - `--port <n>` — local port (default 3030).
-- `--no-sync` — local preview only (skip draft sync + remote views).
+- `--no-sync` — local preview only (skip draft sync).
 - `--name <name>` — name the draft when it is first created (ignored if it already exists).
 
 ```
@@ -94,13 +96,20 @@ the admin panel, never touching the live site. Publish it with `blocofy theme pu
 - `--yes` — confirm a `--live` push without prompting (CI/agents).
 - `--instance <handle>` — push to a specific theme by its handle (safe targeted write — no
   live-confirmation prompt).
-- `--name <name>` — name the new draft (draft mode only; ignored on `--live`/`--instance`).
+- `--name <name>` — name the new draft (draft mode only; ignored on `--live`/`--instance`). A draft
+  push reuses the existing CLI draft whatever its name; then the push says `--name` was not applied
+  and prints the `blocofy theme rename` command for it.
 - `--dry-run` / `--validate` — check the push on the server without writing; the two flags are
   aliases. The dry run covers exactly the files the push would send (remote-only files it keeps
   included; with `--prune`, without the ones it would remove). A current platform plans the whole
   deploy and prints the target, its pointer version and what happens to each file
   (`+` created, `~` updated, `-` removed; unchanged files are counted).
-- `--diff` — show what a push would change vs the target (read-only), then stop.
+- `--diff` — show what a push would change vs the target (read-only), then stop. A draft push
+  compares with the CLI draft it writes to (named by handle); with no CLI draft yet, with the live
+  theme (the push would create the draft). `--live` compares with live, `--instance` with that theme.
+
+After a draft push the CLI prints the draft it wrote to (`Draft: <handle> "<name>" (new)` or
+`(existing CLI draft, updated)`) and the `blocofy theme publish --instance <handle>` command.
 - `--idempotency-key <k>` — attach a key so a retried push is not double-applied.
 - `--prune` — also remove target files that no longer exist locally (`locales/` included);
   lists them first, and on the live theme asks to confirm (non-interactive shells add `--yes`).
@@ -452,6 +461,17 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
+- **Unreleased** — Draft push names its target (customer items PS-22/PS-23/PS-26).
+  - `theme push` (draft) prints the draft it wrote to — handle, name, new or existing — and
+    `blocofy theme publish --instance <handle>`. When it updated the existing CLI draft, it says
+    `--name` was not applied and prints the rename command.
+  - **Behaviour change:** `theme push --diff` without `--live`/`--instance` now compares with the CLI
+    draft the push writes to (found read-only via the site status, never provisioned), not with the
+    live theme. With no CLI draft yet it says so and compares with live. Release it after the
+    platform's PS-22 fix (uncached theme reads): before that fix a draft read could return its
+    pre-push files for up to five minutes.
+  - `theme dev` help no longer lists the retired live-domain and editor views.
+  - `TARGET_BINDING_REQUIRED` also names `blocofy link <dir>` for env credentials.
 - **0.12.0** — Translation packages (#925).
   - `blocofy translations export --locale <tag> --out <file> [--format json|xliff] [--only …]`
     writes every text of one language that needs translating to one JSON or XLIFF 1.2 file. It
@@ -619,11 +639,9 @@ files and sends them to the platform's dev-render endpoint (`/api/dev/render`). 
 renders them with the site's **live data** and returns HTML — so the CLI ships no rendering
 engine and you see exactly the production output.
 
-It also continuously syncs your local files to a **draft theme** so you can view the same work
-three ways — the local preview, a shareable live-domain preview link, and the admin theme
-editor — without affecting your published theme. Save a file and **every open view reloads**
-(the platform-rendered pages connect back to the local dev server's reload channel). Publish
-the draft from the theme editor when you're ready.
+It also continuously syncs your local files to a **draft theme**, so the same work can be opened
+in the admin theme editor without affecting your published theme. Save a file and the local view
+reloads. Publish the draft from the theme editor, or with `blocofy theme publish`, when you're ready.
 
 Credentials live in `~/.blocofy/credentials.json` (contexts, no secrets) + either
 `~/.blocofy/secrets.json` (0600) or the macOS keychain — written by `blocofy login`, or the
