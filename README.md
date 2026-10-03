@@ -61,7 +61,7 @@ Show which site a command in `[dir]` would hit (verified), without writing anyth
 ### Theme
 
 ```
-blocofy theme dev [dir] [--port <n>] [--no-sync] [--name <name>]
+blocofy theme dev [dir] [--port <n>] [--no-sync] [--name <name>] [--instance <handle>]
 ```
 Start a local dev server that renders your local theme files with the site's live content.
 Press `l` to open it, `q` to quit. Edit a file and save → the view reloads. Saves sync to a
@@ -73,6 +73,8 @@ changing credentials, context or the project binding).
 - `--port <n>` — local port (default 3030).
 - `--no-sync` — local preview only (skip draft sync).
 - `--name <name>` — name the draft when it is first created (ignored if it already exists).
+- `--instance <handle>` — sync into this draft. Needed when the platform cannot tell which draft is the
+  CLI draft (see "Which draft a draft command writes to" below); the live theme's handle is refused.
 
 ```
 blocofy theme pull [dir] [--draft] [--instance <handle>]
@@ -94,11 +96,19 @@ the admin panel, never touching the live site. Publish it with `blocofy theme pu
   non-interactive shells must add `--yes`.
 - `--draft` — explicit draft (same as the default; safe).
 - `--yes` — confirm a `--live` push without prompting (CI/agents).
-- `--instance <handle>` — push to a specific theme by its handle (safe targeted write — no
-  live-confirmation prompt).
-- `--name <name>` — name the new draft (draft mode only; ignored on `--live`/`--instance`). A draft
-  push reuses the existing CLI draft whatever its name; then the push says `--name` was not applied
-  and prints the `blocofy theme rename` command for it.
+- `--instance <handle>` — push to a specific theme by its handle. The live theme's handle asks for
+  the same confirmation as `--live` (non-interactive shells add `--yes`); so does any handle the CLI
+  cannot tell apart from the live theme (the live theme is unknown, or a raw numeric id was given).
+  With `--draft --instance <handle>` the push is a draft write to that draft: it never writes the
+  live theme (refused locally and by the platform, `draft_target_is_live`).
+  On a site with **no live theme** (or when the live theme cannot be read) the CLI cannot tell any
+  handle apart from the live one, so it stays on the safe side by design: every `--instance` push
+  asks for confirmation (`--yes` in non-interactive shells), and `--draft --instance` and
+  `theme dev --instance` refuse.
+- `--name <name>` — name the new draft: it is created as `CLI Draft — <name>` (draft mode only;
+  ignored on `--live`/`--instance`). When the push reuses the existing CLI draft instead, it says
+  `--name` was not applied. Do not rename the CLI draft by hand to a name that does not start with
+  `CLI Draft — `: the next draft push would refuse it and ask for `--instance`.
 - `--dry-run` / `--validate` — check the push on the server without writing; the two flags are
   aliases. The dry run covers exactly the files the push would send (remote-only files it keeps
   included; with `--prune`, without the ones it would remove). A current platform plans the whole
@@ -107,6 +117,18 @@ the admin panel, never touching the live site. Publish it with `blocofy theme pu
 - `--diff` — show what a push would change vs the target (read-only), then stop. A draft push
   compares with the CLI draft it writes to (named by handle); with no CLI draft yet, with the live
   theme (the push would create the draft). `--live` compares with live, `--instance` with that theme.
+
+**Which draft a draft command writes to.** A draft push, `theme pull --draft` and the `theme dev`
+sync write to (or read) the CLI draft only when the platform can tell which draft that is: exactly
+one draft created by a CLI push, still carrying a name the platform gives it (`CLI Draft`,
+`CLI Draft — YYYY-MM-DD` or `CLI Draft — <name>`), and not a draft a site-state restore built.
+Otherwise — two such drafts, a site-state restore draft, or a CLI draft renamed by hand — the command
+writes nothing, lists the candidate drafts and exits 2 (`draft_target_ambiguous`). The message
+pre-fills `--instance <handle>` only for a CLI-named draft that is not a restore draft; naming any
+other listed draft would overwrite it. On a site whose only candidate is a site-state restore draft,
+create a new draft theme in the admin panel and pass its handle with `--instance`, or publish or
+delete the restore draft first. `theme publish` without `--instance` uses the same rule and never
+publishes a guessed draft. With no draft at all, the first push creates one as before.
 
 After a draft push the CLI prints the draft it wrote to (`Draft: <handle> "<name>" (new)` or
 `(existing CLI draft, updated)`) and the `blocofy theme publish --instance <handle>` command.
@@ -158,7 +180,9 @@ flag, publishes the draft that `theme dev` / `theme push --draft` writes into. T
 refuses to publish a theme that has no pages (it would 404); preview first. The site is the one
 `[dir]`'s project is bound to (`dir` defaults to cwd), so `blocofy theme push ./shop && blocofy
 theme publish ./shop` always publishes `./shop`'s site, whatever directory you run it from.
-- `--instance <handle>` — publish a specific theme.
+- `--instance <handle>` — publish a specific theme. Without it the platform publishes only the
+  site's CLI draft; any other theme (a site-state restore draft, a renamed or panel-copied theme) is
+  refused with `publish_target_unconfirmed` (exit 2, nothing published) — name it with `--instance`.
 
 ### Status
 
@@ -461,6 +485,30 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
+- **0.14.0** — Draft commands no longer guess their draft (platform #989).
+  - **Behaviour change:** `theme push` (draft), `theme push --diff`, `theme pull --draft` and the
+    `theme dev` sync refuse, writing nothing, when the platform answers `draft_target_ambiguous` (or the
+    site status shows the same case): the message lists the candidate drafts and the exact
+    `--instance <handle>` command; exit code 2; never retried. A CLI draft you renamed is refused too.
+  - The refusal pre-fills `--instance` only for a safe candidate (CLI-named, not a restore draft) and
+    otherwise warns that naming a listed draft would overwrite it.
+  - `theme dev --instance <handle>` and `theme push --draft --instance <handle>` write to a chosen draft
+    (sent with `draft: true`; never the live theme).
+  - `theme dev` reports a draft-sync failure in one line, also at startup (it was silent there):
+    `draft_target_unverifiable` (the next save tries again) and `draft_target_is_live` (stops).
+  - **Behaviour change:** `theme publish` without `--instance` uses the same rule; it never publishes
+    a guessed draft.
+  - **Behaviour change:** `--name X` creates the draft as `CLI Draft — X`; the rename advice after a
+    reused draft is gone (a draft renamed by hand to another name is refused).
+  - **Behaviour change (CI):** `theme push --instance <the live theme's handle>` asks for the same
+    confirmation as `--live` (`--yes` in non-interactive shells); so does a handle the CLI cannot tell
+    apart from the live theme (live theme unknown, or a raw numeric id).
+  - `theme publish --instance <handle>` tells the platform the theme was named explicitly
+    (`explicit: true`); the automatic pick sends no flag and the platform re-checks it. A theme that is
+    not the site's CLI draft (a site-state restore draft, a renamed or panel-copied theme) is published
+    through the CLI only with `--instance`; otherwise the platform refuses with
+    `publish_target_unconfirmed` (exit 2, nothing published). Older CLIs get that refusal as a generic
+    error and can never publish such a theme.
 - **0.13.0** — Draft push names its target (customer items PS-22/PS-23/PS-26).
   - `theme push` (draft) prints the draft it wrote to — handle, name, new or existing — and
     `blocofy theme publish --instance <handle>`. When it updated the existing CLI draft, it says
