@@ -49,8 +49,9 @@ const json = (res, status, body) => {
 };
 
 /** A platform whose theme endpoint refuses the draft pick (`refuseDraft`) and records every theme request. */
-function platform({ drafts = [], refuseDraft = false, liveThemeId = "t9live" }) {
-  const seen = { themeGets: [], posts: [] };
+function platform({ drafts = [], refuseDraft = false, liveThemeId = "t9live", refuseApplyAfter503 = false, unverifiable = false, liveDraft422 = false }) {
+  const seen = { themeGets: [], posts: [], publishes: [] };
+  let applyAttempts = 0;
   const server = createServer((req, res) => {
     if (req.method === "GET" && req.url.includes("/api/dev/site")) return json(res, 200, { drafts });
     if (req.method === "GET" && req.url.includes("/api/dev/whoami")) return json(res, 200, { site: { id: 14, slug: "ksc", name: "Ksc" }, liveThemeId });
@@ -60,6 +61,15 @@ function platform({ drafts = [], refuseDraft = false, liveThemeId = "t9live" }) 
       if (refuseDraft && req.url.includes("draft=1")) return json(res, 409, REFUSAL);
       return json(res, 200, { files: {}, protocol: 1 });
     }
+    if (req.method === "POST" && req.url.endsWith("/api/dev/publish")) {
+      let raw = "";
+      req.on("data", (d) => (raw += d));
+      req.on("end", () => {
+        seen.publishes.push(JSON.parse(raw || "{}"));
+        json(res, 200, { ok: true, published: "t43cli", cloned: false });
+      });
+      return;
+    }
     if (req.method === "POST" && req.url.endsWith("/api/dev/theme")) {
       let raw = "";
       req.on("data", (d) => (raw += d));
@@ -67,6 +77,12 @@ function platform({ drafts = [], refuseDraft = false, liveThemeId = "t9live" }) 
         const body = JSON.parse(raw || "{}");
         seen.posts.push(body);
         if (refuseDraft && body.draft) return json(res, 409, REFUSAL);
+        if (unverifiable && body.draft) return json(res, 503, { error: "draft_target_unverifiable", message: "…" });
+        if (liveDraft422 && body.draft && body.instance) return json(res, 422, { error: "draft_target_is_live", instance: body.instance, message: "…" });
+        if (refuseApplyAfter503 && !body.dryRun) {
+          applyAttempts += 1;
+          return applyAttempts === 1 ? json(res, 503, { error: "control_plane_unavailable" }) : json(res, 409, REFUSAL);
+        }
         if (body.dryRun) {
           return json(res, 200, {
             ok: true, dryRun: true, warnings: [], manifestHash: HASH, target: "draft", targetInstance: body.instance ?? null,
@@ -123,18 +139,52 @@ test("#989 findCliDraft: only a single, CLI-named, non-restore import draft is p
   assert.equal(refused([{ id: "t50", name: "Re-test draft", source: "import" }]).reason, "unrecognized_name");
   const two = refused([CLI, { ...CLI, id: "t44", name: "CLI Draft" }]);
   assert.equal(two.reason, "multiple_candidates");
-  assert.deepEqual(two.candidates, [{ instance: "t43cli", name: "CLI Draft — 2026-10-01" }, { instance: "t44", name: "CLI Draft" }]);
+  assert.deepEqual(two.candidates, [
+    { instance: "t43cli", name: "CLI Draft — 2026-10-01", restore: false },
+    { instance: "t44", name: "CLI Draft" , restore: false },
+  ]);
+  // #989 review P2: a --name draft ("CLI Draft — <name>") is the CLI's; a hand-renamed one is not.
+  assert.deepEqual(findCliDraft({ drafts: [{ id: "t45", name: "CLI Draft — Mockup v2", source: "import" }] })?.id, "t45");
+  assert.equal(refused([{ id: "t46", name: "Mockup v2", source: "import" }]).reason, "unrecognized_name");
+  // Restore draft with the LOWER id next to a CLI draft: still refused, the restore is flagged.
+  const mixed = refused([RESTORE, CLI]);
+  assert.equal(mixed.reason, "site_state_restore");
+  assert.deepEqual(mixed.candidates.map((c) => c.restore), [true, false]);
 });
 
-test("#989 draftTargetAmbiguousMessage names why, every candidate and the exact --instance command", () => {
+test("#989 review P1: the message never pre-fills --instance with a protected draft (restore-only site)", () => {
   const msg = draftTargetAmbiguousMessage(
-    { reason: "site_state_restore", candidates: [{ instance: "t31restore", name: "Site State · 0123456789ab" }] },
+    { reason: "site_state_restore", candidates: [{ instance: "t31restore", name: "Site State · 0123456789ab", restore: true }], suggestedInstance: null },
     { command: "blocofy theme push ./shop" },
   );
   assert.match(msg, /site-state restore/);
   assert.match(msg, /Nothing was written/);
-  assert.match(msg, /t31restore {2}"Site State · 0123456789ab"/);
-  assert.match(msg, /blocofy theme push \.\/shop --instance t31restore/);
+  assert.match(msg, /t31restore {2}"Site State · 0123456789ab" {2}\(site-state restore draft\)/);
+  assert.doesNotMatch(msg, /--instance t31restore/);
+  assert.match(msg, /blocofy theme push \.\/shop --instance <handle>/);
+  assert.match(msg, /would OVERWRITE it/);
+  assert.match(msg, /create a new draft theme in the admin panel/);
+  assert.match(msg, /publish or delete the site-state restore draft first/);
+});
+
+test("#989 review P1: restore draft with the LOWER id + a CLI draft — only the CLI draft is pre-filled, the restore is warned about", () => {
+  for (const err of [
+    // server shape (with suggestedInstance) and a local refusal (computed from the flags/names)
+    { reason: "site_state_restore", candidates: [{ instance: "t20", name: "Restored copy", restore: true }, { instance: "t43cli", name: "CLI Draft — 2026-10-01", restore: false }], suggestedInstance: "t43cli" },
+    { reason: "site_state_restore", candidates: [{ instance: "t20", name: "Site State · 0123456789ab" }, { instance: "t43cli", name: "CLI Draft — 2026-10-01" }] },
+  ]) {
+    const msg = draftTargetAmbiguousMessage(err, { command: "blocofy theme push" });
+    assert.match(msg, /To use the CLI draft: {2}blocofy theme push --instance t43cli/);
+    assert.doesNotMatch(msg, /--instance t20/);
+    assert.match(msg, /naming t20 with --instance would OVERWRITE it \(including the restore's work\)/);
+  }
+});
+
+test("#989 review P3: a refusal of a RESENT apply never claims nothing was written", () => {
+  const msg = draftTargetAmbiguousMessage({ reason: "multiple_candidates", candidates: [] }, { earlierAttempt: "unknown" });
+  assert.doesNotMatch(msg, /Nothing was written/);
+  assert.match(msg, /earlier attempt of this push got no answer, so whether it wrote is unknown/);
+  assert.match(msg, /blocofy status/);
 });
 
 test("#989 push (default draft) with a site-state restore draft: refused locally before any theme request, exit 2", async () => {
@@ -145,7 +195,8 @@ test("#989 push (default draft) with a site-state restore draft: refused locally
       assert.equal(r.code, 2, r.stdout + r.stderr);
       assert.match(r.stderr, /draft_target_ambiguous/);
       assert.match(r.stderr, /t31restore/);
-      assert.match(r.stderr, new RegExp(`blocofy theme push ${dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} --instance t31restore`));
+      assert.match(r.stderr, new RegExp(`blocofy theme push ${dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} --instance <handle>`));
+      assert.doesNotMatch(r.stderr, /--instance t31restore/);
       assert.deepEqual(seen.posts, []);
       assert.deepEqual(seen.themeGets, []);
     });
@@ -263,8 +314,166 @@ test("#989 theme dev --instance <live handle> is refused before anything is sent
     await withPlatform({}, async (url, seen) => {
       const r = await runBin(url, ["theme", "dev", dir, "--instance", "t9live", "--dry"]);
       assert.equal(r.code, 2, r.stdout + r.stderr);
-      assert.match(r.stderr, /is the LIVE theme/);
+      assert.match(r.stderr, /the LIVE theme/);
       assert.deepEqual(seen.posts, []);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#989 review P2: theme publish without --instance never publishes a guessed draft (restore-only site): exit 2, nothing published", async () => {
+  const dir = themeDir();
+  try {
+    await withPlatform({ drafts: [RESTORE] }, async (url, seen) => {
+      const r = await runBin(url, ["theme", "publish", dir]);
+      assert.equal(r.code, 2, r.stdout + r.stderr);
+      assert.match(r.stderr, /Nothing was published/);
+      assert.match(r.stderr, /would PUBLISH it live/);
+      assert.doesNotMatch(r.stderr, /--instance t31restore/);
+      assert.deepEqual(seen.publishes, []);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#989 review P2: theme publish picks the single CLI draft; with only non-CLI drafts it asks for --instance", async () => {
+  const dir = themeDir();
+  try {
+    await withPlatform({ drafts: [{ id: "t2dup", name: "Copy", source: "duplicate" }, CLI] }, async (url, seen) => {
+      const r = await runBin(url, ["theme", "publish", dir]);
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      assert.deepEqual(seen.publishes, [{ instanceId: "t43cli" }]);
+    });
+    await withPlatform({ drafts: [{ id: "t2dup", name: "Copy", source: "duplicate" }] }, async (url, seen) => {
+      const r = await runBin(url, ["theme", "publish", dir]);
+      assert.equal(r.code, 1, r.stdout + r.stderr);
+      assert.match(r.stderr, /No CLI draft to publish/);
+      assert.deepEqual(seen.publishes, []);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#989 review P2: push --draft --instance <draft> sends draft:true WITH the instance", async () => {
+  const dir = themeDir();
+  try {
+    await withPlatform({ drafts: [RESTORE] }, async (url, seen) => {
+      const r = await runBin(url, ["theme", "push", dir, "--draft", "--instance", "t31restore"]);
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      assert.ok(seen.posts.length >= 1 && seen.posts.every((p) => p.instance === "t31restore" && p.draft === true));
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#989 review P2: push --draft --instance <live handle | raw numeric id | live unknown> is refused locally, nothing sent", async () => {
+  const dir = themeDir();
+  try {
+    for (const [opts, instance] of [
+      [{}, "t9live"],
+      [{}, "9"],
+      [{ liveThemeId: null }, "t43cli"],
+    ]) {
+      await withPlatform(opts, async (url, seen) => {
+        const r = await runBin(url, ["theme", "push", dir, "--draft", "--instance", instance]);
+        assert.equal(r.code, 2, r.stdout + r.stderr);
+        assert.match(r.stderr, /a draft push never writes live/);
+        assert.deepEqual(seen.posts, []);
+      });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#989 review P2: the server's 422 draft_target_is_live is reported (exit 2)", async () => {
+  const dir = themeDir();
+  try {
+    await withPlatform({ liveDraft422: true }, async (url) => {
+      const r = await runBin(url, ["theme", "push", dir, "--draft", "--instance", "t43cli"]);
+      assert.equal(r.code, 2, r.stdout + r.stderr);
+      assert.match(r.stderr, /draft_target_is_live/);
+      assert.match(r.stderr, /cannot write the LIVE theme/);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#989 review P2: --instance without --draft is fail-closed live — raw numeric id or unknown live needs --yes", async () => {
+  const dir = themeDir();
+  try {
+    for (const [opts, instance] of [
+      [{}, "9"],
+      [{ liveThemeId: null }, "t43cli"],
+    ]) {
+      await withPlatform(opts, async (url, seen) => {
+        const r = await runBin(url, ["theme", "push", dir, "--instance", instance]);
+        assert.equal(r.code, 1, r.stdout + r.stderr);
+        assert.match(r.stderr, /may be the LIVE theme/);
+        assert.deepEqual(seen.posts, []);
+      });
+    }
+    // A known draft handle next to a known live theme: no prompt.
+    await withPlatform({}, async (url) => {
+      const r = await runBin(url, ["theme", "push", dir, "--instance", "t43cli"]);
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#989 review P3: a refusal on the RESENT apply says the earlier attempt's outcome is unknown and how to check", async () => {
+  const dir = themeDir();
+  try {
+    await withPlatform({ drafts: [CLI], refuseApplyAfter503: true }, async (url) => {
+      const r = await runBin(url, ["theme", "push", dir]);
+      assert.equal(r.code, 2, r.stdout + r.stderr);
+      assert.match(r.stderr, /draft_target_ambiguous/);
+      assert.doesNotMatch(r.stderr, /Nothing was written/);
+      assert.match(r.stderr, /earlier attempt of this push got no answer, so whether it wrote is unknown/);
+      assert.match(r.stderr, /blocofy status/);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#989 review P3: 503 draft_target_unverifiable on push is a clear message, not an unknown-outcome guess", async () => {
+  const dir = themeDir();
+  try {
+    await withPlatform({ drafts: [CLI], unverifiable: true }, async (url) => {
+      const r = await runBin(url, ["theme", "push", dir]);
+      assert.notEqual(r.code, 0);
+      assert.match(r.stderr, /could not verify which draft this push would write to/);
+      assert.match(r.stderr, /Nothing was written/);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#989 review P2: theme dev --instance <draft> syncs with draft:true AND the instance", async () => {
+  const dir = themeDir();
+  try {
+    await withPlatform({}, async (url, seen) => {
+      const probe = createServer().listen(0);
+      await once(probe, "listening");
+      const port = String(probe.address().port);
+      probe.close();
+      const child = spawn("node", [BIN, "theme", "dev", dir, "--port", port, "--instance", "t43cli"], { env: env(url), stdio: ["ignore", "pipe", "pipe"] });
+      const deadline = Date.now() + 10000;
+      while (seen.posts.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+      child.kill("SIGKILL");
+      await once(child, "exit");
+      assert.equal(seen.posts.length >= 1, true);
+      assert.equal(seen.posts[0].instance, "t43cli");
+      assert.equal(seen.posts[0].draft, true);
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });

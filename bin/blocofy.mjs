@@ -209,7 +209,8 @@ Usage
         --instance <handle>  push to a specific theme by its handle. If the platform cannot
                              tell which draft is the CLI draft, a draft push refuses and asks
                              for this. The LIVE theme's handle asks for confirmation like --live
-        --name <name>  name the NEW draft (draft mode only; ignored on --live/--instance)
+        --name <name>  name the NEW draft "CLI Draft — <name>" (draft mode only; ignored on
+                       --live/--instance). With --draft --instance, writes that draft (never live)
         --dry-run    validate on the server WITHOUT writing (auth + snapshot + Liquid check)
         --validate   alias for --dry-run (validate only, nothing written)
         --diff       show what a push WOULD change vs the target (read-only), then stop
@@ -510,14 +511,28 @@ function failAndExit(error) {
  * #989 — the platform (or `findCliDraft`, which mirrors it) refused to pick the draft automatically. Says why, lists the
  * candidate drafts and the exact command to repeat with `--instance`; exits 2 (409). Never retried.
  */
-function failDraftTargetAmbiguous(error, command) {
+function failDraftTargetAmbiguous(error, command, { action = "write" } = {}) {
+  // Review P3: a refusal of a RESENT apply says nothing about the earlier attempt — never "Nothing was written" then.
+  const earlierAttempt = error?.phase === "apply" && (error.earlierAttempt === "unknown" || error.earlierAttempt === "committed") ? error.earlierAttempt : null;
   failAndExit({
     code: DRAFT_TARGET_AMBIGUOUS,
     status: 409,
-    message: draftTargetAmbiguousMessage(error, { command }),
-    details: { reason: error.reason ?? null, candidates: error.candidates ?? [] },
+    message: draftTargetAmbiguousMessage(error, { command, action, earlierAttempt }),
+    details: {
+      reason: error.reason ?? null,
+      candidates: error.candidates ?? [],
+      suggestedInstance: error.suggestedInstance ?? null,
+      ...(earlierAttempt ? { earlierAttempt } : {}),
+    },
   });
 }
+
+/**
+ * Could `instance` be the live theme? Fail-closed (#989 review): yes when it is the live handle, when the live theme is
+ * not known, and when it is a raw numeric id (the server accepts one, the live handle comparison cannot see it).
+ */
+const instanceMaybeLive = (instance, liveThemeId) =>
+  liveThemeId == null || String(instance) === String(liveThemeId) || /^\d+$/.test(String(instance));
 
 /** The command line to repeat with `--instance` (the directory argument kept, as the user typed it). */
 const commandLine = (base, positionals) => [base, ...positionals.slice(0, 1)].join(" ");
@@ -951,6 +966,9 @@ async function themePull(rest) {
     ({ count } = await withNewBindingClaim(target, dir, () => pullTheme({ dir, url: target.dev.url, token: target.dev.token, draft, instance, onRetry })));
   } catch (error) {
     if (error?.code === DRAFT_TARGET_AMBIGUOUS) failDraftTargetAmbiguous(error, commandLine("blocofy theme pull", positionals));
+    if (error?.code === "draft_target_unverifiable") {
+      failAndExit({ code: "draft_target_unverifiable", status: 503, message: "The platform could not verify which draft to pull (a read failed on its side). Nothing was written. Try again in a moment.", details: {} });
+    }
     throw error;
   }
   console.log(`Downloaded ${count} ${what} theme files → ${dir}`);
@@ -1038,16 +1056,28 @@ async function themePush(rest) {
   // #989 review: `--instance <the live theme's handle>` writes the LIVE theme exactly like `--live`, so it needs the
   // same confirmation (an explicit --instance is the documented way past a refused draft pick — it must not become a
   // way to write live without asking).
-  const instanceIsLive = mode === "instance" && whoami.liveThemeId != null && String(instance) === String(whoami.liveThemeId);
+  const instanceIsLive = mode === "instance" && instanceMaybeLive(instance, whoami.liveThemeId);
+  // `--draft --instance <h>`: a draft write to a chosen draft. It never reaches the live theme — refused here when the
+  // handle may be live (fail-closed), and by the server (422 draft_target_is_live) in any case.
+  const draftInstance = mode === "instance" && Boolean(flags.draft);
+  if (draftInstance && instanceIsLive && !dryRun) {
+    console.error(`✗ --draft --instance ${instance}: ${whoami.liveThemeId != null && String(instance) === String(whoami.liveThemeId) ? "that is the LIVE theme" : "this may be the LIVE theme (it could not be told apart from it)"}; a draft push never writes live. Nothing was written.`);
+    console.error("  Pass a draft's handle (`blocofy status`), or drop --draft and confirm a live push.");
+    process.exit(2);
+  }
   const decision = livePushDecision({
-    draft: (mode !== "live" && !instanceIsLive) || dryRun,
+    draft: (mode !== "live" && (!instanceIsLive || draftInstance)) || dryRun,
     yes: Boolean(flags.yes),
     confirm: Boolean(flags.confirm),
     isTTY: Boolean(process.stdin.isTTY),
   });
   if (decision.mustAbort) {
     if (instanceIsLive) {
-      console.error(`⚠ Theme ${instance} is the LIVE theme of ${siteName}: this push writes to it immediately (no preview).`);
+      console.error(
+        whoami.liveThemeId != null && String(instance) === String(whoami.liveThemeId)
+          ? `⚠ Theme ${instance} is the LIVE theme of ${siteName}: this push writes to it immediately (no preview).`
+          : `⚠ Theme ${instance} may be the LIVE theme of ${siteName} (it could not be told apart from it): a push to it may write live immediately.`,
+      );
       console.error(`  Non-interactive shell: pass --yes to confirm, or push to a draft instead. Nothing was written.`);
       process.exit(1);
     }
@@ -1074,7 +1104,7 @@ async function themePush(rest) {
   // `--yes`/`--confirm` → onaylı, TTY → liste basıldıktan sonra y/N, non-TTY → yazımsız çıkış.
   // TPUSH-5: `--dry-run --prune` plans the pruned payload (it writes nothing, so it asks nothing).
   const prune = Boolean(flags.prune);
-  const liveTarget = mode === "live" || (mode === "instance" && (whoami.liveThemeId == null || String(instance) === String(whoami.liveThemeId)));
+  const liveTarget = mode === "live" || instanceIsLive;
   const pruneDecision = livePushDecision({
     draft: !prune || dryRun || !liveTarget,
     yes: Boolean(flags.yes),
@@ -1121,7 +1151,7 @@ async function themePush(rest) {
       dir,
       url: creds.url,
       token: creds.token,
-      draft: mode === "draft",
+      draft: mode === "draft" || draftInstance,
       instance: mode === "instance" ? instance : null,
       name: mode === "draft" ? name : null,
       dryRun,
@@ -1140,6 +1170,9 @@ async function themePush(rest) {
       failAndExit({ code: "cli_upgrade_required", status: error.status, message: "The server refused this CLI version; update it: npm i -g @blocofy/cli@latest", details: { missing } });
     }
     if (error?.code === DRAFT_TARGET_AMBIGUOUS) failDraftTargetAmbiguous(error, commandLine("blocofy theme push", positionals));
+    if (error?.code === "draft_target_is_live") {
+      failAndExit({ code: "draft_target_is_live", status: 422, message: "A draft push cannot write the LIVE theme; nothing was written. Pass a draft's handle (`blocofy status`), or drop --draft and confirm a live push.", details: {} });
+    }
     if (error?.code === "idempotency_conflict") {
       if (!JSON_MODE) {
         console.error("✗ Idempotency çakışması: aynı anahtar daha önce FARKLI içerikle kullanılmış (409).");
@@ -1192,9 +1225,10 @@ async function themePush(rest) {
       const h = typeof result.targetInstance === "string" ? result.targetInstance : null;
       const label = result.targetName ? ` "${result.targetName}"` : "";
       if (h) console.log(result.newDraft ? `Draft: ${h}${label} (new)` : `Draft: ${h}${label} (existing CLI draft, updated)`);
-      // PS-22: the server reuses the CLI draft whatever its name; --name only names a draft this push creates.
+      // --name only names a draft this push creates. #989 review: no rename advice — a draft renamed by hand to a name
+      // that does not start with "CLI Draft — " is no longer picked automatically.
       if (name && result.newDraft !== true) {
-        console.log(`Note: --name was not applied — this push updated the existing CLI draft${h ? ` ${h}` : ""}. Rename it with:  blocofy theme rename ${h ?? "<handle>"} "${name}"`);
+        console.log(`Note: --name was not applied — it names only a draft this push creates; this push updated the existing CLI draft${h ? ` ${h}` : ""}.`);
       }
       console.log("Preview & publish it in the admin panel: Theme -> Theme library -> \"Open in editor\".");
       console.log(`Publish it live with:  blocofy theme publish${h ? ` --instance ${h}` : ""}`);
@@ -1277,6 +1311,12 @@ function themePushRefusal(error, { draft = false, idempotencyKey = null } = {}) 
     details: withEarlier({ phase: "apply", outcome: "unknown", idempotencyKey, ...(error?.status ? { status: error.status } : {}), ...(bound !== undefined ? { expectedTargetInstance: bound } : {}) }),
   });
   switch (error?.code) {
+    case "draft_target_unverifiable":
+      // #989 review P3: the platform could not read which draft to write to; it wrote nothing for this attempt.
+      return {
+        message: `The platform could not verify which draft this push would write to (a read failed on its side). ${nothing("Run the push again in a moment.")}`,
+        details: withEarlier({}),
+      };
     case "pointer_version_conflict":
       return {
         message: `The target theme was deployed again after this push checked it (now at pointer ${body.currentVersion == null ? "none" : `v${body.currentVersion}`}). ${nothing("Run the push again.")}`,
@@ -2034,8 +2074,8 @@ async function themeDev(rest) {
   // #989: `--instance <handle>` names the draft to sync into, for a site where the platform refuses to pick one. Draft
   // sync never writes the live theme, so the live theme's handle is refused here.
   const devInstance = typeof flags.instance === "string" ? flags.instance : null;
-  if (devInstance && target.identity?.liveThemeId != null && String(devInstance) === String(target.identity.liveThemeId)) {
-    console.error(`✗ ${devInstance} is the LIVE theme. 'theme dev' syncs to a draft only; pick a draft handle (\`blocofy status\`) or use --no-sync.`);
+  if (devInstance && instanceMaybeLive(devInstance, target.identity?.liveThemeId ?? null)) {
+    console.error(`✗ ${devInstance} is (or could not be told apart from) the LIVE theme. 'theme dev' syncs to a draft only; pick a draft handle (\`blocofy status\`) or use --no-sync.`);
     process.exit(2);
   }
 
@@ -2189,23 +2229,26 @@ async function themePublish(rest) {
   const creds = target.dev;
   let instance = typeof flags.instance === "string" ? flags.instance : null;
   if (!instance) {
-    // Belirtilmediyse: `theme dev` / `theme push --draft`'ın yazdığı taslağı yayınla. Kaynak
-    // `GET /api/dev/site` — eski `fetchDevSession` yolu sunucuda 410'a döndü ve bu komutu
-    // try/catch'siz, boş mesajlı bir Error ile tamamen çalışmaz hâle getirmişti.
-    //
-    // `drafts` canlı OLMAYAN HER instance'ı içerir; sunucunun `ensureDraftInstance`'ı ise
-    // `source === "import"` olanı seçer (yayınlanan taslak import'tan çıkarılır). Aynı seçimi
-    // burada tekrarla — yoksa bir kez yayın yapmış her sitede iki taslak görünür ve komut takılır.
+    // Belirtilmediyse: `theme dev` / `theme push --draft`'ın yazdığı taslağı yayınla. Kaynak `GET /api/dev/site`.
+    // #989 review P2: the SAME rule as a draft push (`findCliDraft`, mirroring the server) and the same refusal — a
+    // guessed draft (a site-state restore draft, a renamed one, one of several) is never published live.
     const status = await fetchSiteStatus({ url: creds.url, token: creds.token, onRetry });
     const drafts = status?.drafts ?? [];
-    const cliDrafts = drafts.filter((d) => d.source === "import");
-    if (cliDrafts.length === 1) {
-      instance = cliDrafts[0].id;
+    let cliDraft;
+    try {
+      cliDraft = findCliDraft(status);
+    } catch (error) {
+      if (error?.code === DRAFT_TARGET_AMBIGUOUS) failDraftTargetAmbiguous(error, commandLine("blocofy theme publish", positionals), { action: "publish" });
+      throw error;
+    }
+    if (cliDraft) {
+      instance = cliDraft.id;
     } else if (drafts.length === 0) {
       console.error("No draft theme to publish. Create one first:  blocofy theme push --draft");
       process.exit(1);
     } else {
-      console.error("Could not tell which draft to publish — pick one with --instance <handle>:");
+      // Drafts exist, but none is the CLI draft (panel copies, starter themes…): publishing one is a choice to make.
+      console.error("No CLI draft to publish. Publish one of the site's drafts explicitly with --instance <handle>:");
       for (const d of drafts) console.error(`  ${d.id}  ${d.name ?? "(unnamed)"}`);
       process.exit(1);
     }

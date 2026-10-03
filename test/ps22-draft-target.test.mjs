@@ -102,7 +102,8 @@ test("PS-22: a draft push that reuses the CLI draft names it, and says --name wa
       assert.equal(r.code, 0, r.stderr);
       assert.match(r.stdout, /Draft: t1b5b1n1 "CLI Draft — 2026-10-02" \(existing CLI draft, updated\)/);
       assert.match(r.stdout + r.stderr, /--name was not applied/);
-      assert.match(r.stdout + r.stderr, /blocofy theme rename t1b5b1n1 "Mockup v2"/);
+      // #989 review: no rename advice any more — a draft renamed by hand to a non-"CLI Draft — " name is refused.
+      assert.doesNotMatch(r.stdout + r.stderr, /theme rename/);
       assert.match(r.stdout, /blocofy theme publish --instance t1b5b1n1/);
     });
   } finally {
@@ -116,7 +117,8 @@ test("PS-22: a draft push that creates a new draft names it from the apply (the 
     await withPlatform({ drafts: [], newDraft: true, planTarget: null, applyTarget: "t9new" }, async (url) => {
       const r = await runBin(url, ["theme", "push", dir, "--draft", "--name", "Mockup v2"]);
       assert.equal(r.code, 0, r.stderr);
-      assert.match(r.stdout, /Draft: t9new "Mockup v2" \(new\)/);
+      // #989 review: the platform creates a --name draft as "CLI Draft — <name>".
+      assert.match(r.stdout, /Draft: t9new "CLI Draft — Mockup v2" \(new\)/);
       assert.doesNotMatch(r.stdout + r.stderr, /--name was not applied/);
       assert.match(r.stdout, /blocofy theme publish --instance t9new/);
     });
