@@ -71,7 +71,7 @@ import { MANIFEST_PATH, buildManifest, validateSiteStateTree, verifyManifest } f
 import { SiteStateFsError, hashBuffer, readSiteStateTree, stagedWriteTree } from "../lib/site-state-fs.mjs";
 import { migrateSiteState } from "../lib/site-migrate.mjs";
 import { applySiteState, downloadAssetBytes, fetchSiteStateExport, planSiteState, publishSiteState, uploadMediaAsset } from "../lib/site-state-client.mjs";
-import { diffTheme, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
+import { diffTheme, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, findCliDraft, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
 import { isAffirmative, livePushDecision, resolvePushMode } from "../lib/confirm.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
@@ -178,14 +178,15 @@ Usage
       Show which site a command in [dir] would hit (verified), without writing anything.
 
   blocofy theme dev [dir] [--port <n>] [--no-sync] [--name <name>]
-      Start a dev server and print 3 auto-reloading views — Local, live-domain
-      Preview, and the theme Editor. Press l / p / e to open each, q to quit.
-      Edit a file and save → every open view reloads. Saves sync to a DRAFT theme
-      only (never the live site). (dir defaults to cwd)
+      Start a local dev server that renders your local theme files with the site's
+      live content. Press l to open it, q to quit. Edit a file and save → the view
+      reloads. Saves sync to a DRAFT theme only (never the live site). (dir defaults to cwd)
+      The platform's remote preview and editor views for this command are retired; to
+      share a draft page, create a preview link for it (v1 API / MCP create_preview_link).
       The target site is verified ONCE at start; a long session keeps that target (restart
       it after changing credentials, context or the project binding).
         --port <n>   local port (default 3030)
-        --no-sync    local preview only (skip draft sync + remote views)
+        --no-sync    local preview only (skip draft sync)
         --name <name>  name the draft when it is first created (ignored if it already exists)
 
   blocofy theme pull [dir] [--draft] [--instance <handle>]
@@ -952,7 +953,7 @@ async function themePush(rest) {
   // CF-T2: `--diff` and `--dry-run` are reads; every other push is a remote mutation (binding required). The
   // target is verified (whoami, both pairs, binding) before the first theme request — no best-effort swallow.
   const readOnly = Boolean(flags.diff) || dryRun;
-  const opMode = flags.diff ? `read · diff vs ${instanceFlag ? `instance ${instanceFlag}` : "live"}` : dryRun ? `read · dry run (${mode === "instance" ? `instance ${instance}` : mode})` : mode === "instance" ? `instance ${instance}` : mode;
+  const opMode = flags.diff ? `read · diff vs ${instanceFlag ? `instance ${instanceFlag}` : mode === "draft" ? "CLI draft" : "live"}` : dryRun ? `read · dry run (${mode === "instance" ? `instance ${instance}` : mode})` : mode === "instance" ? `instance ${instance}` : mode;
   const target = await prepareTarget({ command: "theme push", commandClass: readOnly ? "read" : "remote-mutation", dir, flags, needs: "dev", mode: `${opMode}${flags.prune && !readOnly ? " · prune" : ""}` });
   const creds = target.dev;
   // 0.5.0: her push'a otomatik idempotency key — kanonik dal (protokol + key) ancak böyle seçilir; key
@@ -963,12 +964,18 @@ async function themePush(rest) {
   // ad-alanlar, önek EKLENMEZ.
   const idempotencyKey = typeof flags["idempotency-key"] === "string" ? flags["idempotency-key"] : `cli-${randomUUID()}`;
 
-  // `--diff`: read-only preview vs the LIVE theme (or --instance). No write; the draft target is not
-  // diffable (a draft GET would PROVISION the draft server-side — a read-only command must not mutate).
+  // `--diff`: read-only preview vs what the push would write to. PS-26: a draft push writes to the CLI draft, so
+  // that draft is found via `/api/dev/site` and diffed by handle — never via `?draft=1`, which PROVISIONS a draft
+  // server-side (a read-only command must not mutate). With no CLI draft yet the push would create one: vs live.
   if (flags.diff) {
     const diffTarget = ` of ${siteLabel(target.identity.site)}`;
-    const d = await diffTheme({ dir, url: creds.url, token: creds.token, instance: instanceFlag, onRetry });
-    console.log(instanceFlag ? `Diff vs theme ${instanceFlag}${diffTarget}:` : `Diff vs the LIVE theme${diffTarget} (push default writes to a DRAFT):`);
+    const cliDraft = mode === "draft" ? findCliDraft(await fetchSiteStatus({ url: creds.url, token: creds.token, onRetry })) : null;
+    const diffInstance = instanceFlag ?? cliDraft?.id ?? null;
+    const d = await diffTheme({ dir, url: creds.url, token: creds.token, instance: diffInstance, onRetry });
+    if (instanceFlag) console.log(`Diff vs theme ${instanceFlag}${diffTarget}:`);
+    else if (cliDraft) console.log(`Diff vs draft ${cliDraft.id}${cliDraft.name ? ` "${cliDraft.name}"` : ""}${diffTarget} (the CLI draft this push writes to):`);
+    else if (mode === "draft") console.log(`No CLI draft yet — this push would create one. Diff vs the LIVE theme${diffTarget}:`);
+    else console.log(`Diff vs the LIVE theme${diffTarget}:`);
     const total = d.added.length + d.changed.length + d.removed.length;
     if (total === 0) {
       console.log("No differences — local theme matches the target.");
@@ -1140,8 +1147,15 @@ async function themePush(rest) {
     }
     if (result.convergence === "converged") console.log("  (already applied by an earlier push with the same idempotency key)");
     if (mode === "draft") {
+      const h = typeof result.targetInstance === "string" ? result.targetInstance : null;
+      const label = result.targetName ? ` "${result.targetName}"` : "";
+      if (h) console.log(result.newDraft ? `Draft: ${h}${label} (new)` : `Draft: ${h}${label} (existing CLI draft, updated)`);
+      // PS-22: the server reuses the CLI draft whatever its name; --name only names a draft this push creates.
+      if (name && result.newDraft !== true) {
+        console.log(`Note: --name was not applied — this push updated the existing CLI draft${h ? ` ${h}` : ""}. Rename it with:  blocofy theme rename ${h ?? "<handle>"} "${name}"`);
+      }
       console.log("Preview & publish it in the admin panel: Theme -> Theme library -> \"Open in editor\".");
-      console.log("Publish it live with:  blocofy theme publish");
+      console.log(`Publish it live with:  blocofy theme publish${h ? ` --instance ${h}` : ""}`);
     }
     return;
   }
