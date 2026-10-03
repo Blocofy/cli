@@ -71,7 +71,7 @@ import { MANIFEST_PATH, buildManifest, validateSiteStateTree, verifyManifest } f
 import { SiteStateFsError, hashBuffer, readSiteStateTree, stagedWriteTree } from "../lib/site-state-fs.mjs";
 import { migrateSiteState } from "../lib/site-migrate.mjs";
 import { applySiteState, downloadAssetBytes, fetchSiteStateExport, planSiteState, publishSiteState, uploadMediaAsset } from "../lib/site-state-client.mjs";
-import { diffTheme, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, findCliDraft, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
+import { DRAFT_TARGET_AMBIGUOUS, diffTheme, draftTargetAmbiguousMessage, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, findCliDraft, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
 import { isAffirmative, livePushDecision, resolvePushMode } from "../lib/confirm.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
@@ -90,7 +90,7 @@ const KNOWN = {
   pages: ["decisions", "expected-revision-id", "expected-version", "json", "dir"],
   themePull: ["draft", "instance"],
   themePush: ["diff", "draft", "instance", "name", "live", "yes", "confirm", "dry-run", "validate", "idempotency-key", "prune"],
-  themeDev: ["port", "dry", "no-sync", "name"],
+  themeDev: ["port", "dry", "no-sync", "name", "instance"],
   themePublish: ["instance"],
   themeRename: ["name", "dir"],
   content: [],
@@ -177,7 +177,7 @@ Usage
   blocofy target [dir] [--context <name>] [--json]
       Show which site a command in [dir] would hit (verified), without writing anything.
 
-  blocofy theme dev [dir] [--port <n>] [--no-sync] [--name <name>]
+  blocofy theme dev [dir] [--port <n>] [--no-sync] [--name <name>] [--instance <handle>]
       Start a local dev server that renders your local theme files with the site's
       live content. Press l to open it, q to quit. Edit a file and save → the view
       reloads. Saves sync to a DRAFT theme only (never the live site). (dir defaults to cwd)
@@ -188,6 +188,8 @@ Usage
         --port <n>   local port (default 3030)
         --no-sync    local preview only (skip draft sync)
         --name <name>  name the draft when it is first created (ignored if it already exists)
+        --instance <handle>  sync into this draft (when the platform cannot tell which draft is
+                             the CLI draft it refuses and asks for this; never the live theme)
 
   blocofy theme pull [dir] [--draft] [--instance <handle>]
       Download the live theme to disk. (dir defaults to cwd)
@@ -204,8 +206,9 @@ Usage
                      confirmation first; non-interactive shells must add --yes.
         --draft      explicit draft (same as the default; safe)
         --yes        confirm a --live push without prompting (for CI / agents)
-        --instance <handle>  push to a specific theme by its handle (safe targeted
-                             write — no live-confirmation prompt)
+        --instance <handle>  push to a specific theme by its handle. If the platform cannot
+                             tell which draft is the CLI draft, a draft push refuses and asks
+                             for this. The LIVE theme's handle asks for confirmation like --live
         --name <name>  name the NEW draft (draft mode only; ignored on --live/--instance)
         --dry-run    validate on the server WITHOUT writing (auth + snapshot + Liquid check)
         --validate   alias for --dry-run (validate only, nothing written)
@@ -502,6 +505,22 @@ function failAndExit(error) {
   }
   process.exit(code);
 }
+
+/**
+ * #989 — the platform (or `findCliDraft`, which mirrors it) refused to pick the draft automatically. Says why, lists the
+ * candidate drafts and the exact command to repeat with `--instance`; exits 2 (409). Never retried.
+ */
+function failDraftTargetAmbiguous(error, command) {
+  failAndExit({
+    code: DRAFT_TARGET_AMBIGUOUS,
+    status: 409,
+    message: draftTargetAmbiguousMessage(error, { command }),
+    details: { reason: error.reason ?? null, candidates: error.candidates ?? [] },
+  });
+}
+
+/** The command line to repeat with `--instance` (the directory argument kept, as the user typed it). */
+const commandLine = (base, positionals) => [base, ...positionals.slice(0, 1)].join(" ");
 
 function contextNameOrExit(name) {
   if (name === ENV_CONTEXT || !CONTEXT_NAME_RE.test(name)) {
@@ -927,7 +946,13 @@ async function themePull(rest) {
   const what = instance ? `instance ${instance}` : draft ? "draft" : "live";
   // Review M1: a draft pull provisions the draft server-side (`?draft=1`), so it is a remote mutation: binding required.
   const target = await prepareTarget({ command: draft ? "theme pull --draft" : "theme pull", commandClass: draft ? "remote-mutation" : "local-write", dir, flags, needs: "dev", mode: what });
-  const { count } = await withNewBindingClaim(target, dir, () => pullTheme({ dir, url: target.dev.url, token: target.dev.token, draft, instance, onRetry }));
+  let count;
+  try {
+    ({ count } = await withNewBindingClaim(target, dir, () => pullTheme({ dir, url: target.dev.url, token: target.dev.token, draft, instance, onRetry })));
+  } catch (error) {
+    if (error?.code === DRAFT_TARGET_AMBIGUOUS) failDraftTargetAmbiguous(error, commandLine("blocofy theme pull", positionals));
+    throw error;
+  }
   console.log(`Downloaded ${count} ${what} theme files → ${dir}`);
   bindAfterPull(target, dir);
 }
@@ -969,7 +994,14 @@ async function themePush(rest) {
   // server-side (a read-only command must not mutate). With no CLI draft yet the push would create one: vs live.
   if (flags.diff) {
     const diffTarget = ` of ${siteLabel(target.identity.site)}`;
-    const cliDraft = mode === "draft" ? findCliDraft(await fetchSiteStatus({ url: creds.url, token: creds.token, onRetry })) : null;
+    let cliDraft = null;
+    try {
+      cliDraft = mode === "draft" ? findCliDraft(await fetchSiteStatus({ url: creds.url, token: creds.token, onRetry })) : null;
+    } catch (error) {
+      // #989: the diff compares with the draft the push would write to — and refuses exactly when the push would.
+      if (error?.code === DRAFT_TARGET_AMBIGUOUS) failDraftTargetAmbiguous(error, `${commandLine("blocofy theme push", positionals)} --diff`);
+      throw error;
+    }
     const diffInstance = instanceFlag ?? cliDraft?.id ?? null;
     const d = await diffTheme({ dir, url: creds.url, token: creds.token, instance: diffInstance, onRetry });
     if (instanceFlag) console.log(`Diff vs theme ${instanceFlag}${diffTarget}:`);
@@ -992,7 +1024,7 @@ async function themePush(rest) {
   const whoami = target.identity;
   const siteName = siteLabel(whoami.site) || String(whoami.site.id);
   if (mode === "instance") {
-    console.log(`→ Pushing to theme ${instance} of ${siteName}`);
+    console.log(`→ Pushing to theme ${instance} of ${siteName}${whoami.liveThemeId != null && String(instance) === String(whoami.liveThemeId) ? " (the LIVE theme)" : ""}`);
   } else if (mode === "live") {
     console.log(dryRun ? `→ Validating against the LIVE theme of ${siteName} (dry run — nothing will be written)` : `→ Pushing to the LIVE theme of ${siteName}`);
   } else {
@@ -1003,13 +1035,22 @@ async function themePush(rest) {
   // kazara canlıya basmasın diye açık onay şart (#431 L2). Draft/instance modu
   // güvenli → otomatik onay (prompt yok).
   // 0.5.0: `--dry-run` hiçbir şey yazmaz → canlı onayı gereksiz (draft:true gibi davranır).
+  // #989 review: `--instance <the live theme's handle>` writes the LIVE theme exactly like `--live`, so it needs the
+  // same confirmation (an explicit --instance is the documented way past a refused draft pick — it must not become a
+  // way to write live without asking).
+  const instanceIsLive = mode === "instance" && whoami.liveThemeId != null && String(instance) === String(whoami.liveThemeId);
   const decision = livePushDecision({
-    draft: mode !== "live" || dryRun,
+    draft: (mode !== "live" && !instanceIsLive) || dryRun,
     yes: Boolean(flags.yes),
     confirm: Boolean(flags.confirm),
     isTTY: Boolean(process.stdin.isTTY),
   });
   if (decision.mustAbort) {
+    if (instanceIsLive) {
+      console.error(`⚠ Theme ${instance} is the LIVE theme of ${siteName}: this push writes to it immediately (no preview).`);
+      console.error(`  Non-interactive shell: pass --yes to confirm, or push to a draft instead. Nothing was written.`);
+      process.exit(1);
+    }
     console.error(`⚠ 'theme push --live' writes to the LIVE theme of ${siteName} immediately (no preview).`);
     console.error(`  Non-interactive shell: pass --live --yes to confirm, or omit --live to push to a safe draft.`);
     process.exit(1);
@@ -1098,6 +1139,7 @@ async function themePush(rest) {
       }
       failAndExit({ code: "cli_upgrade_required", status: error.status, message: "The server refused this CLI version; update it: npm i -g @blocofy/cli@latest", details: { missing } });
     }
+    if (error?.code === DRAFT_TARGET_AMBIGUOUS) failDraftTargetAmbiguous(error, commandLine("blocofy theme push", positionals));
     if (error?.code === "idempotency_conflict") {
       if (!JSON_MODE) {
         console.error("✗ Idempotency çakışması: aynı anahtar daha önce FARKLI içerikle kullanılmış (409).");
@@ -1989,6 +2031,13 @@ async function themeDev(rest) {
   const target = await prepareTarget({ command: "theme dev", commandClass: noSync ? "read" : "remote-mutation", dir: themeDir, flags, needs: "dev", mode: noSync ? "read · local preview" : "draft" });
   const creds = target.dev;
   const port = Number(flags.port) || 3030;
+  // #989: `--instance <handle>` names the draft to sync into, for a site where the platform refuses to pick one. Draft
+  // sync never writes the live theme, so the live theme's handle is refused here.
+  const devInstance = typeof flags.instance === "string" ? flags.instance : null;
+  if (devInstance && target.identity?.liveThemeId != null && String(devInstance) === String(target.identity.liveThemeId)) {
+    console.error(`✗ ${devInstance} is the LIVE theme. 'theme dev' syncs to a draft only; pick a draft handle (\`blocofy status\`) or use --no-sync.`);
+    process.exit(2);
+  }
 
   // Dev session: live-domain preview + theme editor URLs (+ a draft to sync into).
   // Graceful: if the platform can't provide one, fall back to local-only preview.
@@ -2066,6 +2115,16 @@ async function themeDev(rest) {
     // session'dan hiçbir veri kullanmaz. Bu satır `Boolean(session)` iken, session 410 alınca senkron
     // da sessizce kapanıyordu — ölü bir uç, çalışan bir özelliği götürüyordu. Tek kapatma yolu --no-sync.
     syncDraft: !flags["no-sync"],
+    instance: devInstance,
+    // #989: the platform refused to pick the draft — say which drafts and how to choose, then stop (no retry loop).
+    onSyncRefused: (error) => {
+      try {
+        handle.close();
+      } catch {
+        /* yoksay */
+      }
+      failDraftTargetAmbiguous(error, commandLine("blocofy theme dev", positionals));
+    },
     onRetry: (info) => console.error(`  ${retryNotice(info)}`),
     onWarn: (msg) => console.warn(`  ⚠ ${msg}`),
     // Her kaydetmede ne olduğunu bas — "reloaded" = watch tetiklendi; "0 views"

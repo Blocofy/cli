@@ -61,7 +61,7 @@ Show which site a command in `[dir]` would hit (verified), without writing anyth
 ### Theme
 
 ```
-blocofy theme dev [dir] [--port <n>] [--no-sync] [--name <name>]
+blocofy theme dev [dir] [--port <n>] [--no-sync] [--name <name>] [--instance <handle>]
 ```
 Start a local dev server that renders your local theme files with the site's live content.
 Press `l` to open it, `q` to quit. Edit a file and save → the view reloads. Saves sync to a
@@ -73,6 +73,8 @@ changing credentials, context or the project binding).
 - `--port <n>` — local port (default 3030).
 - `--no-sync` — local preview only (skip draft sync).
 - `--name <name>` — name the draft when it is first created (ignored if it already exists).
+- `--instance <handle>` — sync into this draft. Needed when the platform cannot tell which draft is the
+  CLI draft (see "Which draft a draft command writes to" below); the live theme's handle is refused.
 
 ```
 blocofy theme pull [dir] [--draft] [--instance <handle>]
@@ -94,8 +96,8 @@ the admin panel, never touching the live site. Publish it with `blocofy theme pu
   non-interactive shells must add `--yes`.
 - `--draft` — explicit draft (same as the default; safe).
 - `--yes` — confirm a `--live` push without prompting (CI/agents).
-- `--instance <handle>` — push to a specific theme by its handle (safe targeted write — no
-  live-confirmation prompt).
+- `--instance <handle>` — push to a specific theme by its handle. The live theme's handle asks for
+  the same confirmation as `--live` (non-interactive shells add `--yes`).
 - `--name <name>` — name the new draft (draft mode only; ignored on `--live`/`--instance`). A draft
   push reuses the existing CLI draft whatever its name; then the push says `--name` was not applied
   and prints the `blocofy theme rename` command for it.
@@ -107,6 +109,14 @@ the admin panel, never touching the live site. Publish it with `blocofy theme pu
 - `--diff` — show what a push would change vs the target (read-only), then stop. A draft push
   compares with the CLI draft it writes to (named by handle); with no CLI draft yet, with the live
   theme (the push would create the draft). `--live` compares with live, `--instance` with that theme.
+
+**Which draft a draft command writes to.** A draft push, `theme pull --draft` and the `theme dev`
+sync write to (or read) the CLI draft only when the platform can tell which draft that is: exactly
+one draft created by a CLI push, still carrying the name the platform gave it (`CLI Draft` or
+`CLI Draft — YYYY-MM-DD`), and not a draft a site-state restore built. Otherwise — two such drafts,
+a site-state restore draft, or a CLI draft you renamed — the command writes nothing, lists the
+candidate drafts and exits 2 (`draft_target_ambiguous`); repeat it with `--instance <handle>` for
+the draft you mean. With no draft at all, the first push creates one as before.
 
 After a draft push the CLI prints the draft it wrote to (`Draft: <handle> "<name>" (new)` or
 `(existing CLI draft, updated)`) and the `blocofy theme publish --instance <handle>` command.
@@ -461,6 +471,14 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
+- **Unreleased** — Draft commands no longer guess their draft (platform #989).
+  - **Behaviour change:** `theme push` (draft), `theme push --diff`, `theme pull --draft` and the
+    `theme dev` sync refuse, writing nothing, when the platform answers `draft_target_ambiguous` (or the
+    site status shows the same case): the message lists the candidate drafts and the exact
+    `--instance <handle>` command; exit code 2; never retried. A CLI draft you renamed is refused too.
+  - `theme dev --instance <handle>` syncs into a chosen draft (never the live theme).
+  - **Behaviour change:** `theme push --instance <the live theme's handle>` asks for the same
+    confirmation as `--live` (`--yes` in non-interactive shells).
 - **0.13.0** — Draft push names its target (customer items PS-22/PS-23/PS-26).
   - `theme push` (draft) prints the draft it wrote to — handle, name, new or existing — and
     `blocofy theme publish --instance <handle>`. When it updated the existing CLI draft, it says

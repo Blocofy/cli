@@ -34,6 +34,9 @@ const json = (res, status, body) => {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
 };
+// #989: the reused draft carries the platform-generated "CLI Draft" name — a renamed one (these fixtures used
+// "Re-test draft") is no longer picked automatically: the push refuses and asks for --instance
+// (test/ps989-draft-target-refusal.test.mjs).
 const outcomes = (plan) => plan.map(([path, outcome]) => ({ path, outcome, digest: "cd".repeat(32) }));
 
 /** A 6.5 platform: `/api/dev/site` lists `drafts`; the dry run plans against `planTarget`; the apply may name its target. */
@@ -93,11 +96,11 @@ const runBin = (url, argv) =>
 test("PS-22: a draft push that reuses the CLI draft names it, and says --name was not applied", async () => {
   const dir = themeDir({ "section/Hero": "H" });
   try {
-    const drafts = [{ id: "t1b5b1n1", name: "Re-test draft", source: "import" }];
+    const drafts = [{ id: "t1b5b1n1", name: "CLI Draft — 2026-10-02", source: "import" }];
     await withPlatform({ drafts, planTarget: "t1b5b1n1", applyTarget: "t1b5b1n1" }, async (url) => {
       const r = await runBin(url, ["theme", "push", dir, "--draft", "--name", "Mockup v2"]);
       assert.equal(r.code, 0, r.stderr);
-      assert.match(r.stdout, /Draft: t1b5b1n1 "Re-test draft" \(existing CLI draft, updated\)/);
+      assert.match(r.stdout, /Draft: t1b5b1n1 "CLI Draft — 2026-10-02" \(existing CLI draft, updated\)/);
       assert.match(r.stdout + r.stderr, /--name was not applied/);
       assert.match(r.stdout + r.stderr, /blocofy theme rename t1b5b1n1 "Mockup v2"/);
       assert.match(r.stdout, /blocofy theme publish --instance t1b5b1n1/);
@@ -125,11 +128,11 @@ test("PS-22: a draft push that creates a new draft names it from the apply (the 
 test("PS-22: an older server that names no target still prints the reused draft found before the push", async () => {
   const dir = themeDir({ "section/Hero": "H" });
   try {
-    const drafts = [{ id: "t1b5b1n1", name: "Re-test draft", source: "import" }];
+    const drafts = [{ id: "t1b5b1n1", name: "CLI Draft — 2026-10-02", source: "import" }];
     await withPlatform({ drafts, planTarget: undefined, applyTarget: undefined }, async (url) => {
       const r = await runBin(url, ["theme", "push", dir, "--draft"]);
       assert.equal(r.code, 0, r.stderr);
-      assert.match(r.stdout, /Draft: t1b5b1n1 "Re-test draft" \(existing CLI draft, updated\)/);
+      assert.match(r.stdout, /Draft: t1b5b1n1 "CLI Draft — 2026-10-02" \(existing CLI draft, updated\)/);
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -153,11 +156,11 @@ test("PS-22: a server whose plan has no newDraft field and no CLI draft to reuse
 test("PS-22: --diff on a draft push compares against the CLI draft the push writes to — read-only, by handle", async () => {
   const dir = themeDir({ "section/Hero": "H" });
   try {
-    const drafts = [{ id: "t2dup", name: "Copy", source: "duplicate" }, { id: "t1b5b1n1", name: "Re-test draft", source: "import" }];
+    const drafts = [{ id: "t2dup", name: "Copy", source: "duplicate" }, { id: "t1b5b1n1", name: "CLI Draft — 2026-10-02", source: "import" }];
     await withPlatform({ drafts, getFiles: { "section/Hero": "H" } }, async (url, seen) => {
       const r = await runBin(url, ["theme", "push", dir, "--diff"]);
       assert.equal(r.code, 0, r.stderr);
-      assert.match(r.stdout, /Diff vs draft t1b5b1n1 "Re-test draft"/);
+      assert.match(r.stdout, /Diff vs draft t1b5b1n1 "CLI Draft — 2026-10-02"/);
       assert.match(r.stdout, /No differences/);
       assert.deepEqual(seen.getUrls.map((u) => new URL(u, "http://x").search), ["?instance=t1b5b1n1"]);
       assert.equal(seen.posts.length, 0, "a diff writes nothing");
@@ -185,7 +188,7 @@ test("PS-22: --diff with no CLI draft yet says so and compares against live, nev
 test("PS-22: --diff --live still compares against the live theme", async () => {
   const dir = themeDir({ "section/Hero": "H" });
   try {
-    await withPlatform({ drafts: [{ id: "t1b5b1n1", name: "Re-test draft", source: "import" }], getFiles: { "section/Hero": "H" } }, async (url, seen) => {
+    await withPlatform({ drafts: [{ id: "t1b5b1n1", name: "CLI Draft — 2026-10-02", source: "import" }], getFiles: { "section/Hero": "H" } }, async (url, seen) => {
       const r = await runBin(url, ["theme", "push", dir, "--diff", "--live"]);
       assert.equal(r.code, 0, r.stderr);
       assert.match(r.stdout, /Diff vs the LIVE theme/);
