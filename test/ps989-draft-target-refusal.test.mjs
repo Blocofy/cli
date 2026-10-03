@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { test } from "node:test";
 
-import { DRAFT_TARGET_AMBIGUOUS, draftTargetAmbiguousMessage, findCliDraft } from "../lib/theme-sync.mjs";
+import { DRAFT_TARGET_AMBIGUOUS, draftTargetAmbiguousMessage, findCliDraft, publishTargetUnconfirmedMessage } from "../lib/theme-sync.mjs";
 
 // #989 (platform): the server no longer GUESSES which draft a draft push / `pull --draft` / `theme dev` sync writes to.
 // When it cannot prove the draft is the CLI's (several candidates, a site-state restore draft, a draft without the
@@ -567,10 +567,26 @@ test("K1: the platform's 409 publish_target_unconfirmed is a clear refusal (exit
       assert.match(r.stderr, /Nothing was published/);
       assert.match(r.stderr, /site-state restore/);
       assert.match(r.stderr, /t43cli/);
-      assert.match(r.stderr, /blocofy theme publish .*--instance t43cli/);
+      // K1 review: a site_state_restore target is never handed out as a ready-to-run command.
+      assert.doesNotMatch(r.stderr, /--instance t43cli/);
+      assert.match(r.stderr, /blocofy theme publish .*--instance <handle>/);
       assert.equal(seen.publishes.length, 1);
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("K1 review: publishTargetUnconfirmedMessage — restore target gets a placeholder, a go-live warning and the safe paths", () => {
+  const restore = publishTargetUnconfirmedMessage({ reason: "site_state_restore", instance: "t31restore", name: "Site State · 0123456789ab" });
+  assert.doesNotMatch(restore, /--instance t31restore/);
+  assert.match(restore, /--instance <handle>/);
+  assert.match(restore, /would make the site-state restore draft LIVE/);
+  assert.match(restore, /admin panel/);
+  assert.match(restore, /site-state publish flow/);
+  assert.match(restore, /Nothing was published/);
+  for (const reason of ["unrecognized_name", "not_cli_draft"]) {
+    const msg = publishTargetUnconfirmedMessage({ reason, instance: "t32", name: "Blocofy Ana Site" }, { command: "blocofy theme publish ./shop" });
+    assert.match(msg, /blocofy theme publish \.\/shop --instance t32/);
   }
 });
