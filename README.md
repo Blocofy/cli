@@ -461,7 +461,7 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
-- **Unreleased** — Draft push names its target (customer items PS-22/PS-23/PS-26).
+- **0.13.0** — Draft push names its target (customer items PS-22/PS-23/PS-26).
   - `theme push` (draft) prints the draft it wrote to — handle, name, new or existing — and
     `blocofy theme publish --instance <handle>`. When it updated the existing CLI draft, it says
     `--name` was not applied and prints the rename command.
