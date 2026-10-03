@@ -101,6 +101,10 @@ the admin panel, never touching the live site. Publish it with `blocofy theme pu
   cannot tell apart from the live theme (the live theme is unknown, or a raw numeric id was given).
   With `--draft --instance <handle>` the push is a draft write to that draft: it never writes the
   live theme (refused locally and by the platform, `draft_target_is_live`).
+  On a site with **no live theme** (or when the live theme cannot be read) the CLI cannot tell any
+  handle apart from the live one, so it stays on the safe side by design: every `--instance` push
+  asks for confirmation (`--yes` in non-interactive shells), and `--draft --instance` and
+  `theme dev --instance` refuse.
 - `--name <name>` — name the new draft: it is created as `CLI Draft — <name>` (draft mode only;
   ignored on `--live`/`--instance`). When the push reuses the existing CLI draft instead, it says
   `--name` was not applied. Do not rename the CLI draft by hand to a name that does not start with
@@ -488,6 +492,8 @@ Each retry prints a notice on stderr.
     otherwise warns that naming a listed draft would overwrite it.
   - `theme dev --instance <handle>` and `theme push --draft --instance <handle>` write to a chosen draft
     (sent with `draft: true`; never the live theme).
+  - `theme dev` reports a draft-sync failure in one line, also at startup (it was silent there):
+    `draft_target_unverifiable` (the next save tries again) and `draft_target_is_live` (stops).
   - **Behaviour change:** `theme publish` without `--instance` uses the same rule; it never publishes
     a guessed draft.
   - **Behaviour change:** `--name X` creates the draft as `CLI Draft — X`; the rename advice after a

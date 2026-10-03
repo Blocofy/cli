@@ -71,7 +71,7 @@ import { MANIFEST_PATH, buildManifest, validateSiteStateTree, verifyManifest } f
 import { SiteStateFsError, hashBuffer, readSiteStateTree, stagedWriteTree } from "../lib/site-state-fs.mjs";
 import { migrateSiteState } from "../lib/site-migrate.mjs";
 import { applySiteState, downloadAssetBytes, fetchSiteStateExport, planSiteState, publishSiteState, uploadMediaAsset } from "../lib/site-state-client.mjs";
-import { DRAFT_TARGET_AMBIGUOUS, diffTheme, draftTargetAmbiguousMessage, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, findCliDraft, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
+import { DRAFT_TARGET_AMBIGUOUS, diffTheme, draftSyncErrorLine, draftTargetAmbiguousMessage, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, findCliDraft, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
 import { isAffirmative, livePushDecision, resolvePushMode } from "../lib/confirm.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
@@ -2163,6 +2163,9 @@ async function themeDev(rest) {
       } catch {
         /* yoksay */
       }
+      if (error?.code === "draft_target_is_live") {
+        failAndExit({ code: "draft_target_is_live", status: 422, message: draftSyncErrorLine(error), details: {} });
+      }
       failDraftTargetAmbiguous(error, commandLine("blocofy theme dev", positionals));
     },
     onRetry: (info) => console.error(`  ${retryNotice(info)}`),
@@ -2173,7 +2176,7 @@ async function themeDev(rest) {
     onReload: ({ file, synced, clients, error }) => {
       const what = file || "change";
       if (error) {
-        console.error(`  ↻ ${what} — draft sync failed: ${error} (local view still reloaded)`);
+        console.error(`  ↻ ${what} — ${error} (local view still reloaded)`);
         return;
       }
       const views = clients ? `${clients} view${clients === 1 ? "" : "s"}` : "no views connected";

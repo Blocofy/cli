@@ -479,3 +479,49 @@ test("#989 review P2: theme dev --instance <draft> syncs with draft:true AND the
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/** Run `theme dev` against `url` until `until(stderr)` holds or it exits; returns { code, stderr }. */
+async function runDev(url, extra, until) {
+  const probe = createServer().listen(0);
+  await once(probe, "listening");
+  const port = String(probe.address().port);
+  probe.close();
+  const dir = themeDir();
+  const child = spawn("node", [BIN, "theme", "dev", dir, "--port", port, ...extra], { env: env(url), stdio: ["ignore", "pipe", "pipe"] });
+  let stderr = "";
+  child.stderr.on("data", (d) => (stderr += d));
+  const exited = once(child, "exit").then(([code]) => code);
+  const deadline = Date.now() + 15000;
+  let code = null;
+  while (Date.now() < deadline) {
+    const done = await Promise.race([exited, new Promise((r) => setTimeout(() => r("tick"), 100))]);
+    if (done !== "tick") {
+      code = done;
+      break;
+    }
+    if (until(stderr)) break;
+  }
+  if (code === null) {
+    child.kill("SIGKILL");
+    await exited;
+  }
+  rmSync(dir, { recursive: true, force: true });
+  return { code, stderr };
+}
+
+test("#989 re-review P3: theme dev says a startup 503 draft_target_unverifiable in one line (not swallowed) and keeps serving", async () => {
+  await withPlatform({ unverifiable: true }, async (url) => {
+    const r = await runDev(url, [], (e) => /could not verify which draft/.test(e));
+    assert.equal(r.code, null, `theme dev exited: ${r.stderr}`);
+    assert.match(r.stderr, /draft sync: the platform could not verify which draft to write to \(a read failed on its side\)\. Nothing was written/);
+  });
+});
+
+test("#989 re-review P3: theme dev --instance answered 422 draft_target_is_live stops with a one-line message (exit 2)", async () => {
+  await withPlatform({ liveDraft422: true }, async (url, seen) => {
+    const r = await runDev(url, ["--instance", "t43cli"], () => false);
+    assert.equal(r.code, 2, r.stderr);
+    assert.match(r.stderr, /draft sync refused: that is the LIVE theme/);
+    assert.equal(seen.posts.length, 1);
+  });
+});
