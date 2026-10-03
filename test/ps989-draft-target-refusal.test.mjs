@@ -49,7 +49,7 @@ const json = (res, status, body) => {
 };
 
 /** A platform whose theme endpoint refuses the draft pick (`refuseDraft`) and records every theme request. */
-function platform({ drafts = [], refuseDraft = false, liveThemeId = "t9live", refuseApplyAfter503 = false, unverifiable = false, liveDraft422 = false }) {
+function platform({ drafts = [], refuseDraft = false, liveThemeId = "t9live", refuseApplyAfter503 = false, unverifiable = false, liveDraft422 = false, refusePublish = false }) {
   const seen = { themeGets: [], posts: [], publishes: [] };
   let applyAttempts = 0;
   const server = createServer((req, res) => {
@@ -65,8 +65,12 @@ function platform({ drafts = [], refuseDraft = false, liveThemeId = "t9live", re
       let raw = "";
       req.on("data", (d) => (raw += d));
       req.on("end", () => {
-        seen.publishes.push(JSON.parse(raw || "{}"));
-        json(res, 200, { ok: true, published: "t43cli", cloned: false });
+        const body = JSON.parse(raw || "{}");
+        seen.publishes.push(body);
+        if (refusePublish && body.explicit !== true) {
+          return json(res, 409, { error: "publish_target_unconfirmed", reason: "site_state_restore", instance: body.instanceId, name: "CLI Draft — 2026-10-01", message: "…" });
+        }
+        json(res, 200, { ok: true, published: body.instanceId, cloned: false });
       });
       return;
     }
@@ -524,4 +528,49 @@ test("#989 re-review P3: theme dev --instance answered 422 draft_target_is_live 
     assert.match(r.stderr, /draft sync refused: that is the LIVE theme/);
     assert.equal(seen.posts.length, 1);
   });
+});
+
+test("K1: theme publish --instance <h> sends explicit:true (the platform publishes a named non-CLI draft only then)", async () => {
+  const dir = themeDir();
+  try {
+    await withPlatform({ drafts: [RESTORE], refusePublish: true }, async (url, seen) => {
+      const r = await runBin(url, ["theme", "publish", dir, "--instance", "t31restore"]);
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      assert.deepEqual(seen.publishes, [{ instanceId: "t31restore", explicit: true }]);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("K1: theme publish without --instance sends NO explicit flag (the platform re-checks the same rule)", async () => {
+  const dir = themeDir();
+  try {
+    await withPlatform({ drafts: [CLI] }, async (url, seen) => {
+      const r = await runBin(url, ["theme", "publish", dir]);
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      assert.deepEqual(seen.publishes, [{ instanceId: "t43cli" }]);
+      assert.equal("explicit" in seen.publishes[0], false);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("K1: the platform's 409 publish_target_unconfirmed is a clear refusal (exit 2), never retried", async () => {
+  const dir = themeDir();
+  try {
+    await withPlatform({ drafts: [CLI], refusePublish: true }, async (url, seen) => {
+      const r = await runBin(url, ["theme", "publish", dir]);
+      assert.equal(r.code, 2, r.stdout + r.stderr);
+      assert.match(r.stderr, /publish_target_unconfirmed/);
+      assert.match(r.stderr, /Nothing was published/);
+      assert.match(r.stderr, /site-state restore/);
+      assert.match(r.stderr, /t43cli/);
+      assert.match(r.stderr, /blocofy theme publish .*--instance t43cli/);
+      assert.equal(seen.publishes.length, 1);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -71,7 +71,7 @@ import { MANIFEST_PATH, buildManifest, validateSiteStateTree, verifyManifest } f
 import { SiteStateFsError, hashBuffer, readSiteStateTree, stagedWriteTree } from "../lib/site-state-fs.mjs";
 import { migrateSiteState } from "../lib/site-migrate.mjs";
 import { applySiteState, downloadAssetBytes, fetchSiteStateExport, planSiteState, publishSiteState, uploadMediaAsset } from "../lib/site-state-client.mjs";
-import { DRAFT_TARGET_AMBIGUOUS, diffTheme, draftSyncErrorLine, draftTargetAmbiguousMessage, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, findCliDraft, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
+import { DRAFT_TARGET_AMBIGUOUS, PUBLISH_TARGET_UNCONFIRMED, publishTargetUnconfirmedMessage, diffTheme, draftSyncErrorLine, draftTargetAmbiguousMessage, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, findCliDraft, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
 import { isAffirmative, livePushDecision, resolvePushMode } from "../lib/confirm.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
@@ -230,7 +230,9 @@ Usage
       'theme push ./shop && theme publish ./shop' always publishes ./shop's site.
       With no flag, publishes the draft that 'theme dev' / 'theme push --draft' writes into.
       The server refuses to publish a theme that has no pages (it would 404); preview first.
-        --instance <handle>  publish a specific theme (handle from the panel / status)
+        --instance <handle>  publish a specific theme (handle from the panel / status). Without it
+                             the platform publishes only the site's CLI draft; any other theme
+                             is refused (publish_target_unconfirmed) — name it with --instance
 
   blocofy status [dir]
       Show the live theme, page distribution per instance, drafts, and a health flag
@@ -2256,7 +2258,21 @@ async function themePublish(rest) {
       process.exit(1);
     }
   }
-  const result = await publishInstance({ url: creds.url, token: creds.token, instanceId: instance, onRetry });
+  let result;
+  try {
+    // K1 (#989): `explicit` only when the user named the theme; the automatic pick is re-checked by the platform.
+    result = await publishInstance({ url: creds.url, token: creds.token, instanceId: instance, explicit: typeof flags.instance === "string", onRetry });
+  } catch (error) {
+    if (error?.code === PUBLISH_TARGET_UNCONFIRMED) {
+      failAndExit({
+        code: PUBLISH_TARGET_UNCONFIRMED,
+        status: 409,
+        message: publishTargetUnconfirmedMessage(error, { command: commandLine("blocofy theme publish", positionals) }),
+        details: { reason: error.reason ?? null, instance: error.instance ?? null },
+      });
+    }
+    throw error;
+  }
   console.log(
     `✓ Theme ${result.published} is now LIVE${result.cloned ? " (pages cloned from the previous live theme)" : ""}.`,
   );

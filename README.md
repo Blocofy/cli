@@ -180,7 +180,9 @@ flag, publishes the draft that `theme dev` / `theme push --draft` writes into. T
 refuses to publish a theme that has no pages (it would 404); preview first. The site is the one
 `[dir]`'s project is bound to (`dir` defaults to cwd), so `blocofy theme push ./shop && blocofy
 theme publish ./shop` always publishes `./shop`'s site, whatever directory you run it from.
-- `--instance <handle>` — publish a specific theme.
+- `--instance <handle>` — publish a specific theme. Without it the platform publishes only the
+  site's CLI draft; any other theme (a site-state restore draft, a renamed or panel-copied theme) is
+  refused with `publish_target_unconfirmed` (exit 2, nothing published) — name it with `--instance`.
 
 ### Status
 
@@ -483,7 +485,7 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
-- **Unreleased** — Draft commands no longer guess their draft (platform #989).
+- **0.14.0** — Draft commands no longer guess their draft (platform #989).
   - **Behaviour change:** `theme push` (draft), `theme push --diff`, `theme pull --draft` and the
     `theme dev` sync refuse, writing nothing, when the platform answers `draft_target_ambiguous` (or the
     site status shows the same case): the message lists the candidate drafts and the exact
@@ -501,6 +503,12 @@ Each retry prints a notice on stderr.
   - **Behaviour change (CI):** `theme push --instance <the live theme's handle>` asks for the same
     confirmation as `--live` (`--yes` in non-interactive shells); so does a handle the CLI cannot tell
     apart from the live theme (live theme unknown, or a raw numeric id).
+  - `theme publish --instance <handle>` tells the platform the theme was named explicitly
+    (`explicit: true`); the automatic pick sends no flag and the platform re-checks it. A theme that is
+    not the site's CLI draft (a site-state restore draft, a renamed or panel-copied theme) is published
+    through the CLI only with `--instance`; otherwise the platform refuses with
+    `publish_target_unconfirmed` (exit 2, nothing published). Older CLIs get that refusal as a generic
+    error and can never publish such a theme.
 - **0.13.0** — Draft push names its target (customer items PS-22/PS-23/PS-26).
   - `theme push` (draft) prints the draft it wrote to — handle, name, new or existing — and
     `blocofy theme publish --instance <handle>`. When it updated the existing CLI draft, it says
