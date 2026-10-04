@@ -73,7 +73,7 @@ import { migrateSiteState } from "../lib/site-migrate.mjs";
 import { applySiteState, downloadAssetBytes, fetchSiteStateExport, planSiteState, publishSiteState, uploadMediaAsset } from "../lib/site-state-client.mjs";
 import { DRAFT_TARGET_AMBIGUOUS, PUBLISH_TARGET_UNCONFIRMED, publishTargetUnconfirmedMessage, diffTheme, draftSyncErrorLine, draftTargetAmbiguousMessage, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, findCliDraft, publishInstance, pullTheme, pushTheme, renameInstance, themeCapacityRefusal } from "../lib/theme-sync.mjs";
 import { isAffirmative, livePushDecision, resolvePushMode } from "../lib/confirm.mjs";
-import { DEFAULT_WORK_INTENT, WORK_INTENT_MAX, WORK_KEY_RE, cancelWork, getWork, isWorkHandle, newWorkKey, readSavedWork, resumeWork, saveWork, staleLines, startWork, stateLabel, themeWorkRefusal, workLines } from "../lib/theme-work.mjs";
+import { DEFAULT_WORK_INTENT, WORK_INTENT_MAX, WORK_KEY_RE, approvalOutcome, approvalWaitState, cancelWork, getPublishStatus, getWork, isWorkHandle, newWorkKey, publishStatusLines, readSavedWork, requestApproval, resumeWork, safeApprovalUrl, saveWork, sealWork, staleLines, startWork, stateLabel, themeWorkRefusal, workLines } from "../lib/theme-work.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
 
@@ -98,6 +98,8 @@ const KNOWN = {
   themeWorkStatus: ["dir"],
   themeWorkResume: ["dir", "require-fresh"],
   themeWorkCancel: ["dir"],
+  themeWorkSeal: ["dir"],
+  themeWorkRequestApproval: ["dir", "open", "wait", "interval"],
   content: [],
   settingsPush: ["instance", "live", "yes", "confirm"],
   pagesPull: ["strict"],
@@ -238,7 +240,19 @@ Usage
         --idempotency-key <k>   retry key: the same key returns the SAME work, never a second one.
                                 Without it a fresh key is generated and printed
   blocofy theme work status <wk_…> [--dir <dir>]
-      Show the work: its state, its theme handle, and whether the site changed since it started.
+      Show the work: its state, its theme handle, whether the site changed since it started,
+      and where its publication stands (review, waiting for approval, published).
+  blocofy theme work seal <wk_…> [--dir <dir>]
+      Prepare the work for review: its content is frozen and can no longer change. Asks for
+      no approval and publishes nothing.
+  blocofy theme work request-approval <wk_…> [--dir <dir>] [--open] [--wait [--interval <s>]]
+      Ask a person to publish the work (an open work is prepared for review first). Prints the
+      approval URL: a signed-in site owner or team member with the theme permission approves it
+      in Blocofy. The URL carries no token; having it is not a permission to publish.
+        --open           also open the approval page in your browser
+        --wait           wait until it is published, or the request expires, is declined, or the
+                         live site changes (read-only polling; nothing is published from here)
+        --interval <s>   seconds between status checks while waiting (1-60, default 3)
   blocofy theme work resume <wk_…> [--dir <dir>] [--require-fresh]
       Continue that exact work here (it becomes this project's saved work). Writes nothing.
         --require-fresh   refuse (work_stale) when the site changed since the work started
@@ -2449,12 +2463,143 @@ async function themeWorkStatus(rest) {
     failOnThemeWorkRefusal(error, { op: "status", handle });
     throw error;
   }
+  // Where its publication stands (read-only). A platform without the status endpoint just shows the work.
+  let publish = null;
+  try {
+    publish = await getPublishStatus({ ...target.api, handle, onRetry });
+  } catch {
+    publish = null;
+  }
   if (JSON_MODE) {
-    console.log(JSON.stringify({ work: answer.work }, null, 2));
+    console.log(JSON.stringify({ work: answer.work, ...(publish ? { publish } : {}) }, null, 2));
     return;
   }
   for (const line of workLines(answer.work)) console.log(line);
+  for (const line of publishStatusLines(publish)) console.log(line);
   for (const line of staleLines(answer.work) ?? []) console.log(line);
+}
+
+/** A 404/405 from a review endpoint right after the work was read means the platform has no such endpoint yet. */
+const endpointMissing = (error) =>
+  error instanceof CliRefusal && ["not_found", "http_404", "http_405", "method_not_allowed"].includes(error.error?.code) && error.error?.details?.reason !== "target_deleted";
+
+async function themeWorkSeal(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.themeWorkSeal);
+  const handle = workHandleArg(positionals, flags, "blocofy theme work seal <wk_…> [--dir <dir>]");
+  const target = await prepareTarget({ command: "theme work seal", commandClass: "remote-mutation", dir: commandDir(flags.dir), flags, needs: "api", mode: `draft · prepare work ${handle} for review` });
+  try {
+    await getWork({ ...target.api, handle, onRetry });
+  } catch (error) {
+    failOnThemeWorkRefusal(error, { op: "seal", handle });
+    throw error;
+  }
+  let answer;
+  try {
+    answer = await sealWork({ ...target.api, handle, onRetry });
+  } catch (error) {
+    if (endpointMissing(error)) {
+      if (!JSON_MODE) {
+        console.error("Bu platform ayrı bir 'incelemeye hazırla' adımını henüz desteklemiyor. Hiçbir şey yazılmadı.");
+        console.error(`  Onay isteği çalışmayı kendisi hazırlar:  blocofy theme work request-approval ${handle}`);
+      }
+      failAndExit({ code: "seal_unsupported", status: error.status, message: "This platform has no seal endpoint yet; request-approval prepares the work itself (seal_unsupported)." });
+    }
+    failOnThemeWorkRefusal(error, { op: "seal", handle });
+    throw error;
+  }
+  if (JSON_MODE) {
+    console.log(JSON.stringify(answer, null, 2));
+    return;
+  }
+  console.log(answer.already_sealed ? `✓ Çalışma zaten incelemeye hazır: ${handle}` : `✓ Çalışma incelemeye hazır: ${handle}`);
+  console.log("  İçeriği artık değişmiyor. Canlı site değişmedi; onay istenmedi.");
+  if (answer.package?.digest_short) console.log(`  İçerik özeti: ${answer.package.digest_short}`);
+  console.log(`Yayın için onay iste:  blocofy theme work request-approval ${handle}`);
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * `--wait`: poll the read-only status until the request this command made ends (published, stale, expired, declined,
+ * superseded, cancelled, failed) or a deadline passes (the request's expiry + 1 minute, at most 20 minutes). A
+ * transient error keeps polling; a refusal ends the wait. Never publishes and never decides.
+ */
+async function waitForApproval(api, handle, approval, intervalMs) {
+  const expiry = Date.parse(approval.expires_at ?? "");
+  const cap = Date.now() + 20 * 60_000;
+  const deadline = Number.isFinite(expiry) ? Math.min(cap, expiry + 60_000) : cap;
+  let last = null;
+  for (;;) {
+    try {
+      last = await getPublishStatus({ ...api, handle, onRetry });
+      const state = approvalWaitState(last, approval.id);
+      if (state !== "pending") return { state, status: last };
+    } catch (error) {
+      if (error instanceof CliRefusal) {
+        failOnThemeWorkRefusal(error, { op: "wait", handle });
+        throw error;
+      }
+      if (!JSON_MODE) console.error("Durum okunamadı; tekrar denenecek.");
+    }
+    if (Date.now() + intervalMs > deadline) return { state: "timeout", status: last };
+    await sleep(intervalMs);
+  }
+}
+
+async function themeWorkRequestApproval(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.themeWorkRequestApproval);
+  const handle = workHandleArg(positionals, flags, "blocofy theme work request-approval <wk_…> [--dir <dir>] [--open] [--wait [--interval <s>]]");
+  let intervalMs = 3000;
+  if (flags.interval !== undefined) {
+    const n = Number(flags.interval);
+    if (!flags.wait || typeof flags.interval !== "string" || !Number.isInteger(n) || n < 1 || n > 60) {
+      throw new TargetError("USAGE", "--interval needs --wait and a whole number of seconds (1-60). Nothing was sent.", {}, 1);
+    }
+    intervalMs = n * 1000;
+  }
+  const target = await prepareTarget({ command: "theme work request-approval", commandClass: "remote-mutation", dir: commandDir(flags.dir), flags, needs: "api", mode: `draft · request approval for work ${handle}` });
+  let answer;
+  try {
+    answer = await requestApproval({ ...target.api, handle, onRetry });
+  } catch (error) {
+    failOnThemeWorkRefusal(error, { op: "request-approval", handle });
+    throw error;
+  }
+  const { approval } = answer;
+  const url = safeApprovalUrl(approval?.approval_url, target.api.apiUrl);
+  if (!JSON_MODE) {
+    console.log(`✓ Çalışma incelemeye hazır ve onay istendi: ${handle}`);
+    console.log(`Onay URL'i:  ${url ? (process.stdout.isTTY ? hyperlink(url) : url) : approval?.approval_url ?? "(yok)"}`);
+    console.log("  Site sahibi ya da tema yetkisi olan bir ekip üyesi Blocofy'de oturum açıp bu sayfadan onaylar.");
+    console.log("  URL'de gizli bir anahtar yok; URL'e sahip olmak yayın yetkisi vermez.");
+    if (approval?.digest_short) console.log(`  Onaylanacak içerik özeti: ${approval.digest_short}${approval.expires_at ? ` · son geçerlilik: ${approval.expires_at}` : ""}`);
+    console.log("  Onaylanana kadar canlı site değişmez. Bu komut yayınlamaz.");
+  }
+  if (flags.open) {
+    if (url) {
+      openUrl(url);
+      if (!JSON_MODE) console.log("Onay sayfası tarayıcıda açılıyor.");
+    } else if (!JSON_MODE) {
+      console.error("Onay URL'i bu platformun onay sayfası gibi görünmüyor; tarayıcıda açılmadı.");
+    }
+  }
+  if (!flags.wait) {
+    if (JSON_MODE) console.log(JSON.stringify(answer, null, 2));
+    else console.log(`Durumu izle:  blocofy theme work status ${handle}   (ya da --wait ile bekle)`);
+    return;
+  }
+  if (!JSON_MODE) console.log("Karar bekleniyor (Ctrl+C ile çıkabilirsin; onay isteği geçerli kalır)…");
+  const { state, status } = await waitForApproval(target.api, handle, approval, intervalMs);
+  const outcome = approvalOutcome(state, { handle, status });
+  if (outcome.ok) {
+    if (JSON_MODE) console.log(JSON.stringify({ ...answer, outcome: state, publish: status }, null, 2));
+    else for (const line of outcome.lines) console.log(line);
+    return;
+  }
+  if (!JSON_MODE) for (const line of outcome.lines) console.error(line);
+  // A definite "not published" end is a refusal (exit 2); a timeout or a failure is not (exit 1).
+  const definite = !["timeout", "failed"].includes(state);
+  failAndExit({ code: outcome.code, ...(definite ? { status: 409 } : {}), message: outcome.message, details: { approval: approval?.id ?? null, phase: status?.phase ?? null } });
 }
 
 async function themeWorkResume(rest) {
@@ -2504,11 +2649,11 @@ async function themeWorkCancel(rest) {
   console.log(`✓ Çalışma iptal edildi: ${handle}. Canlı site değişmedi; çalışmanın teması tema kitaplığında duruyor.`);
 }
 
-const THEME_WORK_USAGE = "blocofy theme work start|status|resume|cancel … (see `blocofy --help`)";
+const THEME_WORK_USAGE = "blocofy theme work start|status|resume|seal|request-approval|cancel … (see `blocofy --help`)";
 
 async function themeWork(rest) {
   const [sub, ...subRest] = rest;
-  const handler = { start: themeWorkStart, status: themeWorkStatus, resume: themeWorkResume, cancel: themeWorkCancel }[sub];
+  const handler = { start: themeWorkStart, status: themeWorkStatus, resume: themeWorkResume, seal: themeWorkSeal, "request-approval": themeWorkRequestApproval, cancel: themeWorkCancel }[sub];
   if (!handler) throw new TargetError("USAGE", `Usage: ${THEME_WORK_USAGE}`, {}, 1);
   return handler(subRest);
 }

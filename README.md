@@ -211,8 +211,23 @@ blocofy theme work start [dir] [--intent "<text>"] [--idempotency-key <k>]
 blocofy theme work status <wk_…> [--dir <dir>]
 blocofy theme work resume <wk_…> [--dir <dir>] [--require-fresh]
 blocofy theme work cancel <wk_…> [--dir <dir>]
+blocofy theme work seal <wk_…> [--dir <dir>]
+blocofy theme work request-approval <wk_…> [--dir <dir>] [--open] [--wait [--interval <s>]]
 blocofy theme push [dir] --draft --work <wk_…>
 ```
+- `seal` prepares the work for review: its content is frozen and can no longer change. It asks for
+  no approval and publishes nothing. On a platform without this step it says so (`seal_unsupported`,
+  exit 2); `request-approval` prepares the work itself.
+- `request-approval` asks a person to publish the work (an open work is prepared for review first)
+  and prints the **approval URL**. A signed-in site owner, or a team member with the theme permission,
+  approves on that Blocofy page. The URL carries no token: having it is not a permission to publish.
+  `--open` also opens it in your browser (only when it is this platform's approval page). `--wait`
+  polls the read-only publish status until the work is published (exit 0) or the request ends without
+  a publication: the live site changed (`approval_stale`), the request expired (`approval_expired`,
+  15 minutes), was declined (`approval_declined`) or the work was reopened (`approval_superseded`) —
+  exit 2, nothing published; a timeout is exit 1 (`wait_timeout`). The CLI never publishes a work.
+- `status` also shows where the publication stands (preparing, ready for review, waiting for
+  approval with its URL, published, needs update).
 - `start` prints the work's handle (`wk_…`) and saves it in `.blocofy/local.json` (git-ignored; the
   handle alone grants nothing). It sends an `Idempotency-Key` (yours, or a printed `cli-work-<uuid>`):
   the same key returns the same work, never a second one. When the answer is lost (network, 5xx),
@@ -548,6 +563,9 @@ Each retry prints a notice on stderr.
     protocol headers.
   - New: `theme work start|status|resume|cancel` and `theme push --work <wk_…>` (theme work sessions,
     v1 API key; see "Theme work"). A plain `theme push` is unchanged and never calls the work API.
+  - New: `theme work seal` and `theme work request-approval [--open] [--wait]` (human-approved
+    publishing: prints the approval URL, polls the status read-only; never publishes); `theme work
+    status` shows the publish status.
 - **0.14.0** — Draft commands no longer guess their draft (platform #989).
   - **Behaviour change:** `theme push` (draft), `theme push --diff`, `theme pull --draft` and the
     `theme dev` sync refuse, writing nothing, when the platform answers `draft_target_ambiguous` (or the
