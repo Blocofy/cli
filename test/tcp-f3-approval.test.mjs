@@ -189,14 +189,15 @@ test("themeWorkRefusal knows the approval-side wire codes", () => {
   assert.match(themeWorkRefusal(new CliRefusal(403, { code: "forbidden_scope" }), { op: "wait" }).lines[0], /themes:read/);
 });
 
-test("work start quota_exceeded: theme_bytes frees space (no plan upgrade); the legacy draft count keeps the plan message", () => {
+test("work start quota_exceeded: theme_bytes frees space; the legacy draft count says remove a draft; never a plan upgrade", () => {
   const bytes = themeWorkRefusal(new CliRefusal(422, { code: "quota_exceeded", details: { resource: "theme_bytes", usedBytes: 1, allowanceBytes: 1 } }), { op: "start" });
   const text = bytes.lines.join("\n");
   assert.match(text, /tema alanı dolu/);
   assert.match(text, /destek/);
   assert.doesNotMatch(text + bytes.message, /plan|yükselt|upgrade/i);
   const drafts = themeWorkRefusal(new CliRefusal(422, { code: "quota_exceeded", details: { resource: "theme_drafts", used: 5, limit: 5 } }), { op: "start" });
-  assert.match(drafts.lines.join("\n"), /Plan & faturalandırma/);
+  assert.match(drafts.lines.join("\n"), /kullanmadığın bir taslak temayı sil/);
+  assert.doesNotMatch(drafts.lines.join("\n") + drafts.message, /plan|yükselt|upgrade|faturalandırma/i);
 });
 
 // ── end to end (mock platform) ─────────────────────────────────────────────────────────────────────────────
@@ -234,6 +235,30 @@ test("seal of a stale work: work_stale in plain Turkish, exit 2, nothing overwri
       assert.match(r.stderr, /çalışma güncel değil/);
       assert.match(r.stderr, /üzerine yazılmadı/);
     })));
+
+test("work_revision_limit (seal past the cap, or request-approval that seals): plain Turkish, start a new work; exit 2", async () => {
+  const body = { error: { code: "work_revision_limit", message: "x", details: { limit: 20 } } };
+  await withDir((dir) =>
+    withPlatform({ seal: () => [409, body] }, async (url, seen) => {
+      const r = await runBin(url, ["theme", "work", "seal", HANDLE, "--dir", dir]);
+      assert.equal(r.code, 2, r.stderr);
+      assert.match(r.stderr, /Bir çalışma en fazla 20 kez incelemeye gönderilebilir; yeni bir çalışma başlat\./);
+      assert.match(r.stderr, /blocofy theme work start/);
+      assert.match(lastLine(r.stderr), /^error \[work_revision_limit\]/);
+      assert.equal(seen.approvals, 0);
+    }));
+  await withDir((dir) =>
+    withPlatform({ approvals: () => [409, body] }, async (url) => {
+      const r = await runBin(url, ["theme", "work", "request-approval", HANDLE, "--dir", dir, "--json"]);
+      assert.equal(r.code, 2, r.stderr);
+      const env = JSON.parse(lastLine(r.stderr));
+      assert.equal(env.error.code, "work_revision_limit");
+      assert.equal(env.error.details.limit, 20);
+    }));
+  const other = themeWorkRefusal(new CliRefusal(409, { code: "work_revision_limit", details: { limit: 7 } }), { handle: HANDLE, op: "seal" });
+  assert.match(other.lines[0], /en fazla 7 kez/);
+  assert.doesNotMatch(other.lines.join("\n") + other.message, /plan|yükselt|upgrade/i);
+});
 
 test("request-approval: prints the approval URL (no token, no key), never publishes; exit 0", () =>
   withDir((dir) =>

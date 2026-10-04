@@ -136,8 +136,10 @@ publishes a guessed draft. With no draft at all, the first push creates one as b
 a new CLI draft can be refused by the platform's capacity check. Nothing is written in any of these
 cases; the CLI explains it in plain words first, then prints the `error [code]` line (the `--json`
 envelope keeps the code and details):
-- `quota_exceeded` (exit 2) — the plan's limit is reached; the message shows the usage the platform
-  reports (for example storage used / limit and what the new draft needs).
+- `quota_exceeded` (exit 2) — worded by `details.resource`, with the usage the platform reports: the
+  site's theme space is full (`theme_bytes`) or a site not on theme space reached its old draft count
+  (`theme_drafts`) — remove a draft you no longer need (neither is a plan limit); the plan's storage
+  is full (`storage_mb`) — the plan message.
 - `capacity_unavailable` / `resource_busy` (exit 1) — temporary. The CLI has already retried within
   its normal retry policy (waiting as long as the server's `Retry-After` asks); try again later.
 - `source_stale` (exit 2) — the live theme the new draft copies changed meanwhile; run the command
@@ -567,8 +569,11 @@ Each retry prints a notice on stderr.
       is full — on any push, a push to an existing draft with `--instance` included. It shows used /
       allowance from `details`, says to free space by removing an unused draft or ending a theme work,
       or to contact support, and never suggests a plan upgrade or says "new draft" (theme space is not
-      a plan quota). `theme_drafts` (the older draft-count limit, may still appear while sites move
-      over) and `storage_mb` keep the plan message. The envelope carries the server's `details`.
+      a plan quota). `theme_drafts` (the old draft count, on sites that have not moved to theme space)
+      is not a plan limit either: it says to remove a draft you no longer need, never to upgrade.
+      Only `storage_mb` keeps the plan message. The envelope carries the server's `details`.
+    - `work_revision_limit` (exit 2; `theme work seal`, or `request-approval` when it prepares the
+      work): a work can be sent for review at most 20 times (`details.limit`); start a new work.
     - `capacity_unavailable` / `resource_busy` (exit 1, after the usual retries that honour
       `Retry-After`; the envelope carries `retryAfterSeconds`): a temporary refusal, try again later.
       A 503 on the write is no longer reported as "outcome unknown" (the platform wrote nothing),

@@ -355,13 +355,15 @@ test("quota_exceeded theme_bytes: the site's theme space is full — free space 
   assert.match(draftSyncErrorLine({ code: "quota_exceeded", body: { details: THEME_BYTES } }), /^draft sync: Sitenin tema alanı dolu/);
 });
 
-test("quota_exceeded theme_drafts (legacy count): keeps the plan message", () => {
+test("quota_exceeded theme_drafts (legacy count, not the plan): remove a draft; never a plan upgrade", () => {
   const r = themeCapacityRefusal({ code: "quota_exceeded", status: 422, body: { details: QUOTA_V1 } }, {});
   const text = r.lines.join("\n");
-  assert.match(r.lines[0], /^Planının sınırına ulaşıldı/);
-  assert.match(text, /Plan & faturalandırma/);
+  assert.match(r.lines[0], /^Sitenin taslak tema sınırına ulaşıldı/);
+  assert.match(text, /kullanmadığın bir taslak temayı sil/);
   assert.match(text, /Taslak tema sayısı: 5 \/ 5/);
+  for (const s of [text, r.short, r.message]) assert.doesNotMatch(s, /plan|yükselt|upgrade|faturalandırma/i);
   assert.doesNotMatch(text, /Sitenin tema alanı/);
+  assert.equal(r.details.resource, "theme_drafts");
 });
 
 test("capacity_unavailable: a temporary platform-side refusal — try again later; never the plan, never 'new draft'", () => {
