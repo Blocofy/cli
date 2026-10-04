@@ -567,8 +567,9 @@ Each retry prints a notice on stderr.
     plain Turkish first, then prints the usual `error [code]` line (`--json`: the envelope only):
     - `quota_exceeded` (exit 2) is worded by `details.resource`. `theme_bytes`: the site's theme space
       is full — on any push, a push to an existing draft with `--instance` included. It shows used /
-      allowance from `details`, says to free space by removing an unused draft or ending a theme work,
-      or to contact support, and never suggests a plan upgrade or says "new draft" (theme space is not
+      allowance from `details`, says to free space by deleting unused draft themes from the theme
+      library (cancelled works' themes included; cancelling an open work also releases its reserved
+      publish space; an archived work's theme still counts), or to contact support, and never suggests a plan upgrade or says "new draft" (theme space is not
       a plan quota). `theme_drafts` (the old draft count, on sites that have not moved to theme space)
       is not a plan limit either: it says to remove a draft you no longer need, never to upgrade.
       Only `storage_mb` keeps the plan message. The envelope carries the server's `details`.

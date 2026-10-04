@@ -342,8 +342,10 @@ test("quota_exceeded theme_bytes: the site's theme space is full — free space 
   assert.match(r.lines[0], /^Sitenin tema alanı dolu/);
   assert.match(text, /49 MB \/ 50 MB/);
   assert.match(text, /2 MB/);
-  assert.match(text, /taslak temayı sil/);
-  assert.match(text, /arşivle/);
+  assert.match(text, /taslak temaları \(iptal edilmiş çalışmaların temaları dahil\) tema kütüphanesinden sil/);
+  assert.match(text, /iptal etmek ayrıca onun için ayrılan yayın alanını bırakır/);
+  // Archiving frees no theme bytes (K4): it is never offered as a way to free space.
+  for (const s of [text, r.short, r.message]) assert.doesNotMatch(s, /arşivle|archiv/i);
   assert.match(text, /destek/);
   assert.match(text, /Hiçbir şey yazılmadı/);
   for (const s of [text, r.short, r.message]) {
@@ -385,7 +387,7 @@ test("push --draft --instance to an EXISTING draft refused theme_bytes: space wo
       assert.equal(r.code, 2, r.stdout + r.stderr);
       assert.equal(seen.applies.length, 1);
       assert.match(r.stderr, /Sitenin tema alanı dolu/);
-      assert.match(r.stderr, /taslak temayı sil/);
+      assert.match(r.stderr, /tema kütüphanesinden sil/);
       assert.doesNotMatch(r.stderr, /Plan & faturalandırma|planını yükselt|yeni taslak/i);
       assert.match(lastLine(r.stderr), /^error \[quota_exceeded\]: /);
     });

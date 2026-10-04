@@ -195,6 +195,8 @@ test("work start quota_exceeded: theme_bytes frees space; the legacy draft count
   assert.match(text, /tema alanı dolu/);
   assert.match(text, /destek/);
   assert.doesNotMatch(text + bytes.message, /plan|yükselt|upgrade/i);
+  assert.match(text, /tema kütüphanesinden sil/);
+  assert.doesNotMatch(text, /arşivle|bitir/i, "archiving or 'finishing' a work frees no theme bytes");
   const drafts = themeWorkRefusal(new CliRefusal(422, { code: "quota_exceeded", details: { resource: "theme_drafts", used: 5, limit: 5 } }), { op: "start" });
   assert.match(drafts.lines.join("\n"), /kullanmadığın bir taslak temayı sil/);
   assert.doesNotMatch(drafts.lines.join("\n") + drafts.message, /plan|yükselt|upgrade|faturalandırma/i);
