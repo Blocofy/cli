@@ -198,6 +198,38 @@ theme publish ./shop` always publishes `./shop`'s site, whatever directory you r
   site's CLI draft; any other theme (a site-state restore draft, a renamed or panel-copied theme) is
   refused with `publish_target_unconfirmed` (exit 2, nothing published) — name it with `--instance`.
 
+### Theme work (new)
+
+A **work** is a private, safe copy of the site's current live theme: you change it, visitors never
+see it, and a person approves its publication in the admin panel (the CLI never publishes a work).
+Work commands use the **v1 API key** (`blocofy login --api-key`, or `BLOCOFY_API_KEY` +
+`BLOCOFY_API_URL`): the work belongs to the key that started it. The dev token alone is refused
+(`LOGIN_REQUIRED`) before any request.
+
+```
+blocofy theme work start [dir] [--intent "<text>"] [--idempotency-key <k>]
+blocofy theme work status <wk_…> [--dir <dir>]
+blocofy theme work resume <wk_…> [--dir <dir>] [--require-fresh]
+blocofy theme work cancel <wk_…> [--dir <dir>]
+blocofy theme push [dir] --draft --work <wk_…>
+```
+- `start` prints the work's handle (`wk_…`) and saves it in `.blocofy/local.json` (git-ignored; the
+  handle alone grants nothing). It sends an `Idempotency-Key` (yours, or a printed `cli-work-<uuid>`):
+  the same key returns the same work, never a second one. When the answer is lost (network, 5xx),
+  the CLI prints the exact command to run again with the same key.
+- `status`, `resume` and `cancel` always take the handle; with none they suggest the project's saved
+  work and stop. `status` and `resume` say whether the site changed since the work started; a changed
+  site is never overwritten. `resume --require-fresh` refuses (`work_stale`) instead.
+- `cancel` reads the work's `state_version` and sends it; the live site is untouched and the work's
+  theme stays in the theme library.
+- `theme push --work <wk_…>` writes into that work's own draft theme (`--work` implies `--draft`; it
+  cannot be combined with `--live` or `--instance`). It needs **both** the dev token and the API key of
+  the same site, and refuses unless the work is open (`work_state_conflict`, nothing written).
+- Refusals print a plain Turkish explanation first, then the `error [code]` line (`--json`: the
+  envelope only): `not_found`, `work_forbidden`, `work_state_conflict`, `work_stale`, `work_sealed`,
+  `work_base_unavailable`, `quota_exceeded`, `capacity_unavailable`, `resource_busy`,
+  `idempotency_key_reuse` (exit 2 for a 4xx, 1 for a 5xx).
+
 ### Status
 
 ```
@@ -514,6 +546,8 @@ Each retry prints a notice on stderr.
   - `theme dev` reports the same refusals in one line per save.
   - Unchanged: retry classes, `draft_target_ambiguous` handling, idempotency keys, target guards and
     protocol headers.
+  - New: `theme work start|status|resume|cancel` and `theme push --work <wk_…>` (theme work sessions,
+    v1 API key; see "Theme work"). A plain `theme push` is unchanged and never calls the work API.
 - **0.14.0** — Draft commands no longer guess their draft (platform #989).
   - **Behaviour change:** `theme push` (draft), `theme push --diff`, `theme pull --draft` and the
     `theme dev` sync refuse, writing nothing, when the platform answers `draft_target_ambiguous` (or the
