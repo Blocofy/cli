@@ -71,7 +71,7 @@ import { MANIFEST_PATH, buildManifest, validateSiteStateTree, verifyManifest } f
 import { SiteStateFsError, hashBuffer, readSiteStateTree, stagedWriteTree } from "../lib/site-state-fs.mjs";
 import { migrateSiteState } from "../lib/site-migrate.mjs";
 import { applySiteState, downloadAssetBytes, fetchSiteStateExport, planSiteState, publishSiteState, uploadMediaAsset } from "../lib/site-state-client.mjs";
-import { DRAFT_TARGET_AMBIGUOUS, PUBLISH_TARGET_UNCONFIRMED, publishTargetUnconfirmedMessage, diffTheme, draftSyncErrorLine, draftTargetAmbiguousMessage, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, findCliDraft, publishInstance, pullTheme, pushTheme, renameInstance } from "../lib/theme-sync.mjs";
+import { DRAFT_TARGET_AMBIGUOUS, PUBLISH_TARGET_UNCONFIRMED, publishTargetUnconfirmedMessage, diffTheme, draftSyncErrorLine, draftTargetAmbiguousMessage, fetchCanonicalSupport, fetchDevSession, fetchSiteStatus, findCliDraft, publishInstance, pullTheme, pushTheme, renameInstance, themeCapacityRefusal } from "../lib/theme-sync.mjs";
 import { isAffirmative, livePushDecision, resolvePushMode } from "../lib/confirm.mjs";
 import { hyperlink, openUrl } from "../lib/term.mjs";
 import { isValidToken, isValidUrl, normalizeUrl } from "../lib/validate.mjs";
@@ -193,8 +193,10 @@ Usage
 
   blocofy theme pull [dir] [--draft] [--instance <handle>]
       Download the live theme to disk. (dir defaults to cwd)
-        --draft      pull the draft theme (what 'theme dev' syncs into) instead of live;
-                     creates the draft if missing, so it needs a bound project
+        --draft      pull the CLI draft (what 'theme dev' / 'theme push --draft' write into)
+                     instead of live. Read-only: it never creates the draft — with none yet
+                     it stops (target_missing); run 'blocofy theme push --draft' first.
+                     Needs a bound project
         --instance <handle>  pull a specific theme by its handle (from the admin
                              panel theme card, or \`blocofy status\`)
 
@@ -527,6 +529,19 @@ function failDraftTargetAmbiguous(error, command, { action = "write" } = {}) {
       ...(earlierAttempt ? { earlierAttempt } : {}),
     },
   });
+}
+
+/**
+ * Theme-capacity (ADR-0013) refusals of the dev theme endpoint: `target_missing`, `quota_exceeded`,
+ * `capacity_unavailable`, `resource_busy`, `source_stale`. The plain Turkish explanation first (human mode), then the
+ * shared `error [code]` line / `--json` envelope; exit 2 for the 4xx ones, 1 for the 503 ones. Returns only when
+ * `error` is not one of them.
+ */
+function failOnThemeCapacityRefusal(error, pushCommand) {
+  const refusal = themeCapacityRefusal(error, { pushCommand });
+  if (!refusal) return;
+  if (!JSON_MODE) for (const line of refusal.lines) console.error(line);
+  failAndExit({ code: error.code, status: error.status, message: refusal.message, details: refusal.details });
 }
 
 /**
@@ -961,7 +976,9 @@ async function themePull(rest) {
   const draft = Boolean(flags.draft);
   const instance = typeof flags.instance === "string" ? flags.instance : null;
   const what = instance ? `instance ${instance}` : draft ? "draft" : "live";
-  // Review M1: a draft pull provisions the draft server-side (`?draft=1`), so it is a remote mutation: binding required.
+  // Review M1: a draft pull was classed a remote mutation (binding required) because `?draft=1` used to provision the
+  // draft server-side. A current platform never creates a theme on a read (ADR-0013 D6: 404 `target_missing`); the
+  // class is kept fail-closed for platforms from before that change.
   const target = await prepareTarget({ command: draft ? "theme pull --draft" : "theme pull", commandClass: draft ? "remote-mutation" : "local-write", dir, flags, needs: "dev", mode: what });
   let count;
   try {
@@ -971,6 +988,7 @@ async function themePull(rest) {
     if (error?.code === "draft_target_unverifiable") {
       failAndExit({ code: "draft_target_unverifiable", status: 503, message: "The platform could not verify which draft to pull (a read failed on its side). Nothing was written. Try again in a moment.", details: {} });
     }
+    failOnThemeCapacityRefusal(error, commandLine("blocofy theme push", positionals));
     throw error;
   }
   console.log(`Downloaded ${count} ${what} theme files → ${dir}`);
@@ -1182,6 +1200,8 @@ async function themePush(rest) {
       }
       failAndExit({ code: "idempotency_conflict", status: error.status, message: "The idempotency key was already used with different content. Retry with a new key (or omit --idempotency-key).", details: {} });
     }
+    // ADR-0013: the new draft this push needs was refused (definite answer, before the unknown-outcome handling below).
+    failOnThemeCapacityRefusal(error, commandLine("blocofy theme push", positionals));
     const refusal = themePushRefusal(error, { draft: mode === "draft", idempotencyKey });
     if (refusal) failAndExit({ code: error.code, status: error.status, ...refusal });
     throw error;

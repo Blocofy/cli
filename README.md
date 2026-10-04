@@ -80,8 +80,10 @@ changing credentials, context or the project binding).
 blocofy theme pull [dir] [--draft] [--instance <handle>]
 ```
 Download the live theme to disk. `dir` defaults to cwd.
-- `--draft` — pull the draft theme (what `theme dev` syncs into) instead of live; creates the
-  draft if missing, so it needs a bound project.
+- `--draft` — pull the CLI draft (what `theme dev` and `theme push --draft` write into) instead of
+  live. Read-only: it never creates the draft. With no CLI draft yet the platform answers
+  `target_missing` and the CLI stops (exit 2, nothing written) and tells you to run
+  `blocofy theme push --draft` first. It still needs a bound project.
 - `--instance <handle>` — pull a specific theme by its handle (admin panel theme card, or
   `blocofy status`).
 
@@ -129,6 +131,18 @@ other listed draft would overwrite it. On a site whose only candidate is a site-
 create a new draft theme in the admin panel and pass its handle with `--instance`, or publish or
 delete the restore draft first. `theme publish` without `--instance` uses the same rule and never
 publishes a guessed draft. With no draft at all, the first push creates one as before.
+
+**When the platform cannot create the new draft.** A draft push (or the `theme dev` sync) that needs
+a new CLI draft can be refused by the platform's capacity check. Nothing is written in any of these
+cases; the CLI explains it in plain words first, then prints the `error [code]` line (the `--json`
+envelope keeps the code and details):
+- `quota_exceeded` (exit 2) — the plan's limit is reached; the message shows the usage the platform
+  reports (for example storage used / limit and what the new draft needs).
+- `capacity_unavailable` / `resource_busy` (exit 1) — temporary. The CLI has already retried within
+  its normal retry policy (waiting as long as the server's `Retry-After` asks); try again later.
+- `source_stale` (exit 2) — the live theme the new draft copies changed meanwhile; run the command
+  again.
+`theme dev` reports each of them in one line and tries again on the next save.
 
 After a draft push the CLI prints the draft it wrote to (`Draft: <handle> "<name>" (new)` or
 `(existing CLI draft, updated)`) and the `blocofy theme publish --instance <handle>` command.
@@ -485,6 +499,21 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
+- **Unreleased** — Clear messages for the platform's theme-capacity refusals (ADR-0013).
+  - `theme pull --draft` help and README no longer claim it creates the draft: a pull is read-only.
+    With no CLI draft the platform answers 404 `target_missing`; the CLI says so and tells you to run
+    `blocofy theme push --draft` first (exit 2, nothing written). The command still needs a bound
+    project (kept for platforms from before this change, which created the draft on this read).
+  - A draft push that needs a new draft explains the platform's refusal in plain Turkish first, then
+    prints the usual `error [code]` line (`--json`: the envelope only): `quota_exceeded` (exit 2,
+    shows the usage and limit from the server's `details`, which the envelope also carries),
+    `capacity_unavailable` / `resource_busy` (exit 1, after the usual retries that honour
+    `Retry-After`; the envelope carries `retryAfterSeconds`) and `source_stale` (exit 2, run it again).
+    A 503 `capacity_unavailable` / `resource_busy` on the write is no longer reported as "outcome
+    unknown" (the platform wrote nothing), unless an earlier attempt of the same push got no answer.
+  - `theme dev` reports the same refusals in one line per save.
+  - Unchanged: retry classes, `draft_target_ambiguous` handling, idempotency keys, target guards and
+    protocol headers.
 - **0.14.0** — Draft commands no longer guess their draft (platform #989).
   - **Behaviour change:** `theme push` (draft), `theme push --diff`, `theme pull --draft` and the
     `theme dev` sync refuse, writing nothing, when the platform answers `draft_target_ambiguous` (or the
