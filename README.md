@@ -546,30 +546,39 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
-- **Unreleased** — Clear messages for the platform's theme-capacity refusals (ADR-0013).
-  - `theme pull --draft` help and README no longer claim it creates the draft: a pull is read-only.
-    With no CLI draft the platform answers 404 `target_missing`; the CLI says so and tells you to run
+- **0.15.0** (next minor release; not published yet) — Theme space, theme work and human-approved
+  publishing. Pairs with the platform release that replaces the 5-draft limit with a per-site theme
+  space.
+  - **Capacity refusals in plain words.** A theme write refused by the platform explains why in
+    plain Turkish first, then prints the usual `error [code]` line (`--json`: the envelope only):
+    - `quota_exceeded` (exit 2) is worded by `details.resource`. `theme_bytes`: the site's theme space
+      is full — on any push, a push to an existing draft with `--instance` included. It shows used /
+      allowance from `details`, says to free space by removing an unused draft or ending a theme work,
+      or to contact support, and never suggests a plan upgrade or says "new draft" (theme space is not
+      a plan quota). `theme_drafts` (the older draft-count limit, may still appear while sites move
+      over) and `storage_mb` keep the plan message. The envelope carries the server's `details`.
+    - `capacity_unavailable` / `resource_busy` (exit 1, after the usual retries that honour
+      `Retry-After`; the envelope carries `retryAfterSeconds`): a temporary refusal, try again later.
+      A 503 on the write is no longer reported as "outcome unknown" (the platform wrote nothing),
+      unless an earlier attempt of the same push got no answer.
+    - `source_stale` (exit 2): the live theme changed while a new draft was copied; run it again.
+    - `theme dev` reports the same refusals in one line per save.
+  - **`theme pull --draft` is read-only.** Help and README no longer claim it creates the draft. With
+    no CLI draft the platform answers 404 `target_missing`; the CLI tells you to run
     `blocofy theme push --draft` first (exit 2, nothing written). The command still needs a bound
-    project (kept for platforms from before this change, which created the draft on this read).
-  - A draft push that needs a new draft explains the platform's refusal in plain Turkish first, then
-    prints the usual `error [code]` line (`--json`: the envelope only): `quota_exceeded` (exit 2,
-    shows the usage and limit from the server's `details`, which the envelope also carries),
-    `capacity_unavailable` / `resource_busy` (exit 1, after the usual retries that honour
-    `Retry-After`; the envelope carries `retryAfterSeconds`) and `source_stale` (exit 2, run it again).
-    A 503 `capacity_unavailable` / `resource_busy` on the write is no longer reported as "outcome
-    unknown" (the platform wrote nothing), unless an earlier attempt of the same push got no answer.
-  - `theme dev` reports the same refusals in one line per save.
+    project (kept for platforms from before this change).
+  - **New: theme work.** `theme work start|status|resume|cancel` and `theme push --work <wk_…>`
+    (v1 API key; see "Theme work"). A work is a private copy of the current live theme, named only by
+    its handle; the handle is saved in `.blocofy/local.json`. A plain `theme push` is unchanged and
+    never calls the work API.
+  - **New: human-approved publishing.** `theme work seal` (prepare for review, asks for no approval)
+    and `theme work request-approval [--open] [--wait [--interval <s>]]`: prints the approval URL (no
+    token in it), optionally opens it, and `--wait` polls the status read-only — exit 0 when
+    published, 2 when the request ends without a publication (`approval_stale`, `approval_expired`,
+    `approval_declined`, `approval_superseded`, `work_cancelled`), 1 on `wait_timeout`. `theme work
+    status` shows the publish status. The CLI never publishes a work.
   - Unchanged: retry classes, `draft_target_ambiguous` handling, idempotency keys, target guards and
     protocol headers.
-  - New: `theme work start|status|resume|cancel` and `theme push --work <wk_…>` (theme work sessions,
-    v1 API key; see "Theme work"). A plain `theme push` is unchanged and never calls the work API.
-  - A `quota_exceeded` refusal is worded by its `details.resource`: `theme_bytes` (the site's theme
-    space is full, on any push — an existing draft included) says to free space by removing an unused
-    draft or ending a theme work, or to contact support, and never suggests a plan upgrade;
-    `theme_drafts` keeps the plan message. `capacity_unavailable` reads as a temporary refusal.
-  - New: `theme work seal` and `theme work request-approval [--open] [--wait]` (human-approved
-    publishing: prints the approval URL, polls the status read-only; never publishes); `theme work
-    status` shows the publish status.
 - **0.14.0** — Draft commands no longer guess their draft (platform #989).
   - **Behaviour change:** `theme push` (draft), `theme push --diff`, `theme pull --draft` and the
     `theme dev` sync refuse, writing nothing, when the platform answers `draft_target_ambiguous` (or the
