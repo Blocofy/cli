@@ -222,10 +222,22 @@ blocofy theme push [dir] --draft --work <wk_…>
   and prints the **approval URL**. A signed-in site owner, or a team member with the theme permission,
   approves on that Blocofy page. The URL carries no token: having it is not a permission to publish.
   `--open` also opens it in your browser (only when it is this platform's approval page). `--wait`
-  polls the read-only publish status until the work is published (exit 0) or the request ends without
-  a publication: the live site changed (`approval_stale`), the request expired (`approval_expired`,
-  15 minutes), was declined (`approval_declined`) or the work was reopened (`approval_superseded`) —
-  exit 2, nothing published; a timeout is exit 1 (`wait_timeout`). The CLI never publishes a work.
+  polls the read-only publish status until the work is published or the request ends; the CLI never
+  publishes a work. How `--wait` ends:
+
+  | Exit | Code (`--json` envelope) | Meaning |
+  | --- | --- | --- |
+  | 0 | — | Approved and published; the work is live. |
+  | 2 | `approval_stale` | The live site changed after the request; nothing published. Start a new work from the current live site and ask again. |
+  | 2 | `approval_expired` | Nobody decided within 15 minutes; nothing published. Ask again. |
+  | 2 | `approval_declined` | The request was declined; nothing published. |
+  | 2 | `approval_superseded` | The work was reopened for changes; this request is no longer valid. Ask again. |
+  | 2 | `work_cancelled` | The work was cancelled; nothing published. |
+  | 1 | `publish_failed` | The work could not be completed; nothing published. Check `theme work status`. |
+  | 1 | `wait_timeout` | No decision yet; the CLI stopped waiting. The request stays valid until it expires. |
+
+  A refusal before the wait starts (for example `work_state_conflict`) exits as usual (2 for a 4xx,
+  1 for a 5xx); see [Exit codes](#exit-codes).
 - `status` also shows where the publication stands (preparing, ready for review, waiting for
   approval with its URL, published, needs update).
 - `start` prints the work's handle (`wk_…`) and saves it in `.blocofy/local.json` (git-ignored; the
@@ -575,8 +587,12 @@ Each retry prints a notice on stderr.
     and `theme work request-approval [--open] [--wait [--interval <s>]]`: prints the approval URL (no
     token in it), optionally opens it, and `--wait` polls the status read-only — exit 0 when
     published, 2 when the request ends without a publication (`approval_stale`, `approval_expired`,
-    `approval_declined`, `approval_superseded`, `work_cancelled`), 1 on `wait_timeout`. `theme work
-    status` shows the publish status. The CLI never publishes a work.
+    `approval_declined`, `approval_superseded`, `work_cancelled`), 1 on `wait_timeout` or
+    `publish_failed` (table under "Theme work"). `theme work status` shows the publish status. The CLI
+    never publishes a work.
+  - **`theme publish` names a work copy's refusal.** Publishing a theme work's copy directly is refused
+    by the platform (`work_not_publishable`, exit 2, nothing published); the CLI now keeps that code
+    (it printed `HTTP_409` before) and says to send the work for review and ask for approval.
   - Unchanged: retry classes, `draft_target_ambiguous` handling, idempotency keys, target guards and
     protocol headers.
 - **0.14.0** — Draft commands no longer guess their draft (platform #989).
