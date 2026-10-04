@@ -331,3 +331,63 @@ test("help: theme pull --draft is read-only — it never claims to create the dr
   assert.match(section, /never creates/);
   assert.match(section, /theme push --draft/);
 });
+
+// ── G2 acceptance: the wording branches on details.resource ───────────────────────────────────────────────
+
+const THEME_BYTES = { resource: "theme_bytes", protectionVersion: "tp1", policyVersion: 3, usedBytes: 49 * MB, estimateBytes: 2 * MB, allowanceBytes: 50 * MB };
+
+test("quota_exceeded theme_bytes: the site's theme space is full — free space or contact support; no plan upgrade, no 'new draft'", () => {
+  const r = themeCapacityRefusal({ code: "quota_exceeded", status: 422, body: { error: "quota_exceeded", details: THEME_BYTES } }, { pushCommand: "blocofy theme push" });
+  const text = r.lines.join("\n");
+  assert.match(r.lines[0], /^Sitenin tema alanı dolu/);
+  assert.match(text, /49 MB \/ 50 MB/);
+  assert.match(text, /2 MB/);
+  assert.match(text, /taslak temayı sil/);
+  assert.match(text, /arşivle/);
+  assert.match(text, /destek/);
+  assert.match(text, /Hiçbir şey yazılmadı/);
+  for (const s of [text, r.short, r.message]) {
+    assert.doesNotMatch(s, /plan|Plan & faturalandırma|yükselt|upgrade/i);
+    assert.doesNotMatch(s, /yeni taslak|new draft/i);
+  }
+  assert.doesNotMatch(text, /tp1|policyVersion|v2|v1/);
+  assert.equal(r.details.resource, "theme_bytes");
+  assert.match(draftSyncErrorLine({ code: "quota_exceeded", body: { details: THEME_BYTES } }), /^draft sync: Sitenin tema alanı dolu/);
+});
+
+test("quota_exceeded theme_drafts (legacy count): keeps the plan message", () => {
+  const r = themeCapacityRefusal({ code: "quota_exceeded", status: 422, body: { details: QUOTA_V1 } }, {});
+  const text = r.lines.join("\n");
+  assert.match(r.lines[0], /^Planının sınırına ulaşıldı/);
+  assert.match(text, /Plan & faturalandırma/);
+  assert.match(text, /Taslak tema sayısı: 5 \/ 5/);
+  assert.doesNotMatch(text, /Sitenin tema alanı/);
+});
+
+test("capacity_unavailable: a temporary platform-side refusal — try again later; never the plan, never 'new draft'", () => {
+  const r = themeCapacityRefusal({ code: "capacity_unavailable", status: 503, retryAfter: "5", body: { error: "capacity_unavailable", details: { resource: "theme_bytes", reason: "unavailable" } } }, {});
+  const text = r.lines.join("\n");
+  assert.match(r.lines[0], /geçici/);
+  assert.match(text, /Biraz sonra tekrar dene \(en az 5 sn sonra\)/);
+  for (const s of [text, r.short, r.message]) {
+    assert.doesNotMatch(s, /plan|yükselt|upgrade|dolu/i);
+    assert.doesNotMatch(s, /yeni taslak|new draft/i);
+  }
+});
+
+test("push --draft --instance to an EXISTING draft refused theme_bytes: space wording, no plan upgrade, no 'new draft'; exit 2", async () => {
+  const dir = themeDir();
+  try {
+    await withPlatform({ applyAnswers: [[422, { error: "quota_exceeded", message: "…", details: THEME_BYTES }]] }, async (url, seen) => {
+      const r = await runBin(url, ["theme", "push", dir, "--draft", "--instance", "t300"]);
+      assert.equal(r.code, 2, r.stdout + r.stderr);
+      assert.equal(seen.applies.length, 1);
+      assert.match(r.stderr, /Sitenin tema alanı dolu/);
+      assert.match(r.stderr, /taslak temayı sil/);
+      assert.doesNotMatch(r.stderr, /Plan & faturalandırma|planını yükselt|yeni taslak/i);
+      assert.match(lastLine(r.stderr), /^error \[quota_exceeded\]: /);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

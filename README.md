@@ -563,6 +563,10 @@ Each retry prints a notice on stderr.
     protocol headers.
   - New: `theme work start|status|resume|cancel` and `theme push --work <wk_…>` (theme work sessions,
     v1 API key; see "Theme work"). A plain `theme push` is unchanged and never calls the work API.
+  - A `quota_exceeded` refusal is worded by its `details.resource`: `theme_bytes` (the site's theme
+    space is full, on any push — an existing draft included) says to free space by removing an unused
+    draft or ending a theme work, or to contact support, and never suggests a plan upgrade;
+    `theme_drafts` keeps the plan message. `capacity_unavailable` reads as a temporary refusal.
   - New: `theme work seal` and `theme work request-approval [--open] [--wait]` (human-approved
     publishing: prints the approval URL, polls the status read-only; never publishes); `theme work
     status` shows the publish status.
