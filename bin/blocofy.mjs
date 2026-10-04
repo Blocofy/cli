@@ -253,6 +253,8 @@ Usage
         --wait           wait until it is published, or the request expires, is declined, or the
                          live site changes (read-only polling; nothing is published from here)
         --interval <s>   seconds between status checks while waiting (1-60, default 3)
+      --wait exit codes: 0 published · 2 ended, nothing published (approval_stale, approval_expired,
+      approval_declined, approval_superseded, work_cancelled) · 1 wait_timeout or publish_failed
   blocofy theme work resume <wk_…> [--dir <dir>] [--require-fresh]
       Continue that exact work here (it becomes this project's saved work). Writes nothing.
         --require-fresh   refuse (work_stale) when the site changed since the work started
@@ -2346,6 +2348,8 @@ async function themePublish(rest) {
         details: { reason: error.reason ?? null, instance: error.instance ?? null },
       });
     }
+    // A theme work's copy is never published directly; its way live is the approval (`theme work request-approval`).
+    if (error?.code === "work_not_publishable") failOnThemeWorkRefusal(error, { op: "publish" });
     throw error;
   }
   console.log(

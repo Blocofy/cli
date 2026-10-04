@@ -106,6 +106,25 @@ test("theme publish: 409 → exit 2 with envelope; 4× 503 → exit 1 after retr
   assert.equal(boom.reqs.filter((q) => q === "POST /api/dev/publish").length, 1, "500 is never retried");
 });
 
+test("theme publish: 409 {error: sentence, code: work_not_publishable} → exit 2, code kept, plain Turkish way forward", async () => {
+  const dir = project();
+  const body = { error: "Bu tema bir çalışma kopyasıdır ve doğrudan yayınlanamaz. Hiçbir şey değişmedi.", code: "work_not_publishable" };
+  const site = await fakeSite({ "POST /api/dev/publish": { status: 409, body } });
+  const j = await run(["theme", "publish", "--instance", "t2", "--json"], { url: site.url, cwd: dir });
+  assert.equal(j.code, 2, j.stderr);
+  const { error } = lastEnvelope(j);
+  assert.equal(error.code, "work_not_publishable", "not HTTP_409");
+  assert.equal(error.details.status, 409);
+  assert.ok(!j.stderr.includes("Çalışmayı incelemeye gönder"), "--json: the envelope only");
+
+  const h = await run(["theme", "publish", "--instance", "t2"], { url: site.url, cwd: dir });
+  assert.equal(h.code, 2, h.stderr);
+  assert.match(h.stderr, /Bu tema bir çalışma kopyası; doğrudan yayınlanamaz\. Çalışmayı incelemeye gönder ve onay iste\./);
+  assert.match(h.stderr, /blocofy theme work request-approval <wk_…>/);
+  assert.match(h.stderr, /work_not_publishable/);
+  assert.equal(site.reqs.filter((q) => q === "POST /api/dev/publish").length, 2, "a 409 is never retried");
+});
+
 test("settings push 422 → exit 2; theme rename 404 → exit 2; status network reset → exit 1 NETWORK_ERROR", async () => {
   const dir = project();
   const s = await fakeSite({ "POST /api/dev/content": { status: 422, body: { error: "invalid settings" } } });
