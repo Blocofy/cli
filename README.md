@@ -560,7 +560,7 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
-- **0.15.0** (next minor release; not published yet) — Theme space, theme work and human-approved
+- **0.15.0** (2026-10-05) — Theme space, theme work and human-approved
   publishing. Pairs with the platform release that replaces the 5-draft limit with a per-site theme
   space.
   - **Capacity refusals in plain words.** A theme write refused by the platform explains why in
