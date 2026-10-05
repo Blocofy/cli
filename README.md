@@ -80,8 +80,10 @@ changing credentials, context or the project binding).
 blocofy theme pull [dir] [--draft] [--instance <handle>]
 ```
 Download the live theme to disk. `dir` defaults to cwd.
-- `--draft` — pull the draft theme (what `theme dev` syncs into) instead of live; creates the
-  draft if missing, so it needs a bound project.
+- `--draft` — pull the CLI draft (what `theme dev` and `theme push --draft` write into) instead of
+  live. Read-only: it never creates the draft. With no CLI draft yet the platform answers
+  `target_missing` and the CLI stops (exit 2, nothing written) and tells you to run
+  `blocofy theme push --draft` first. It still needs a bound project.
 - `--instance <handle>` — pull a specific theme by its handle (admin panel theme card, or
   `blocofy status`).
 
@@ -129,6 +131,20 @@ other listed draft would overwrite it. On a site whose only candidate is a site-
 create a new draft theme in the admin panel and pass its handle with `--instance`, or publish or
 delete the restore draft first. `theme publish` without `--instance` uses the same rule and never
 publishes a guessed draft. With no draft at all, the first push creates one as before.
+
+**When the platform cannot create the new draft.** A draft push (or the `theme dev` sync) that needs
+a new CLI draft can be refused by the platform's capacity check. Nothing is written in any of these
+cases; the CLI explains it in plain words first, then prints the `error [code]` line (the `--json`
+envelope keeps the code and details):
+- `quota_exceeded` (exit 2) — worded by `details.resource`, with the usage the platform reports: the
+  site's theme space is full (`theme_bytes`) or a site not on theme space reached its old draft count
+  (`theme_drafts`) — remove a draft you no longer need (neither is a plan limit); the plan's storage
+  is full (`storage_mb`) — the plan message.
+- `capacity_unavailable` / `resource_busy` (exit 1) — temporary. The CLI has already retried within
+  its normal retry policy (waiting as long as the server's `Retry-After` asks); try again later.
+- `source_stale` (exit 2) — the live theme the new draft copies changed meanwhile; run the command
+  again.
+`theme dev` reports each of them in one line and tries again on the next save.
 
 After a draft push the CLI prints the draft it wrote to (`Draft: <handle> "<name>" (new)` or
 `(existing CLI draft, updated)`) and the `blocofy theme publish --instance <handle>` command.
@@ -183,6 +199,65 @@ theme publish ./shop` always publishes `./shop`'s site, whatever directory you r
 - `--instance <handle>` — publish a specific theme. Without it the platform publishes only the
   site's CLI draft; any other theme (a site-state restore draft, a renamed or panel-copied theme) is
   refused with `publish_target_unconfirmed` (exit 2, nothing published) — name it with `--instance`.
+
+### Theme work (new)
+
+A **work** is a private, safe copy of the site's current live theme: you change it, visitors never
+see it, and a person approves its publication in the admin panel (the CLI never publishes a work).
+Work commands use the **v1 API key** (`blocofy login --api-key`, or `BLOCOFY_API_KEY` +
+`BLOCOFY_API_URL`): the work belongs to the key that started it. The dev token alone is refused
+(`LOGIN_REQUIRED`) before any request.
+
+```
+blocofy theme work start [dir] [--intent "<text>"] [--idempotency-key <k>]
+blocofy theme work status <wk_…> [--dir <dir>]
+blocofy theme work resume <wk_…> [--dir <dir>] [--require-fresh]
+blocofy theme work cancel <wk_…> [--dir <dir>]
+blocofy theme work seal <wk_…> [--dir <dir>]
+blocofy theme work request-approval <wk_…> [--dir <dir>] [--open] [--wait [--interval <s>]]
+blocofy theme push [dir] --draft --work <wk_…>
+```
+- `seal` prepares the work for review: its content is frozen and can no longer change. It asks for
+  no approval and publishes nothing. On a platform without this step it says so (`seal_unsupported`,
+  exit 2); `request-approval` prepares the work itself.
+- `request-approval` asks a person to publish the work (an open work is prepared for review first)
+  and prints the **approval URL**. A signed-in site owner, or a team member with the theme permission,
+  approves on that Blocofy page. The URL carries no token: having it is not a permission to publish.
+  `--open` also opens it in your browser (only when it is this platform's approval page). `--wait`
+  polls the read-only publish status until the work is published or the request ends; the CLI never
+  publishes a work. How `--wait` ends:
+
+  | Exit | Code (`--json` envelope) | Meaning |
+  | --- | --- | --- |
+  | 0 | — | Approved and published; the work is live. |
+  | 2 | `approval_stale` | The live site changed after the request; nothing published. Start a new work from the current live site and ask again. |
+  | 2 | `approval_expired` | Nobody decided within 15 minutes; nothing published. Ask again. |
+  | 2 | `approval_declined` | The request was declined; nothing published. |
+  | 2 | `approval_superseded` | The work was reopened for changes; this request is no longer valid. Ask again. |
+  | 2 | `work_cancelled` | The work was cancelled; nothing published. |
+  | 1 | `publish_failed` | The work could not be completed; nothing published. Check `theme work status`. |
+  | 1 | `wait_timeout` | No decision yet; the CLI stopped waiting. The request stays valid until it expires. |
+
+  A refusal before the wait starts (for example `work_state_conflict`) exits as usual (2 for a 4xx,
+  1 for a 5xx); see [Exit codes](#exit-codes).
+- `status` also shows where the publication stands (preparing, ready for review, waiting for
+  approval with its URL, published, needs update).
+- `start` prints the work's handle (`wk_…`) and saves it in `.blocofy/local.json` (git-ignored; the
+  handle alone grants nothing). It sends an `Idempotency-Key` (yours, or a printed `cli-work-<uuid>`):
+  the same key returns the same work, never a second one. When the answer is lost (network, 5xx),
+  the CLI prints the exact command to run again with the same key.
+- `status`, `resume` and `cancel` always take the handle; with none they suggest the project's saved
+  work and stop. `status` and `resume` say whether the site changed since the work started; a changed
+  site is never overwritten. `resume --require-fresh` refuses (`work_stale`) instead.
+- `cancel` reads the work's `state_version` and sends it; the live site is untouched and the work's
+  theme stays in the theme library.
+- `theme push --work <wk_…>` writes into that work's own draft theme (`--work` implies `--draft`; it
+  cannot be combined with `--live` or `--instance`). It needs **both** the dev token and the API key of
+  the same site, and refuses unless the work is open (`work_state_conflict`, nothing written).
+- Refusals print a plain Turkish explanation first, then the `error [code]` line (`--json`: the
+  envelope only): `not_found`, `work_forbidden`, `work_state_conflict`, `work_stale`, `work_sealed`,
+  `work_base_unavailable`, `quota_exceeded`, `capacity_unavailable`, `resource_busy`,
+  `idempotency_key_reuse` (exit 2 for a 4xx, 1 for a 5xx).
 
 ### Status
 
@@ -485,6 +560,47 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
+- **0.15.0** (2026-10-05) — Theme space, theme work and human-approved
+  publishing. Pairs with the platform release that replaces the 5-draft limit with a per-site theme
+  space.
+  - **Capacity refusals in plain words.** A theme write refused by the platform explains why in
+    plain Turkish first, then prints the usual `error [code]` line (`--json`: the envelope only):
+    - `quota_exceeded` (exit 2) is worded by `details.resource`. `theme_bytes`: the site's theme space
+      is full — on any push, a push to an existing draft with `--instance` included. It shows used /
+      allowance from `details`, says to free space by deleting unused draft themes from the theme
+      library (cancelled works' themes included; cancelling an open work also releases its reserved
+      publish space; an archived work's theme still counts), or to contact support, and never suggests a plan upgrade or says "new draft" (theme space is not
+      a plan quota). `theme_drafts` (the old draft count, on sites that have not moved to theme space)
+      is not a plan limit either: it says to remove a draft you no longer need, never to upgrade.
+      Only `storage_mb` keeps the plan message. The envelope carries the server's `details`.
+    - `work_revision_limit` (exit 2; `theme work seal`, or `request-approval` when it prepares the
+      work): a work can be sent for review at most 20 times (`details.limit`); start a new work.
+    - `capacity_unavailable` / `resource_busy` (exit 1, after the usual retries that honour
+      `Retry-After`; the envelope carries `retryAfterSeconds`): a temporary refusal, try again later.
+      A 503 on the write is no longer reported as "outcome unknown" (the platform wrote nothing),
+      unless an earlier attempt of the same push got no answer.
+    - `source_stale` (exit 2): the live theme changed while a new draft was copied; run it again.
+    - `theme dev` reports the same refusals in one line per save.
+  - **`theme pull --draft` is read-only.** Help and README no longer claim it creates the draft. With
+    no CLI draft the platform answers 404 `target_missing`; the CLI tells you to run
+    `blocofy theme push --draft` first (exit 2, nothing written). The command still needs a bound
+    project (kept for platforms from before this change).
+  - **New: theme work.** `theme work start|status|resume|cancel` and `theme push --work <wk_…>`
+    (v1 API key; see "Theme work"). A work is a private copy of the current live theme, named only by
+    its handle; the handle is saved in `.blocofy/local.json`. A plain `theme push` is unchanged and
+    never calls the work API.
+  - **New: human-approved publishing.** `theme work seal` (prepare for review, asks for no approval)
+    and `theme work request-approval [--open] [--wait [--interval <s>]]`: prints the approval URL (no
+    token in it), optionally opens it, and `--wait` polls the status read-only — exit 0 when
+    published, 2 when the request ends without a publication (`approval_stale`, `approval_expired`,
+    `approval_declined`, `approval_superseded`, `work_cancelled`), 1 on `wait_timeout` or
+    `publish_failed` (table under "Theme work"). `theme work status` shows the publish status. The CLI
+    never publishes a work.
+  - **`theme publish` names a work copy's refusal.** Publishing a theme work's copy directly is refused
+    by the platform (`work_not_publishable`, exit 2, nothing published); the CLI now keeps that code
+    (it printed `HTTP_409` before) and says to send the work for review and ask for approval.
+  - Unchanged: retry classes, `draft_target_ambiguous` handling, idempotency keys, target guards and
+    protocol headers.
 - **0.14.0** — Draft commands no longer guess their draft (platform #989).
   - **Behaviour change:** `theme push` (draft), `theme push --diff`, `theme pull --draft` and the
     `theme dev` sync refuse, writing nothing, when the platform answers `draft_target_ambiguous` (or the
