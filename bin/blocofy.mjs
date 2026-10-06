@@ -36,7 +36,7 @@ import {
 import { CLI_CLIENT_ID, LoginError, revokeToken, runBrowserLogin } from "../lib/oauth.mjs";
 import { accessTokenFor } from "../lib/refresh.mjs";
 import { oauthSecretStore, storeLabel, SecretStoreError } from "../lib/secret-store.mjs";
-import { InitError, inspectInitDir, runInit, initApi } from "../lib/init.mjs";
+import { InitError, inspectInitDir, readInitState, runInit, initApi } from "../lib/init.mjs";
 import { printError, printTarget, printWarning, redact, registerSecret, targetData } from "../lib/output.mjs";
 import {
   CONTEXT_NAME_RE,
@@ -1380,6 +1380,64 @@ async function themePull(rest) {
   bindAfterPull(target, dir);
 }
 
+// ── draft-only logins write into their own theme work (ADR-0014 §3.5, P4 follow-up) ───────────────────────
+
+/** Profiles that never write a live or implicit target: their writes go to their own theme work. */
+const DRAFT_ONLY_PROFILES = new Set(["theme-dev", "review", "service-ci"]);
+
+/** The project's saved work: `.blocofy/local.json` (theme work start / init), else `.blocofy/init.json`. */
+function savedWorkOf(binding) {
+  const local = readSavedWork(binding);
+  if (local?.handle && local.theme) return local;
+  let init = null;
+  try {
+    init = readInitState(binding.root);
+  } catch {
+    init = null;
+  }
+  if (init && isWorkHandle(init.work_handle) && String(init.site_id) === String(binding.project.site_id)) {
+    return { handle: init.work_handle, theme: typeof init.work_theme === "string" ? init.work_theme : null };
+  }
+  return local?.handle ? local : null;
+}
+
+/**
+ * Offline (no request): when the context this command will use carries a draft-only profile (a browser login, or a
+ * recorded profile), `{ profile, work }` with the project's saved work (or null); otherwise null — then the command
+ * behaves as before. Any resolution problem returns null and is reported by `prepareTarget` as usual.
+ */
+async function draftOnlyDefaults(dir, flags) {
+  let binding;
+  let resolved;
+  try {
+    binding = findBinding(dir);
+    resolved = await resolveContext({ flagContext: typeof flags.context === "string" ? flags.context : null, envContextName: process.env.BLOCOFY_CONTEXT || null, envCtx: envContext(), getStore: () => loadStore(), binding, isTTY: false, prompt: null });
+  } catch {
+    return null;
+  }
+  const profile = resolved.context?.oauth?.profile ?? resolved.context?.profile ?? null;
+  if (!profile || !DRAFT_ONLY_PROFILES.has(profile.id)) return null;
+  return { profile, work: binding ? savedWorkOf(binding) : null };
+}
+
+function themeWorkRequired(profile, command) {
+  return withLines(
+    new TargetError(
+      "THEME_WORK_REQUIRED",
+      `This login is draft-only (profile ${profile.id}): \`${command}\` writes only into its own theme work, and this project has no saved work. Nothing was sent. Set one up: blocofy init <dir> (a new project) or blocofy theme work start (this project); or name the target: --work <wk_…> / --instance <theme>.`,
+      { profile: profile.id },
+      3,
+    ),
+    [
+      `Bu giriş yalnız taslak üzerinde çalışır ("${profile.label ?? profile.id}"): \`${command}\` yalnız kendi tema çalışmasına yazar ve bu projede kayıtlı bir tema çalışması yok. Hiçbir şey gönderilmedi.`,
+      "  Yeni proje:  blocofy init <dizin>   ·   bu projede yeni çalışma:  blocofy theme work start",
+      "  Ya da hedefi açıkça ver:  --work <wk_…>  /  --instance <tema>",
+    ],
+  );
+}
+
+const savedWorkNote = (work) => `Kayıtlı tema çalışması kullanılıyor: ${work.handle}${work.theme ? ` (tema ${work.theme})` : ""} — başka bir hedef için --work / --instance ver.`;
+
 async function themePush(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, KNOWN.themePush);
   const dir = resolve(positionals[0] ?? process.cwd());
@@ -1396,7 +1454,17 @@ async function themePush(rest) {
   // Theme work: `--work <wk_…>` names the target itself — that work's own draft theme, read from the v1 API (the
   // work belongs to the API key) and written through the dev token as `--draft --instance <work theme>`. Both pairs
   // must resolve to the same site (prepareTarget "both"); the work must be open. Never live.
-  const workHandle = flags.work === undefined ? null : flags.work;
+  // A draft-only login with no explicit target writes into the project's saved work (explicit flags win).
+  let savedWork = null;
+  if (flags.work === undefined && !instanceFlag && !flags.live) {
+    const d = await draftOnlyDefaults(dir, flags);
+    if (d) {
+      if (!d.work) throw themeWorkRequired(d.profile, "theme push");
+      savedWork = d.work.handle;
+      if (!JSON_MODE) console.error(savedWorkNote(d.work));
+    }
+  }
+  const workHandle = flags.work === undefined ? savedWork : flags.work;
   let workTarget = null;
   if (workHandle !== null) {
     if (!isWorkHandle(workHandle)) throw new TargetError("USAGE", "--work needs a work handle (wk_…, from `blocofy theme work start`). Nothing was sent.", {}, 1);
@@ -2491,12 +2559,22 @@ async function themeDev(rest) {
 
   // CF-T2: draft sync mutates the site (remote-mutation, binding required); `--no-sync` only renders (read).
   const noSync = Boolean(flags["no-sync"]);
+  // A draft-only login syncs into the project's saved work's theme unless --instance names another target.
+  let savedInstance = null;
+  if (!noSync && typeof flags.instance !== "string") {
+    const d = await draftOnlyDefaults(themeDir, flags);
+    if (d) {
+      if (!d.work?.theme) throw themeWorkRequired(d.profile, "theme dev");
+      savedInstance = d.work.theme;
+      if (!JSON_MODE) console.error(savedWorkNote(d.work));
+    }
+  }
   const target = await prepareTarget({ command: "theme dev", commandClass: noSync ? "read" : "remote-mutation", dir: themeDir, flags, needs: "dev", mode: noSync ? "read · local preview" : "draft" });
   const creds = target.dev;
   const port = Number(flags.port) || 3030;
   // #989: `--instance <handle>` names the draft to sync into, for a site where the platform refuses to pick one. Draft
   // sync never writes the live theme, so the live theme's handle is refused here.
-  const devInstance = typeof flags.instance === "string" ? flags.instance : null;
+  const devInstance = typeof flags.instance === "string" ? flags.instance : savedInstance;
   if (devInstance && instanceMaybeLive(devInstance, target.identity?.liveThemeId ?? null)) {
     console.error(`✗ ${devInstance} is (or could not be told apart from) the LIVE theme. 'theme dev' syncs to a draft only; pick a draft handle (\`blocofy status\`) or use --no-sync.`);
     process.exit(2);

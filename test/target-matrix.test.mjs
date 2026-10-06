@@ -141,6 +141,9 @@ function fakeSite(key, { id, slug, name }) {
     if (url.pathname === "/api/v1/site-state/publish" && req.method === "POST") {
       return json(res, 200, { ...siteState, status: "published", swapped: true, navigation: [], globals: false });
     }
+    // ADR-0014 P4: a theme work of this site (a draft-only login pushes into its saved work by default).
+    const wk = url.pathname.match(/^\/api\/v1\/theme-work\/(wk_[a-z2-7]{26})$/);
+    if (wk && req.method === "GET") return json(res, 200, { work: { id: wk[1], theme: `t${key}draft`, state: "open", state_version: 1 } });
     const media = url.pathname.match(/^\/api\/v1\/pages\/([^/]+)\/media-uses$/);
     if (media) {
       if (media[1] !== `pg${key}`) return json(res, 404, { error: { code: "not_found", message: "Page not found." } });
@@ -1087,6 +1090,12 @@ test("[31] 1.8 closure matrix: every remote command × {conflicting authorities,
 
 // ── ADR-0014 (wave P4): CLI-login (OAuth) contexts ─────────────────────────────────────────────────────────
 
+const SAVED_WORK_A = `wk_${"a".repeat(26)}`;
+/** The work `init` saved for project A (.blocofy/local.json `theme_work`). */
+function saveWorkA(dir) {
+  writeFileSync(join(dir, ".blocofy", "local.json"), JSON.stringify({ context: "cli-alpha", theme_work: { handle: SAVED_WORK_A, theme: "tAdraft", intent: "blocofy init", site_id: "sA1" } }) + "\n");
+}
+
 /** Seed a CLI-login context (what `blocofy login` saves) for `site` into `home` (file store). */
 function seedCliLogin(home, name, site, key, { expiresAt = Date.now() + 5 * 60_000 } = {}) {
   const dir = join(home, ".blocofy");
@@ -1114,10 +1123,12 @@ test("[32] CLI-login contexts A/B: each reaches only its own site; a login for B
   const projA = tmp("bcf-mx-projA-");
   writeTheme(projA, "A");
   writeBinding(projA, { siteId: "sA1", slug: "alpha", context: "cli-alpha" });
+  saveWorkA(projA);
 
-  // (a) its own site, both identity endpoints verified with the CLI token, then the draft write on A only.
+  // (a) its own site, both identity endpoints verified with the CLI token, then the draft write into the saved work.
   let r = await run(home, ["theme", "push", projA, "--draft", "--json"]);
   assert.equal(r.code, 0, r.stderr);
+  assert.ok(A.state.requests.some((q) => q.method === "GET" && q.url === `/api/v1/theme-work/${SAVED_WORK_A}`), "the saved work is read back");
   assert.ok(A.state.requests.some((q) => q.url === "/api/v1/ping") && A.state.requests.some((q) => q.url === "/api/dev/whoami"));
   assert.ok(A.state.mutations > 0);
   assert.deepEqual(B.state.requests, []);
@@ -1147,6 +1158,7 @@ test("[33] audience: the platform's 401 audience_mismatch stops the command (pla
   const projA = tmp("bcf-mx-projA-");
   writeTheme(projA, "A");
   writeBinding(projA, { siteId: "sA1", slug: "alpha", context: "cli-alpha" });
+  saveWorkA(projA);
   A.state.cliAudience = "mismatch";
   const before = treeHash(projA);
   let r = await run(home, ["theme", "push", projA, "--draft"]);

@@ -37,6 +37,8 @@ function fakeTokenServer({ delayMs = 0 } = {}) {
     if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
     if (state.mode === "unavailable") return json(503, { error: "server_error", error_description: "Yenileme işlenemedi." }, { "retry-after": "2" });
     if (state.mode === "spent") return json(503, { error: "server_error", error_description: "Yenileme tamamlanamadı; bu yenileme anahtarı artık kullanılamaz." });
+    if (state.mode === "reused_code") return json(400, { error: "invalid_grant", error_description: "refresh_token_reused" });
+    if (state.mode === "reused_503") return json(503, { error: "server_error", error_description: "refresh_token_reused" }, { "retry-after": "2" });
     if (state.family === "revoked" || state.spent.has(rt)) {
       state.family = "revoked";
       return json(400, { error: "invalid_grant", error_description: "refresh_token zaten kullanılmış; bağlantı kapatıldı." });
@@ -271,6 +273,22 @@ test("a context marked reauth_required or without a refresh token refuses before
     const home2 = seedHome(as.state.url, { expiresAt: Date.now() - 1000, refresh: null });
     await assert.rejects(withHome(home2, () => accessTokenFor("shop")), (e) => e.code === "REAUTH_REQUIRED");
     assert.equal(as.state.presented.length, 0);
+  } finally {
+    await as.stop();
+  }
+});
+
+test("the platform's explicit spent-refresh signal (error_description refresh_token_reused) → REAUTH_REQUIRED, even with a Retry-After", async () => {
+  const as = await fakeTokenServer().start();
+  try {
+    for (const mode of ["reused_code", "reused_503"]) {
+      const home = seedHome(as.state.url, { expiresAt: Date.now() - 1000 });
+      as.state.mode = mode;
+      const before = as.state.presented.length;
+      await assert.rejects(withHome(home, () => accessTokenFor("shop")), (e) => e.code === "REAUTH_REQUIRED" && e.details.reason === "refresh_token_reused", mode);
+      assert.equal(as.state.presented.length, before + 1, `${mode}: never retried`);
+      assert.equal(readCtx(home).oauth.state, "reauth_required", mode);
+    }
   } finally {
     await as.stop();
   }

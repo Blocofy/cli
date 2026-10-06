@@ -633,9 +633,20 @@ Each retry prints a notice on stderr.
     write. Unattended (CI / no TTY) and SSH runs never open a browser. The pasted dev token stays as
     the advanced path (`login --url <site> --token`, hidden prompt; a token in argv warns).
   - **Secure storage**: OS store by default (Keychain / DPAPI / Secret Service); no store → refused;
-    the 0600 file only with `--insecure-storage` / `BLOCOFY_SECRET_STORE=file`.
+    the 0600 file only with `--insecure-storage` / `BLOCOFY_SECRET_STORE=file`. **Unverified on real
+    machines:** the Windows (DPAPI via PowerShell) and Linux (Secret Service via `secret-tool`) stores
+    are covered only by tests with a stand-in for those programs; macOS Keychain uses the existing,
+    field-tested adapter.
+  - **Draft-only logins default to their saved work**: for a browser login (or any draft-only profile)
+    `theme push` and `theme dev` write into the theme work saved by `init` / `theme work start`
+    (`.blocofy/local.json`, else `.blocofy/init.json`); `--work` / `--instance` still win. Without a
+    saved work they stop with a hint (`THEME_WORK_REQUIRED`, exit 3) before any request.
   - **Refresh single-flight** across processes (lock with pid/hostname/acquired_at, ESRCH or 30 s
-    staleness, 10 s `/token` timeout, never retried); reuse/revocation → `reauth_required`.
+    staleness, 10 s `/token` timeout, never retried); reuse/revocation → `reauth_required`. The
+    platform's explicit `error_description: "refresh_token_reused"` is honoured first; a 503 without
+    `Retry-After` is treated as spent only as a fallback for older platforms.
+  - **`init` preview**: uses the work-level `POST /api/v1/theme-work/{handle}/preview-links` when the
+    platform has it (an older platform's 404/405 falls back to finding the work theme's home page).
   - **`blocofy logout`** reports the platform revocation and the local removal separately (exit 4
     when either is not done); `--context` defaults to the `use` context.
   - **`blocofy init [dir]`** (see above): idempotent theme-work start, secret-free

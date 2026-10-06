@@ -98,6 +98,13 @@ function fakePlatform() {
       if (state.pagesOnWork) for (const x of state.works.values()) pages.push({ id: `p${x.theme}tpl`, slug: "/blog/[slug]", theme_instance: x.theme }, { id: `p${x.theme}`, slug: "/", theme_instance: x.theme });
       return json(200, { pages, total: pages.length, page: 1, limit: 100 });
     }
+    // The work-level preview link (newer platform): defaults to the work theme's home page.
+    const wp = u.pathname.match(/^\/api\/v1\/theme-work\/([^/]+)\/preview-links$/);
+    if (wp && req.method === "POST" && state.workPreview) {
+      if (!state.works.has(wp[1])) return json(404, { error: { code: "not_found", message: "Çalışma bulunamadı." } });
+      state.previewLinks += 1;
+      return json(201, { preview_link: { id: `pl${state.previewLinks}`, url: `https://shop.myblocofy.test/?preview=workCANARY${state.previewLinks}`, expires_at: "2026-10-07T00:00:00Z" } });
+    }
     const p = u.pathname.match(/^\/api\/v1\/themes\/([^/]+)\/preview-links$/);
     if (p && req.method === "POST") {
       const body = JSON.parse(raw || "{}");
@@ -470,5 +477,30 @@ test("bin: the live theme changed meanwhile → not a success, exit 5", async ()
     assert.doesNotMatch(r.stdout, /Taslak hazır/);
   } finally {
     await pf.stop();
+  }
+});
+
+test("a platform with the work-level preview endpoint is preferred (no page scan); an older one (404) falls back to the scan", async () => {
+  const pf = await fakePlatform().start();
+  try {
+    pf.state.workPreview = true;
+    const r = await run(pf, join(tmp(), "site"));
+    assert.equal(r.state, "previewed");
+    assert.match(r.previewUrl, /workCANARY1/);
+    assert.equal(pf.count((x) => x.path === "/api/v1/pages"), 0, "no page scan");
+    assert.equal(pf.count((x) => x.method === "POST" && /\/api\/v1\/themes\//.test(x.path)), 0);
+    assert.equal(pf.count((x) => x.method === "POST" && x.path === `/api/v1/theme-work/${r.work.id}/preview-links`), 1);
+  } finally {
+    await pf.stop();
+  }
+  const old = await fakePlatform().start();
+  try {
+    const r = await run(old, join(tmp(), "site"));
+    assert.equal(r.state, "previewed");
+    assert.match(r.previewUrl, /signedCANARY1/);
+    assert.equal(old.count((x) => x.method === "POST" && /\/preview-links$/.test(x.path) && x.path.startsWith("/api/v1/theme-work/")), 1, "probed once");
+    assert.equal(old.count((x) => x.path === "/api/v1/pages"), 1, "then the scan");
+  } finally {
+    await old.stop();
   }
 });
