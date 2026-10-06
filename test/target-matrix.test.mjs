@@ -19,10 +19,10 @@ const BIN = fileURLToPath(new URL("../bin/blocofy.mjs", import.meta.url));
 const ORIGIN = "https://app.blocofy.test";
 
 const SECRETS = {
-  A: { token: "bcf_alphaDevToken_0123456789abcdef", apiKey: "blcf_live_alphaApiKey_0123456789abcdef" },
-  B: { token: "bcf_betaDevToken_0123456789abcdefgh", apiKey: "blcf_live_betaApiKey_0123456789abcdefgh" },
+  A: { token: "bcf_alphaDevToken_0123456789abcdef", apiKey: "blcf_live_alphaApiKey_0123456789abcdef", cli: "blcf_ct_alphaCliAccess_0123456789.sig", refresh: "blcf_rt_alphaCliRefresh_0123456789" },
+  B: { token: "bcf_betaDevToken_0123456789abcdefgh", apiKey: "blcf_live_betaApiKey_0123456789abcdefgh", cli: "blcf_ct_betaCliAccess_0123456789ab.sig", refresh: "blcf_rt_betaCliRefresh_0123456789ab" },
 };
-const ALL_SECRETS = [SECRETS.A.token, SECRETS.A.apiKey, SECRETS.B.token, SECRETS.B.apiKey];
+const ALL_SECRETS = [SECRETS.A.token, SECRETS.A.apiKey, SECRETS.B.token, SECRETS.B.apiKey, SECRETS.A.cli, SECRETS.A.refresh, SECRETS.B.cli, SECRETS.B.refresh];
 
 /** Every stdout/stderr captured by this file — scanned for secrets by scenario 18. */
 const OUTPUTS = [];
@@ -39,7 +39,7 @@ const pageV2 = (label) => JSON.stringify({ format_version: 2, slug: "/", locale:
 
 function fakeSite(key, { id, slug, name }) {
   const s = SECRETS[key];
-  const state = { requests: [], mutations: 0, whoami: "ok", ping: "ok", platformOrigin: ORIGIN, url: null, themeFiles: null, identitySite: null, whoamiDelayMs: 0, siteApplied: false };
+  const state = { requests: [], mutations: 0, whoami: "ok", ping: "ok", platformOrigin: ORIGIN, url: null, themeFiles: null, identitySite: null, whoamiDelayMs: 0, siteApplied: false, cliAudience: "ok", tokenCalls: 0, revokes: [], revoke: "ok" };
   const json = (res, status, body, headers = {}) => {
     res.writeHead(status, { "content-type": "application/json", ...headers });
     res.end(typeof body === "string" ? body : JSON.stringify(body));
@@ -52,7 +52,24 @@ function fakeSite(key, { id, slug, name }) {
     if (req.method !== "GET" || url.searchParams.get("draft") === "1" || url.pathname === "/api/dev/session") state.mutations += 1;
     const isV1 = url.pathname.startsWith("/api/v1/");
     const auth = req.headers.authorization;
-    if (auth !== `Bearer ${isV1 ? s.apiKey : s.token}`) return json(res, 401, isV1 ? { error: { code: "unauthorized", message: "bad key" } } : { error: "Unknown token." });
+    // ADR-0014 (P4): the platform's OAuth endpoints for a CLI-login context (no bearer; counted, never a site mutation).
+    if (url.pathname === "/token" && req.method === "POST") {
+      state.mutations -= 1;
+      state.tokenCalls += 1;
+      const f = new URLSearchParams(raw);
+      if (f.get("refresh_token") !== s.refresh) return json(res, 400, { error: "invalid_grant" });
+      return json(res, 200, { access_token: s.cli, token_type: "Bearer", expires_in: 600, refresh_token: s.refresh });
+    }
+    if (url.pathname === "/revoke" && req.method === "POST") {
+      state.mutations -= 1;
+      state.revokes.push(Object.fromEntries(new URLSearchParams(raw)));
+      if (state.revoke === "down") return json(res, 503, { error: "server_error" });
+      return json(res, 200, {});
+    }
+    // A CLI login's token (`blcf_ct_`) is accepted on the v1 REST API and on /api/dev (ADR §5.3).
+    const cli = auth === `Bearer ${s.cli}`;
+    if (cli && isV1 && state.cliAudience === "mismatch") return json(res, 401, { error: { code: "audience_mismatch", message: "Bu kimlik bilgisi bu uç için değil." } });
+    if (!cli && auth !== `Bearer ${isV1 ? s.apiKey : s.token}`) return json(res, 401, isV1 ? { error: { code: "unauthorized", message: "bad key" } } : { error: "Unknown token." });
     // `identitySite` simulates a token that now resolves to another site (identity endpoints only).
     const site = { id, slug, name, domain: `${slug}.myblocofy.test` };
     const identity = state.identitySite ?? site;
@@ -146,6 +163,10 @@ function fakeSite(key, { id, slug, name }) {
       state.identitySite = null;
       state.whoamiDelayMs = 0;
       state.siteApplied = false;
+      state.cliAudience = "ok";
+      state.tokenCalls = 0;
+      state.revokes = [];
+      state.revoke = "ok";
     },
     async start() {
       server.listen(0, "127.0.0.1");
@@ -1064,6 +1085,130 @@ test("[31] 1.8 closure matrix: every remote command × {conflicting authorities,
   assert.ok(cells >= 24 * 8, `only ${cells} cells ran`);
 });
 
+// ── ADR-0014 (wave P4): CLI-login (OAuth) contexts ─────────────────────────────────────────────────────────
+
+/** Seed a CLI-login context (what `blocofy login` saves) for `site` into `home` (file store). */
+function seedCliLogin(home, name, site, key, { expiresAt = Date.now() + 5 * 60_000 } = {}) {
+  const dir = join(home, ".blocofy");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const credPath = join(dir, "credentials.json");
+  const secPath = join(dir, "secrets.json");
+  const store = existsSync(credPath) ? JSON.parse(readFileSync(credPath, "utf8")) : { schema_version: 2, current_context: null, contexts: {} };
+  const secrets = existsSync(secPath) ? JSON.parse(readFileSync(secPath, "utf8")) : {};
+  store.contexts[name] = {
+    platform_origin: ORIGIN,
+    site: { id: key === "A" ? "sA1" : "sB2", slug: key === "A" ? "alpha" : "beta", name: key === "A" ? "Alpha Bakery" : "Beta Metal", domain: null },
+    oauth: { url: site.url, issuer: site.url, client_id: "blocofy-cli", token_endpoint: `${site.url}/token`, revocation_endpoint: `${site.url}/revoke`, dev_url: site.url, profile: { id: "theme-dev", version: 1, label: "Tema geliştirme" }, secret: { store: "file" } },
+    verified_at: null,
+  };
+  secrets[name] = { oauth_tokens: JSON.stringify({ access_token: SECRETS[key].cli, refresh_token: SECRETS[key].refresh, expires_at: expiresAt }) };
+  writeFileSync(credPath, JSON.stringify(store, null, 2) + "\n", { mode: 0o600 });
+  writeFileSync(secPath, JSON.stringify(secrets, null, 2) + "\n", { mode: 0o600 });
+}
+
+test("[32] CLI-login contexts A/B: each reaches only its own site; a login for B on project A is refused offline; A's token with B's theme handle reaches only A", async () => {
+  resetSites();
+  const home = tmp("bcf-mx-home-");
+  seedCliLogin(home, "cli-alpha", A, "A");
+  seedCliLogin(home, "cli-beta", B, "B");
+  const projA = tmp("bcf-mx-projA-");
+  writeTheme(projA, "A");
+  writeBinding(projA, { siteId: "sA1", slug: "alpha", context: "cli-alpha" });
+
+  // (a) its own site, both identity endpoints verified with the CLI token, then the draft write on A only.
+  let r = await run(home, ["theme", "push", projA, "--draft", "--json"]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(A.state.requests.some((q) => q.url === "/api/v1/ping") && A.state.requests.some((q) => q.url === "/api/dev/whoami"));
+  assert.ok(A.state.mutations > 0);
+  assert.deepEqual(B.state.requests, []);
+  noSecrets(r);
+
+  // (b) the login for B on project A → refused before any request.
+  resetSites();
+  const before = treeHash(projA);
+  r = await run(home, ["theme", "push", projA, "--draft", "--context", "cli-beta", "--json"]);
+  assertRefused(r, "TARGET_SITE_MISMATCH", { hashes: [[projA, before]] });
+
+  // (c) A's login naming B's theme handle: only A is asked, A answers 404 → exit 2, nothing written.
+  resetSites();
+  const empty = join(tmp("bcf-mx-pull-"), "new");
+  r = await run(home, ["theme", "pull", empty, "--instance", "tBdraft", "--context", "cli-alpha", "--json"]);
+  assert.equal(r.code, 2, r.stderr);
+  assert.deepEqual(B.state.requests, []);
+  assert.equal(A.state.mutations, 0);
+  assert.equal(existsSync(empty), false);
+  noSecrets(r);
+});
+
+test("[33] audience: the platform's 401 audience_mismatch stops the command (plain words, no retry, zero mutations); an MCP token is never taken as an API key", async () => {
+  resetSites();
+  const home = tmp("bcf-mx-home-");
+  seedCliLogin(home, "cli-alpha", A, "A");
+  const projA = tmp("bcf-mx-projA-");
+  writeTheme(projA, "A");
+  writeBinding(projA, { siteId: "sA1", slug: "alpha", context: "cli-alpha" });
+  A.state.cliAudience = "mismatch";
+  const before = treeHash(projA);
+  let r = await run(home, ["theme", "push", projA, "--draft"]);
+  assert.equal(r.code, 3, r.stderr);
+  assert.match(r.stderr, /bu uç için değil/);
+  assert.equal(A.state.mutations, 0);
+  assert.equal(A.state.requests.filter((q) => q.url === "/api/v1/ping").length, 1, "a 401 is never retried");
+  assert.equal(treeHash(projA), before);
+
+  // An MCP connector token (blcf_at_) pasted as an API key: refused locally, nothing sent.
+  resetSites();
+  r = await run(home, ["login", "--api-key", "--json"], { env: { BLOCOFY_API_KEY: "blcf_at_mcpConnectorToken_0123456789", BLOCOFY_API_URL: A.url } });
+  assert.equal(r.code, 1);
+  assert.deepEqual(A.state.requests, []);
+  r = await run(home, ["status", "--json"], { env: { BLOCOFY_API_KEY: "blcf_at_mcpConnectorToken_0123456789", BLOCOFY_API_URL: A.url } });
+  assert.equal(jsonError(r).code, "TARGET_CREDENTIAL_WRONG_TYPE");
+  assert.deepEqual(A.state.requests, []);
+});
+
+test("[34] an expired CLI-login token is renewed once (single /token request), then the command proceeds on its own site", async () => {
+  resetSites();
+  const home = tmp("bcf-mx-home-");
+  seedCliLogin(home, "cli-alpha", A, "A", { expiresAt: Date.now() - 1000 });
+  const r = await run(home, ["target", "--context", "cli-alpha", "--json"]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(A.state.tokenCalls, 1);
+  const stored = JSON.parse(JSON.parse(readFileSync(join(home, ".blocofy", "secrets.json"), "utf8"))["cli-alpha"].oauth_tokens);
+  assert.ok(stored.expires_at > Date.now() + 500_000);
+  const again = await run(home, ["target", "--context", "cli-alpha", "--json"]);
+  assert.equal(again.code, 0);
+  assert.equal(A.state.tokenCalls, 1, "a fresh token is not renewed again");
+  assert.deepEqual(B.state.requests, []);
+  noSecrets(r);
+});
+
+test("[35] logout honesty: revoked → exit 0; platform unreachable → local cleared, server NOT revoked, exit 4; a pasted pair → not_applicable", async () => {
+  resetSites();
+  const home = tmp("bcf-mx-home-");
+  seedCliLogin(home, "cli-alpha", A, "A");
+  seedCliLogin(home, "cli-beta", B, "B");
+  let r = await run(home, ["logout", "--context", "cli-alpha", "--json"]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout).logout, { context: "cli-alpha", local: "cleared", server: "revoked", server_status: 200 });
+  assert.deepEqual(A.state.revokes, [{ token: SECRETS.A.refresh, client_id: "blocofy-cli" }]);
+
+  B.state.revoke = "down";
+  r = await run(home, ["logout", "--context", "cli-beta"]);
+  assert.equal(r.code, 4);
+  assert.match(r.stdout, /Yerel giriş silindi/);
+  assert.match(r.stdout, /İPTAL EDİLMEDİ.*\/settings\/connections/);
+  const store = JSON.parse(readFileSync(join(home, ".blocofy", "credentials.json"), "utf8"));
+  assert.deepEqual(Object.keys(store.contexts), []);
+  assert.deepEqual(JSON.parse(readFileSync(join(home, ".blocofy", "secrets.json"), "utf8")), {});
+  noSecrets(r);
+
+  const w = await world();
+  r = await run(w.home, ["logout", "--context", "alpha", "--json"]);
+  assert.equal(r.code, 0);
+  assert.equal(JSON.parse(r.stdout).logout.server, "not_applicable");
+  assert.deepEqual(A.state.requests, []);
+});
+
 test("[18] secret leakage scan: every captured stdout/stderr and every file written outside the secret stores", () => {
   assert.ok(OUTPUTS.length > 50, `only ${OUTPUTS.length} outputs captured`);
   for (const o of OUTPUTS) {
@@ -1085,7 +1230,7 @@ test("[18] secret leakage scan: every captured stdout/stderr and every file writ
       if (name === "credentials.json" && !content.startsWith('{\n  "schema_version": 2')) continue;
       scanned += 1;
       for (const secret of ALL_SECRETS) assert.ok(!content.includes(secret), `secret found in ${p}`);
-      if (name === "project.json" || name === "local.json") assert.doesNotMatch(content, /bcf_|blcf_live_/);
+      if (name === "project.json" || name === "local.json") assert.doesNotMatch(content, /bcf_|blcf_live_|blcf_ct_|blcf_rt_/);
     }
   };
   for (const d of DIRS) if (existsSync(d)) walk(d);

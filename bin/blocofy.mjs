@@ -29,7 +29,14 @@ import {
   saveStore,
   withStoreLock,
   writeSecret,
+  credentialRefusal,
+  readOAuthTokens,
+  writeOAuthTokens,
 } from "../lib/credentials.mjs";
+import { CLI_CLIENT_ID, LoginError, revokeToken, runBrowserLogin } from "../lib/oauth.mjs";
+import { accessTokenFor } from "../lib/refresh.mjs";
+import { oauthSecretStore, storeLabel, SecretStoreError } from "../lib/secret-store.mjs";
+import { InitError, inspectInitDir, runInit, initApi } from "../lib/init.mjs";
 import { printError, printTarget, printWarning, redact, registerSecret, targetData } from "../lib/output.mjs";
 import {
   CONTEXT_NAME_RE,
@@ -87,7 +94,8 @@ const args = process.argv.slice(2);
 // 0.8.0: `login --api-key` DEĞERSİZ bayraktır (parser'da boolean) — sır gizli prompt'tan ya da
 // BLOCOFY_API_KEY'den gelir, argv'ye asla girmez. `pages media-uses` / `media-decide` v1 API komutlarıdır.
 const KNOWN = {
-  login: ["url", "token", "api-key", "api-url", "keychain"],
+  login: ["url", "token", "api-key", "api-url", "keychain", "site", "insecure-storage", "no-browser"],
+  init: ["site", "api-url", "insecure-storage", "no-browser"],
   pages: ["decisions", "expected-revision-id", "expected-version", "json", "dir"],
   themePull: ["draft", "instance"],
   themePush: ["diff", "draft", "instance", "name", "live", "yes", "confirm", "dry-run", "validate", "idempotency-key", "prune", "work"],
@@ -159,9 +167,23 @@ function printHelp() {
 Develop your theme locally against live data, preview it three ways, and publish.
 
 Usage
-  blocofy login [--context <name>] [--url <url>] [--token <bcf_…>] [--keychain]
-      Verify a dev token against its site (GET /api/dev/whoami) and save it as a named
-      context (default name: the site's slug). Nothing is saved if verification fails.
+  blocofy login [--context <name>] [--site <handle|slug>] [--api-url <url>] [--no-browser]
+                [--insecure-storage]
+      Log in with your browser (PKCE, loopback 127.0.0.1/[::1] callback): pick the site and
+      approve. The login is draft-only ("Tema geliştirme"): it can never change the live site or
+      publish. "Connected" is printed only after GET /api/v1/ping confirms site + profile. The
+      tokens go to the OS secure store (macOS Keychain, Windows DPAPI file, Linux Secret Service);
+      no store → refused, never a silent plain file. --insecure-storage (or
+      BLOCOFY_SECRET_STORE=file) chooses ~/.blocofy/secrets.json (0600) explicitly.
+      Needs a terminal: CI / SSH never opens a browser (use env credentials or the options below).
+        --api-url <url>  platform (default https://app.blocofy.com)
+        --no-browser     do not open the browser; open the printed URL yourself
+        --site           refuse (and revoke) the login unless this site was approved
+
+  blocofy login --url <url> --token [--context <name>] [--keychain]       (advanced)
+      Verify a pasted dev token (bcf_… / bcf2_…) against its site (GET /api/dev/whoami) and save
+      it as a named context (default name: the site's slug). The token is read from a hidden
+      prompt; --token <value> works but warns (argv is visible in ps and shell history).
       Get a token from the admin panel → Settings → Theme CLI tokens.
         --keychain   keep the secret in the macOS keychain (or BLOCOFY_SECRET_STORE=keychain);
                      default: ~/.blocofy/secrets.json (0600)
@@ -176,7 +198,18 @@ Usage
   blocofy contexts [--json]          list saved contexts (never prints secrets)
   blocofy use <name>                 default context for status / target / pages check outside a
                                      project (never used by any other command)
-  blocofy logout --context <name>    remove a context and its secrets
+  blocofy logout [--context <name>]  remove a context and its secrets; a browser login is also
+                                     revoked on the platform (RFC 7009). Both results are printed;
+                                     exit 4 if the local copy could not be removed or the platform
+                                     login was NOT revoked (then cut it in the panel).
+
+  blocofy init [dir] [--site <handle|slug>] [--context <name>]
+      Set up a new project: (browser login if needed) → a theme work of its own (idempotent:
+      .blocofy/init.json keeps its key; re-run continues, never a second work) → the work's theme
+      files → .blocofy/project.json → a preview link → the live theme read back unchanged.
+      Refuses a non-empty directory that is not a project and one bound to another site
+      (exit 3, nothing written). Non-interactive runs need --site and a saved/env credential.
+      Exit 5: the live theme changed meanwhile (init never writes it; not reported as success).
   blocofy link [dir] --context <name> [--adopt]
       Bind a project directory to the context's (verified) site: writes .blocofy/project.json
       (commit it), .blocofy/local.json (your context; git-ignored) and .blocofy/.gitignore.
@@ -435,7 +468,8 @@ Usage
   blocofy --help
 
 Examples
-  blocofy login --url https://store.myblocofy.com --token bcf_xxxxxxxx     (context "store")
+  blocofy login && blocofy init my-site                                     (browser login, new project)
+  blocofy login --url https://store.myblocofy.com --token                   (pasted dev token, hidden)
   blocofy theme pull store-theme --context store && cd store-theme && blocofy theme dev
   blocofy link ~/code/store-theme --context store     (an existing checkout)
   blocofy theme push && blocofy theme publish          (inside the bound project)
@@ -468,16 +502,19 @@ Targets (which site a command talks to)
   (one warning; run \`blocofy link --adopt\` to record it). A server that reports no origin cannot
   serve a binding that records one (TARGET_UNVERIFIED).
   Exit codes (every command): 0 ok · 1 usage/network/5xx/local check · 2 server refusal (HTTP 4xx)
-  · 3 target/binding refusal · 4 'site apply' only: not finished within its bounded pass count —
-  every step already applied is safe, re-run the same command to resume.
+  · 3 target/binding refusal · 4 'site apply': not finished within its bounded pass count —
+  every step already applied is safe, re-run the same command to resume; 'logout': the local
+  login was not removed or the platform login was NOT revoked · 5 'init': the live theme changed
+  meanwhile (init never writes it; not reported as a success).
   --json: every failure prints {"error":{"code","message","details"}} as the LAST stderr line; the
   target block ({"target":…}) and any warning lines are printed on stderr before it.
   Retries: network errors and HTTP 429/502/503/504 are retried up to 3 times (Retry-After honoured,
   max 30s per wait; else 0.3s/0.9s/2s), resending the identical request (pages push carries one
   x-idempotency-key per push). HTTP 500 is never retried. Each retry prints a notice on stderr.
 
-Auth: ~/.blocofy/credentials.json (contexts, no secrets) + ~/.blocofy/secrets.json (0600) or the
-macOS keychain. A pre-0.10 credentials file is migrated on first use (backup:
+Auth: ~/.blocofy/credentials.json (contexts, no secrets). A browser login's tokens live in the OS
+secure store (macOS Keychain, Windows DPAPI file, Linux Secret Service; the 0600 file only when
+chosen); a pasted token/key in ~/.blocofy/secrets.json (0600) or the macOS keychain. A pre-0.10 credentials file is migrated on first use (backup:
 ~/.blocofy/credentials.v1.bak.json — copy it back to roll back).
 The CLI does not build assets — bring your own (npm/Vite/Tailwind); the platform serves
 plain Liquid + static assets.`);
@@ -509,6 +546,7 @@ const retry = { onRetry };
  */
 function exitCodeFor(error) {
   if (error instanceof TargetError || error instanceof CredentialsError) return error.exitCode ?? 1;
+  if (error instanceof LoginError || error instanceof InitError || error?.name === "LoopbackError") return error.exitCode ?? 1;
   if (error instanceof CliRefusal) return 2;
   const status = Number(error?.status);
   return status >= 400 && status < 500 ? 2 : 1;
@@ -530,8 +568,25 @@ function envelopeFor(error) {
   return { code, message: error?.message || String(error), details };
 }
 
+/** The context the current command resolved (for the re-login hint of a credential refusal). */
+let activeContext = null;
+
+/**
+ * ADR-0014 (wave P4) — the plain Turkish lines of a credential refusal (the profile gate's codes and the CLI's own
+ * REAUTH_REQUIRED), printed before the usual `error [code]` line. Never under --json (the envelope carries the code).
+ */
+function printRefusalLines(error) {
+  if (JSON_MODE) return;
+  if (Array.isArray(error?.lines)) for (const line of error.lines) console.error(redact(line));
+  const code = error instanceof CliRefusal ? error.error?.code : error?.details?.server_code ?? error?.code;
+  const details = error instanceof CliRefusal ? error.error?.details : error?.serverDetails ?? error?.body?.details ?? error?.details;
+  const refusal = credentialRefusal(code, details ?? {}, { context: error?.details?.context ?? activeContext });
+  if (refusal) for (const line of refusal.lines) console.error(redact(line));
+}
+
 function failAndExit(error) {
   const code = exitCodeFor(error);
+  printRefusalLines(error);
   if ((error instanceof PagesCliError || error instanceof SiteStateFsError) && !JSON_MODE) {
     if (error.diagnostics?.length) reportPageDiagnostics(error.diagnostics);
   }
@@ -643,6 +698,9 @@ function saveVerifiedPair(name, kind, args) {
 function saveVerifiedPairLocked(name, kind, { url, secret, identity, storeName }) {
   const store = loadStore();
   const existing = store.contexts[name];
+  if (existing?.oauth) {
+    throw new TargetError("TARGET_CONTEXT_OCCUPIED", `Context "${name}" is a browser login (blocofy login); a pasted ${kind === "dev" ? "dev token" : "API key"} gets a context of its own. Nothing was saved. Use --context <another-name>.`, { context: name });
+  }
   writeSecret(name, kind, storeName, secret);
   if (existing?.[kind] && existing[kind].secret.store !== storeName) {
     try {
@@ -684,7 +742,7 @@ async function loginApiKey(flags, positionals) {
 
   let apiKey = null;
   if (process.stdin.isTTY) {
-    apiKey = await promptSecret("API key (blcf_live_…, hidden): ");
+    apiKey = await promptSecret("API key (blcf_live_… / blcf_k2_…, hidden): ");
     if (apiKey === null) {
       console.error("Cancelled. Nothing was written.");
       process.exit(1);
@@ -697,7 +755,7 @@ async function loginApiKey(flags, positionals) {
     process.exit(1);
   }
   if (!isValidApiKey(apiKey)) {
-    console.error("Invalid API key — a v1 key starts with blcf_live_ (a bcf_ dev token is not accepted for the v1 API). Nothing was written.");
+    console.error("Invalid API key — a v1 key starts with blcf_live_ or blcf_k2_ (a bcf_ dev token is not accepted for the v1 API). Nothing was written.");
     process.exit(1);
   }
   registerSecret(apiKey);
@@ -708,22 +766,198 @@ async function loginApiKey(flags, positionals) {
   await assertPairFitsContext(name, loadStore().contexts[name], identity, "dev");
   saveVerifiedPair(name, "api", { url: apiUrl, secret: apiKey, identity, storeName });
   console.log(`✓ API key saved to context "${name}" → ${credentialsPath()} (API: ${apiUrl})`);
+  console.log(`  Secret store: ${storeLabel(storeName)}`);
   console.log(`  Site: ${siteLabel(identity.site) || identity.site.id}`);
   console.log("Next: blocofy pages media-uses <page-handle>");
 }
 
+// ── browser login (ADR-0014 §5, wave P4) ──────────────────────────────────────────────────────────────────
+
+/** Where the owner manages connections (the "Connections and keys" hub). */
+const CONNECTIONS_PATH = "/settings/connections";
+
+/** A person at a terminal: stdin is a TTY and CI is not set. Unattended runs never open a browser. */
+const isUnattended = () => !process.stdin.isTTY || Boolean(process.env.CI);
+const isSshSession = () => Boolean(process.env.SSH_CONNECTION || process.env.SSH_CLIENT || process.env.SSH_TTY);
+
+const withLines = (error, lines) => Object.assign(error, { lines });
+
+function assertBrowserLoginPossible() {
+  if (isUnattended()) {
+    throw withLines(
+      new LoginError("LOGIN_UNATTENDED", "Browser login needs an interactive terminal (no TTY, or CI is set): no browser was opened and nothing was sent. In CI use BLOCOFY_API_KEY + BLOCOFY_API_URL (or BLOCOFY_URL + BLOCOFY_TOKEN); advanced: blocofy login --token / blocofy login --api-key."),
+      [
+        "Tarayıcıyla giriş bir terminal ister; bu oturum etkileşimsiz (CI ya da yönlendirilmiş girdi). Tarayıcı açılmadı, hiçbir şey gönderilmedi.",
+        "  CI/otomasyon: BLOCOFY_API_KEY + BLOCOFY_API_URL (ya da BLOCOFY_URL + BLOCOFY_TOKEN) ortam değişkenleri.",
+        "  Gelişmiş: yapıştırılan token ile giriş:  blocofy login --token   ya da   blocofy login --api-key",
+      ],
+    );
+  }
+  if (isSshSession()) {
+    throw withLines(
+      new LoginError("LOGIN_NO_BROWSER", "Browser login is not supported over SSH (the browser cannot reach this machine's 127.0.0.1 callback). Nothing was sent. Advanced: blocofy login --token / blocofy login --api-key."),
+      [
+        "Uzak (SSH) oturumda tarayıcıyla giriş desteklenmiyor: tarayıcı bu makinenin 127.0.0.1 adresine dönemez. Hiçbir şey gönderilmedi.",
+        "  Gelişmiş: yapıştırılan token ile giriş:  blocofy login --token   ya da   blocofy login --api-key",
+      ],
+    );
+  }
+}
+
+function loginOrigin(flags) {
+  const origin = normalizeUrl(typeof flags["api-url"] === "string" ? flags["api-url"] : DEFAULT_API_URL);
+  if (!isValidUrl(origin)) throw new LoginError("USAGE", "Invalid --api-url — must be a valid http(s):// URL. Nothing was written.");
+  return origin;
+}
+
+/** `--site <handle|slug>` names the approved site. */
+const siteMatches = (site, arg) => String(site.id) === String(arg) || (site.slug != null && site.slug === arg);
+
+/** A browser login owns its context: never one that holds pasted secrets, never one recorded for another site. */
+function assertContextFreeForLogin(name, identity) {
+  const ctx = loadStore().contexts[name];
+  if (!ctx) return;
+  if (ctx.dev || ctx.api) {
+    throw new TargetError("TARGET_CONTEXT_OCCUPIED", `Context "${name}" holds a pasted dev token / API key; a browser login gets a context of its own. Nothing was saved. Use --context <another-name> (or \`blocofy logout --context ${name}\` first).`, { context: name });
+  }
+  if (identity && ctx.site) {
+    const o = compareOrigin(ctx.platform_origin, identity.platformOrigin);
+    if (String(ctx.site.id) !== String(identity.site.id) || o === "mismatch" || o === "unproven") {
+      throw new TargetError("TARGET_SITE_MISMATCH", `Context "${name}" is for site ${ctx.site.slug ?? ctx.site.id}, but you approved ${identity.site.slug ?? identity.site.id}. Nothing was saved. Use another --context name.`, { context: name, context_site_id: ctx.site.id, new_site_id: identity.site.id });
+    }
+  }
+}
+
+/** Save a verified browser login (token set first, then the context). Returns the previous token set, if any. */
+function saveOAuthContext(name, storeName, { tokens, identity, metadata }, origin) {
+  return withStoreLock(() => {
+    const store = loadStore();
+    const existing = store.contexts[name];
+    let previous = null;
+    if (existing?.oauth) {
+      try {
+        const t = readOAuthTokens(name, existing);
+        if (t) previous = { token: t.refresh_token ?? t.access_token, endpoint: existing.oauth.revocation_endpoint ?? null };
+      } catch {
+        previous = null;
+      }
+    }
+    writeOAuthTokens(name, storeName, tokens);
+    if (existing?.oauth && existing.oauth.secret.store !== storeName) {
+      try {
+        removeSecrets(name, { oauth: existing.oauth });
+      } catch {
+        /* the old copy stays in the other store; the context now points at the new one */
+      }
+    }
+    store.contexts[name] = {
+      platform_origin: identity.platformOrigin ?? origin,
+      site: { id: identity.site.id, slug: identity.site.slug ?? null, name: identity.site.name ?? null, domain: identity.site.domain ?? null },
+      oauth: {
+        url: origin,
+        issuer: metadata.issuer,
+        client_id: CLI_CLIENT_ID,
+        token_endpoint: metadata.token_endpoint,
+        revocation_endpoint: metadata.revocation_endpoint ?? null,
+        dev_url: identity.devUrl ?? null,
+        profile: identity.profile,
+        secret: { store: storeName },
+        logged_in_at: new Date().toISOString(),
+      },
+      verified_at: new Date().toISOString(),
+    };
+    if (!store.current_context) store.current_context = name;
+    saveStore(store);
+    return previous;
+  });
+}
+
+/**
+ * The browser login and its save (ADR §5.2): used by `login` and by `init` when it has no credential. Success is the
+ * canonical identity probe, then the save. Returns `{ name, identity, storeName, explicitStore, origin }`.
+ */
+async function browserLoginAndSave({ flags, contextName = null, siteArg = null }) {
+  assertBrowserLoginPossible();
+  const origin = loginOrigin(flags);
+  let store;
+  try {
+    store = oauthSecretStore({ insecure: Boolean(flags["insecure-storage"]) });
+  } catch (error) {
+    throw error instanceof SecretStoreError ? new CredentialsError(error.code, error.message) : error;
+  }
+  if (contextName) {
+    contextNameOrExit(contextName);
+    assertContextFreeForLogin(contextName, null);
+  }
+  if (!JSON_MODE) console.error(`Blocofy girişi tarayıcıda açılıyor (${origin})…`);
+  const result = await runBrowserLogin({
+    origin,
+    openBrowser: flags["no-browser"] ? async () => {} : async (url) => openUrl(url),
+    print: (url) => {
+      if (JSON_MODE) return;
+      console.error("Tarayıcı açılmazsa bu adresi aç (adres sır içermez):");
+      console.error(`  ${url}`);
+      console.error("Tarayıcıda siteni seçip onayla; en çok 5 dakika bekliyorum…");
+    },
+    onRetry,
+  });
+  registerSecret(result.tokens.access_token);
+  registerSecret(result.tokens.refresh_token);
+  const { identity } = result;
+  if (siteArg && !siteMatches(identity.site, siteArg)) {
+    await result.abandon(new LoginError("LOGIN_SITE_MISMATCH", `You approved ${identity.site.slug ?? identity.site.id} in the browser, but --site asks for ${siteArg}. The new login was revoked; nothing was saved.`, { site: identity.site.id, requested: siteArg }, 3));
+  }
+  const name = contextName ?? identity.site.slug ?? "";
+  try {
+    contextNameOrExit(name);
+    assertContextFreeForLogin(name, identity);
+  } catch (error) {
+    await result.abandon(error);
+  }
+  const previous = saveOAuthContext(name, store.name, result, origin);
+  // A re-login replaces the context's previous login: close that one too (best effort; the hub lists any survivor).
+  if (previous?.token && previous.endpoint) await revokeToken({ endpoint: previous.endpoint, token: previous.token });
+  return { name, identity, storeName: store.name, explicitStore: store.explicit, origin };
+}
+
+async function browserLogin(flags, positionals) {
+  if (positionals.length > 0) throw new TargetError("USAGE", "Usage: blocofy login [--context <name>] [--site <handle|slug>] [--api-url <url>] [--no-browser] [--insecure-storage]", {}, 1);
+  const siteArg = typeof flags.site === "string" ? flags.site : null;
+  const { name, identity, storeName, explicitStore, origin } = await browserLoginAndSave({ flags, contextName: typeof flags.context === "string" ? flags.context : null, siteArg });
+  if (explicitStore) printWarning({ code: "SECRET_STORE_PLAINTEXT", message: `The login is kept in ~/.blocofy/secrets.json (0600) because you chose it (--insecure-storage / BLOCOFY_SECRET_STORE=file), not in the OS secure store.` }, { json: JSON_MODE });
+  const p = identity.profile;
+  if (JSON_MODE) {
+    console.log(JSON.stringify({ login: { context: name, site: identity.site, platform_origin: identity.platformOrigin, profile: p, audience: identity.audience, store: storeName, policy_version: identity.policyVersion } }, null, 2));
+    return;
+  }
+  console.log(`✓ Bağlandı: ${siteLabel(identity.site) || identity.site.id} — context "${name}"`);
+  console.log(`  Profil: ${p.label ?? p.id} (${p.id}@${p.version ?? "?"})${p.id === "theme-dev" ? " — taslak üzerinde çalışır; canlı siteni değiştiremez, yayınlayamaz." : ""}`);
+  console.log(`  Giriş bilgisi: ${storeLabel(storeName)}`);
+  if (!identity.devUrl) console.log("  Not: sitenin henüz bir alan adı yok; tema dosyası komutları (theme dev/pull/push) şimdilik çalışmaz.");
+  console.log(`Sonraki adım: yeni proje için  blocofy init <dizin>   ·   mevcut dizin için  blocofy link <dizin> --context ${name}`);
+  console.log(`  Bağlantıyı panelden kesmek: ${origin}${CONNECTIONS_PATH}   ·   bu makineden çıkış: blocofy logout --context ${name}`);
+  console.log(`technical: platform ${identity.platformOrigin ?? origin}, audience ${identity.audience}, policy_version ${identity.policyVersion ?? "?"}`);
+}
+
 async function login(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, KNOWN.login);
-  if (flags["api-key"] || flags["api-url"] !== undefined) {
-    if (!flags["api-key"]) {
-      console.error("--api-url is only used with --api-key. Nothing was written.");
-      process.exit(1);
-    }
+  if (flags["api-key"]) {
     await loginApiKey(flags, positionals);
     return;
   }
+  // ADR-0014 O2: the browser is the default; a pasted dev token (`--url` / `--token` / `--keychain`) is the advanced path.
+  if (flags.url === undefined && flags.token === undefined && !flags.keychain) {
+    await browserLogin(flags, positionals);
+    return;
+  }
+  if (flags["api-url"] !== undefined || flags.site !== undefined || flags["insecure-storage"] || flags["no-browser"]) {
+    console.error("--api-url / --site / --insecure-storage / --no-browser belong to the browser login (`blocofy login`) or `--api-key`; a pasted dev token takes --url and --token. Nothing was written.");
+    process.exit(1);
+  }
   let url = typeof flags.url === "string" ? normalizeUrl(flags.url) : "";
   let token = typeof flags.token === "string" ? flags.token.trim() : "";
+  // ADR-0014 B6: a token on the command line is visible to other local users (ps) and kept in shell history.
+  if (token) printWarning({ code: "TOKEN_IN_ARGV", message: "The dev token was given on the command line, where `ps` and your shell history can see it. Prefer `blocofy login --url <site> --token` (hidden prompt) or BLOCOFY_URL + BLOCOFY_TOKEN." }, { json: JSON_MODE });
 
   // Flag ile verildiyse anında doğrula (prompt'a düşmeden).
   if (url && !isValidUrl(url)) {
@@ -734,7 +968,7 @@ async function login(rest) {
     console.error(
       token.startsWith("blcf_")
         ? "Invalid --token — that is a v1 API key (blcf_…), not a theme dev token (bcf_…). The two are separate credentials: add the API key with `blocofy login --api-key`. Nothing was written."
-        : "Invalid --token — must start with bcf_.",
+        : "Invalid --token — must start with bcf_ or bcf2_.",
     );
     process.exit(1);
   }
@@ -753,13 +987,30 @@ async function login(rest) {
           "Enter a valid URL, e.g. https://store.myblocofy.com",
         );
       }
+      if (!token && process.stdin.isTTY) {
+        // ADR-0014 B6: the dev token prompt does not echo.
+        rl.close();
+        for (let i = 0; i < 3 && !token; i += 1) {
+          const answer = await promptSecret("Dev token (bcf_… / bcf2_…, hidden): ");
+          if (answer === null) {
+            console.error("Cancelled. Nothing was written.");
+            process.exit(1);
+          }
+          if (isValidToken(answer.trim())) token = answer.trim();
+          else console.error("  ✗ Token must start with bcf_ or bcf2_ — get one from the admin panel: Settings → Theme CLI tokens.");
+        }
+        if (!token) {
+          console.error("Too many invalid attempts.");
+          process.exit(1);
+        }
+      }
       if (!token) {
         token = await promptValid(
           rl,
           "Dev token (bcf_…): ",
           (s) => s.trim(),
           isValidToken,
-          "Token must start with bcf_ — get one from the admin panel: Settings → Theme CLI tokens.",
+          "Token must start with bcf_ or bcf2_ — get one from the admin panel: Settings → Theme CLI tokens.",
         );
       }
     } finally {
@@ -777,6 +1028,7 @@ async function login(rest) {
   saveVerifiedPair(name, "dev", { url, secret: token, identity, storeName });
   console.log(`✓ Saved context "${name}" → ${credentialsPath()}`);
   console.log(`  Site: ${siteLabel(identity.site)} — commands using context "${name}" target this site.`);
+  console.log(`  Secret store: ${storeLabel(storeName)}`);
   console.log(`Next: bind a project directory:  blocofy link <dir> --context ${name}   (or pull into an empty one: blocofy theme pull <dir> --context ${name})`);
 }
 
@@ -791,6 +1043,7 @@ async function contextsCommand(rest) {
     platform_origin: c.platform_origin ?? null,
     dev: c.dev ? { url: c.dev.url, store: c.dev.secret.store } : null,
     api: c.api ? { url: c.api.url, store: c.api.secret.store } : null,
+    login: c.oauth ? { url: c.oauth.url, store: c.oauth.secret.store, profile: c.oauth.profile ?? null, state: c.oauth.state ?? "active" } : null,
     verified_at: c.verified_at ?? null,
   }));
   if (JSON_MODE) {
@@ -803,7 +1056,8 @@ async function contextsCommand(rest) {
   }
   for (const r of rows) {
     const site = r.site ? `${siteLabel(r.site)} · ${r.site.id}` : "(not verified yet)";
-    const pairs = [r.dev ? `dev ${r.dev.url} [${r.dev.store}]` : null, r.api ? `api ${r.api.url} [${r.api.store}]` : null].filter(Boolean).join(", ");
+    const login = r.login ? `cli-login ${r.login.url} [${r.login.store}]${r.login.profile ? ` ${r.login.profile.id}@${r.login.profile.version}` : ""}${r.login.state === "reauth_required" ? " (needs a new login)" : ""}` : null;
+    const pairs = [r.dev ? `dev ${r.dev.url} [${r.dev.store}]` : null, r.api ? `api ${r.api.url} [${r.api.store}]` : null, login].filter(Boolean).join(", ");
     console.log(`${r.current ? "*" : " "} ${r.name}  ${site}  ${pairs}`);
   }
 }
@@ -822,20 +1076,82 @@ async function useCommand(rest) {
   console.log("  (Inside a bound project the project's site decides; `use` never retargets it.)");
 }
 
+/**
+ * ADR-0014 §5.5 — `blocofy logout [--context <name>]`. Two independent results, both printed:
+ *   server  revoked (RFC 7009 /revoke answered 200) | unreachable (network / 5xx: NOT revoked) | refused (another
+ *           answer: NOT revoked) | unavailable (the saved login could not be read: NOT revoked) | not_applicable
+ *           (a pasted token or key: revoke it in the panel)
+ *   local   cleared | failed — done whatever the server said.
+ * Exit 0 only when the local login is cleared and nothing is left open on the server; otherwise 4.
+ */
 async function logoutCommand(rest) {
   const { flags, positionals } = parseArgsOrExit(rest, []);
-  const name = typeof flags.context === "string" ? flags.context : null;
-  if (!name || positionals.length) throw new TargetError("USAGE", "Usage: blocofy logout --context <name>", {}, 1);
-  withStoreLock(() => {
-    const store = loadStore();
-    const ctx = store.contexts[name];
-    if (!ctx) throw new TargetError("TARGET_CONTEXT_UNKNOWN", `No context named "${name}".`, { context: name });
-    removeSecrets(name, ctx);
-    delete store.contexts[name];
-    if (store.current_context === name) store.current_context = null;
-    saveStore(store);
-  });
-  console.log(`✓ Removed context "${name}" and its secrets.`);
+  if (positionals.length) throw new TargetError("USAGE", "Usage: blocofy logout [--context <name>]", {}, 1);
+  const store0 = loadStore();
+  const name = typeof flags.context === "string" ? flags.context : store0.current_context;
+  if (!name) throw new TargetError("USAGE", "Usage: blocofy logout --context <name> (no default context is set; see `blocofy contexts`).", {}, 1);
+  const ctx = store0.contexts[name];
+  if (!ctx) throw new TargetError("TARGET_CONTEXT_UNKNOWN", `No context named "${name}".`, { context: name });
+
+  let server = { outcome: "not_applicable", status: null };
+  if (ctx.oauth) {
+    let tokens = null;
+    try {
+      tokens = readOAuthTokens(name, ctx);
+    } catch {
+      tokens = null;
+    }
+    const token = tokens?.refresh_token ?? tokens?.access_token ?? null;
+    if (token) registerSecret(token);
+    server = token && ctx.oauth.revocation_endpoint
+      ? await revokeToken({ endpoint: ctx.oauth.revocation_endpoint, token, clientId: ctx.oauth.client_id ?? CLI_CLIENT_ID })
+      : { outcome: "unavailable", status: null };
+  }
+
+  let local = "cleared";
+  let localError = null;
+  try {
+    withStoreLock(() => {
+      const store = loadStore();
+      const current = store.contexts[name];
+      if (!current) return;
+      removeSecrets(name, current);
+      delete store.contexts[name];
+      if (store.current_context === name) store.current_context = null;
+      saveStore(store);
+    });
+  } catch (error) {
+    local = "failed";
+    localError = error;
+  }
+
+  const hub = ctx.oauth ? `${String(ctx.oauth.url).replace(/\/+$/, "")}${CONNECTIONS_PATH}` : null;
+  const ok = local === "cleared" && (server.outcome === "revoked" || server.outcome === "not_applicable");
+  if (JSON_MODE) {
+    console.log(JSON.stringify({ logout: { context: name, local, server: server.outcome, ...(server.status ? { server_status: server.status } : {}), ...(hub && server.outcome !== "revoked" ? { revoke_in_panel: hub } : {}) } }, null, 2));
+  } else {
+    console.log(local === "cleared" ? `✓ Yerel giriş silindi (context "${name}").` : `✗ Yerel giriş SİLİNEMEDİ (context "${name}"): ${redact(localError?.message ?? String(localError))}`);
+    switch (server.outcome) {
+      case "revoked":
+        console.log("✓ Sunucudaki CLI bağlantısı iptal edildi.");
+        break;
+      case "not_applicable":
+        console.log("  Sunucuda iptal edilecek bir CLI girişi yok: bu context yapıştırılmış bir token/anahtar taşıyordu; onu panelden iptal edebilirsin.");
+        break;
+      case "unreachable":
+        console.log(`✗ Sunucudaki bağlantı İPTAL EDİLMEDİ (platforma ulaşılamadı${server.status ? `, HTTP ${server.status}` : ""}) — panelden kes: ${hub}`);
+        break;
+      case "refused":
+        console.log(`✗ Sunucudaki bağlantı İPTAL EDİLMEDİ (platform isteği reddetti, HTTP ${server.status}) — panelden kes: ${hub}`);
+        break;
+      default:
+        console.log(`✗ Sunucudaki bağlantı İPTAL EDİLMEDİ (kayıtlı giriş okunamadı) — panelden kes: ${hub}`);
+    }
+  }
+  if (!ok) {
+    if (!JSON_MODE) console.error(`logout: local ${local}, server ${server.outcome} — not complete (exit 4).`);
+    process.exit(4);
+  }
 }
 
 async function linkCommand(rest) {
@@ -847,8 +1163,7 @@ async function linkCommand(rest) {
   if (!flagContext && !process.env.BLOCOFY_CONTEXT && !envCtx) {
     throw new TargetError("TARGET_CONTEXT_REQUIRED", "`blocofy link` needs the context to bind: pass --context <name> (see `blocofy contexts`).", {});
   }
-  const resolved = await resolveContext({ flagContext, envContextName: process.env.BLOCOFY_CONTEXT || null, envCtx, getStore: () => loadStore(), binding: null });
-  const secrets = resolved.env ? resolved.env.secrets : readSecrets(resolved.name, resolved.context);
+  const { resolved, secrets } = await credentialsFor(await resolveContext({ flagContext, envContextName: process.env.BLOCOFY_CONTEXT || null, envCtx, getStore: () => loadStore(), binding: null }));
   registerSecret(secrets.devToken);
   registerSecret(secrets.apiKey);
   assertCredentialTypes({ resolved, secrets });
@@ -886,6 +1201,31 @@ async function targetCommand(rest) {
   const t = await prepareTarget({ command: "target", commandClass: "read", dir, flags, needs: "any", mode: "read", record: false, quiet: true, allowCurrentContext: true });
   if (JSON_MODE) console.log(JSON.stringify({ target: t.display }, null, 2));
   else printTarget(t.display, { stream: process.stdout });
+}
+
+/**
+ * ADR-0014 §5 — the secrets of a resolved context. A browser-login context answers with its (renewed) CLI token in
+ * both places: the v1 API at its platform origin and, when the site has a domain, the renderer's `/api/dev`.
+ * Returns `{ resolved, secrets, renewToken }` (`renewToken`: a getter for long-running commands, else null).
+ */
+async function credentialsFor(resolved) {
+  activeContext = resolved.name;
+  if (resolved.env) return { resolved, secrets: resolved.env.secrets, renewToken: null };
+  const ctx = resolved.context;
+  if (!ctx.oauth) return { resolved, secrets: readSecrets(resolved.name, ctx), renewToken: null };
+  const access = await accessTokenFor(resolved.name);
+  registerSecret(access);
+  const view = { ...ctx, api: { url: ctx.oauth.url, secret: ctx.oauth.secret } };
+  if (ctx.oauth.dev_url) view.dev = { url: ctx.oauth.dev_url, secret: ctx.oauth.secret };
+  return {
+    resolved: { ...resolved, context: view, oauth: true },
+    secrets: { devToken: ctx.oauth.dev_url ? access : null, apiKey: access },
+    renewToken: async () => {
+      const t = await accessTokenFor(resolved.name);
+      registerSecret(t);
+      return t;
+    },
+  };
 }
 
 /** "BLOCOFY_CONTEXT=beta, env credentials" — the stated context choices an explicit --context overrode. */
@@ -931,7 +1271,7 @@ async function prepareTarget({ command, commandClass, dir, flags, needs, mode, r
   const { newBinding } = enforceBindingPolicy({ commandClass, binding, dir, command });
   const envCtx = envContext();
   let cachedStore = null;
-  const resolved = await resolveContext({
+  const chosen = await resolveContext({
     flagContext: typeof flags.context === "string" ? flags.context : null,
     envContextName: process.env.BLOCOFY_CONTEXT || null,
     envCtx,
@@ -941,14 +1281,17 @@ async function prepareTarget({ command, commandClass, dir, flags, needs, mode, r
     isTTY: Boolean(process.stdin.isTTY && process.stderr.isTTY),
     prompt: promptContext,
   });
-  precheckContext({ binding, resolved });
-  const secrets = resolved.env ? resolved.env.secrets : readSecrets(resolved.name, resolved.context);
+  precheckContext({ binding, resolved: chosen });
+  const { resolved, secrets, renewToken } = await credentialsFor(chosen);
   registerSecret(secrets.devToken);
   registerSecret(secrets.apiKey);
   assertCredentialTypes({ resolved, secrets });
 
   const hasDev = Boolean(resolved.context.dev && secrets.devToken);
   const hasApi = Boolean(resolved.context.api && secrets.apiKey);
+  if (needs === "dev" && !hasDev && resolved.oauth) {
+    throw new TargetError("LOGIN_REQUIRED", `Context "${resolved.name}" is a CLI login, but the site has no domain yet, so the theme-file endpoints (/api/dev) cannot be reached. Nothing was sent. Give the site a domain in the panel, then log in again: blocofy login --context ${resolved.name}`, { context: resolved.name }, 1);
+  }
   if (needs === "dev" && !hasDev) {
     throw new TargetError("LOGIN_REQUIRED", `Login required: context "${resolved.name}" has no dev token. Run \`blocofy login${resolved.env ? "" : ` --context ${resolved.name}`}\` (or set BLOCOFY_URL + BLOCOFY_TOKEN).`, { context: resolved.name }, 1);
   }
@@ -985,6 +1328,7 @@ async function prepareTarget({ command, commandClass, dir, flags, needs, mode, r
     binding,
     newBinding,
     display,
+    renewToken,
   };
 }
 
@@ -2228,7 +2572,8 @@ async function themeDev(rest) {
   const handle = startDevServer({
     dir: themeDir,
     url: creds.url,
-    token: creds.token,
+    // A CLI login's access token lives 10 minutes: the server asks for a fresh one per request.
+    token: target.renewToken ?? creds.token,
     port,
     // Taslak senkronu dev session'a BAĞLI DEĞİL: `pushTheme({draft:true})` /api/dev/theme'e gider ve
     // session'dan hiçbir veri kullanmaz. Bu satır `Boolean(session)` iken, session 410 alınca senkron
@@ -2653,6 +2998,137 @@ async function themeWorkCancel(rest) {
   console.log(`✓ Çalışma iptal edildi: ${handle}. Canlı site değişmedi; çalışmanın teması tema kitaplığında duruyor.`);
 }
 
+// ── blocofy init (ADR-0014 §5.6, wave P4) ─────────────────────────────────────────────────────────────────
+
+const INIT_USAGE = "blocofy init [dir] [--site <handle|slug>] [--context <name>] [--api-url <url>] [--no-browser] [--insecure-storage]";
+
+/** The context a resumed init directory recorded (`.blocofy/local.json`), if any. */
+function savedInitContext(dir) {
+  try {
+    const local = JSON.parse(readFileSync(join(dir, ".blocofy", "local.json"), "utf8"));
+    return typeof local?.context === "string" && local.context ? local.context : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `blocofy init [dir]`: pre-checks without any request; then the credential (a saved context, env credentials, or a
+ * browser login on a terminal); then the state machine of lib/init.mjs. Exit 0 only when a preview exists and the live
+ * theme read back is the one read before; 5 when the live theme changed meanwhile; 3 for a directory/site refusal.
+ */
+async function initCommand(rest) {
+  const { flags, positionals } = parseArgsOrExit(rest, KNOWN.init);
+  if (positionals.length > 1) throw new TargetError("USAGE", `Usage: ${INIT_USAGE}`, {}, 1);
+  const dir = resolve(positionals[0] ?? process.cwd());
+  const siteArg = typeof flags.site === "string" ? flags.site : null;
+  const unattended = isUnattended();
+
+  // 1. Pre-checks: nothing sent, nothing written.
+  const pre = inspectInitDir(dir);
+  if (pre.kind === "dirty") {
+    throw new InitError("INIT_DIR_NOT_EMPTY", `${dir} is not empty and is not a Blocofy project. Nothing was written. Run \`blocofy init\` in a new, empty directory (init never overwrites files).`, {
+      exitCode: 3,
+      details: { dir },
+      lines: ["Bu dizin boş değil ve bir Blocofy projesi değil; hiçbir şeyin üzerine yazılmadı.", "  Boş, yeni bir dizinde çalıştır:  blocofy init <yeni-dizin>"],
+    });
+  }
+  if (pre.kind === "legacy_project") {
+    throw new InitError("INIT_ALREADY_BOUND", `${dir} is already bound to a site (by \`link\` or \`theme pull\`); init does not take it over. Nothing was written. In that project use: blocofy theme work start`, {
+      exitCode: 3,
+      details: { dir },
+      lines: ["Bu dizin zaten bir siteye bağlı (link ya da theme pull ile); init onu sahiplenmez. Hiçbir şey yazılmadı.", "  O projede yeni bir tema çalışması başlat:  blocofy theme work start"],
+    });
+  }
+  if (siteArg && pre.kind === "resume" && String(pre.init.site_id) !== siteArg && pre.project?.site_slug !== siteArg) {
+    throw new InitError("INIT_SITE_MISMATCH", `${dir} was set up for site ${pre.project?.site_slug ?? pre.init.site_id}, not ${siteArg}. Nothing was sent or written.`, { exitCode: 3, details: { dir } });
+  }
+  // Unattended: never a browser, never a guessed site.
+  if (unattended && !siteArg) {
+    throw new InitError("INIT_SITE_REQUIRED", "In a non-interactive run, init needs the site named explicitly: --site <handle|slug> (and a saved --context or env credentials). Nothing was sent.", {
+      exitCode: 3,
+      lines: ["Etkileşimsiz çalıştırmada init hangi siteye kurulacağını tahmin etmez; hiçbir şey gönderilmedi.", "  Siteyi açıkça ver:  blocofy init <dizin> --site <site> --context <giriş>"],
+    });
+  }
+
+  // 2. The credential.
+  const envCtx = envContext();
+  let contextName = typeof flags.context === "string" ? flags.context : process.env.BLOCOFY_CONTEXT || (envCtx ? ENV_CONTEXT : null) || (pre.kind === "resume" ? savedInitContext(dir) : null);
+  if (!contextName) {
+    if (unattended) {
+      throw new InitError("INIT_LOGIN_REQUIRED", "No credential for init: pass --context <name> of a saved login, or set env credentials. A non-interactive run never opens a browser. Nothing was sent.", { exitCode: 3 });
+    }
+    ({ name: contextName } = await browserLoginAndSave({ flags, contextName: null, siteArg }));
+  }
+  const chosen = await resolveContext({ flagContext: contextName, envContextName: null, envCtx, getStore: () => loadStore(), binding: null });
+  const { resolved, secrets, renewToken } = await credentialsFor(chosen);
+  registerSecret(secrets.devToken);
+  registerSecret(secrets.apiKey);
+  assertCredentialTypes({ resolved, secrets });
+  if (!(resolved.context.api && secrets.apiKey) || !(resolved.context.dev && secrets.devToken)) {
+    throw new TargetError("LOGIN_REQUIRED", `Context "${resolved.name}" cannot run init: it needs the v1 API (theme work, preview) and the theme files endpoint. Log in with \`blocofy login\` (one login covers both) or add the missing pair.`, { context: resolved.name }, 1);
+  }
+  const identity = await verifyTarget({ resolved, secrets, binding: null, retry });
+  for (const w of identity.warnings ?? []) printWarning(w, { json: JSON_MODE });
+  if (siteArg && !siteMatches(identity.site, siteArg)) {
+    throw new InitError("INIT_SITE_MISMATCH", `Context "${resolved.name}" is for ${identity.site.slug ?? identity.site.id}, not ${siteArg}. Nothing was sent or written.`, { exitCode: 3, details: { context: resolved.name, site: identity.site.id } });
+  }
+  if (!JSON_MODE) printTarget(targetData({ site: identity.site, url: resolved.context.api.url, platformOrigin: identity.platformOrigin, contextName: resolved.name, contextSource: chosen.source, contextOverrides: [], bindingLabel: pre.kind === "resume" ? "this init directory" : "none (new init)", command: "init", mode: "draft · new work" }));
+
+  // 3. The state machine.
+  const api = initApi({
+    apiUrl: resolved.context.api.url,
+    devUrl: resolved.context.dev.url,
+    token: renewToken ?? secrets.apiKey,
+    devToken: renewToken ?? secrets.devToken,
+    onRetry,
+  });
+  const result = await runInit({
+    dir,
+    identity,
+    contextName: resolved.env ? ENV_CONTEXT : resolved.name,
+    profile: resolved.context.oauth?.profile ?? null,
+    api,
+    log: (line) => {
+      if (!JSON_MODE) console.error(line);
+    },
+  });
+
+  const rel = relative(process.cwd(), dir) || ".";
+  if (!result.liveUnchanged) {
+    throw new InitError("INIT_LIVE_CHANGED", `The live theme read back after init (${result.liveAfter ?? "none"}) is not the one read before it started (${result.liveBefore ?? "none"}). init never writes the live site; the change came from elsewhere. Not reported as a success.`, {
+      exitCode: 5,
+      details: { live_before: result.liveBefore, live_after: result.liveAfter, work: result.work.id },
+      lines: [
+        `Canlı tema init başladığından beri değişti (önce: ${result.liveBefore ?? "yok"}, şimdi: ${result.liveAfter ?? "yok"}). Bu yüzden başarı denmedi.`,
+        "  init canlı siteye yazmaz; değişiklik panelden ya da başka bir bağlantıdan gelmiş olabilir. Panelde tema geçmişine bak.",
+        `  Çalışman ve dosyaların yerinde: ${result.work.id} → ${rel}`,
+      ],
+    });
+  }
+  if (result.state !== "previewed") {
+    throw new InitError("INIT_PREVIEW_UNAVAILABLE", `The project is set up (work ${result.work.id}, files in ${rel}) and the live site did not change, but no preview link could be made (${result.preview}: the work's theme has no page with a plain address). Run \`blocofy init\` again to retry the preview.`, {
+      exitCode: 1,
+      details: { work: result.work.id, preview: result.preview },
+      lines: [
+        "Proje hazır ve canlı siten değişmedi, ama önizleme bağlantısı oluşturulamadı: çalışmanın temasında adresi olan bir sayfa yok.",
+        `  Aynı dizinde yeniden çalıştırınca yalnız önizleme denenir:  blocofy init ${rel}`,
+      ],
+    });
+  }
+  if (JSON_MODE) {
+    console.log(JSON.stringify({ init: { dir, state: result.state, work: { id: result.work.id, theme: result.work.theme }, preview_url: result.previewUrl, preview_created_earlier: result.previewCreatedEarlier, live_unchanged: true, live_theme: result.liveAfter, context: resolved.name, site: identity.site } }, null, 2));
+    return;
+  }
+  console.log("✓ Taslak hazır. Canlı siten değişmedi.");
+  console.log(`  Çalışma: ${result.work.id} (tema ${result.work.theme}) — dosyalar: ${rel}`);
+  if (result.previewUrl) console.log(`  Önizleme (bir kez gösterilir; paylaşılabilir, süresi dolar): ${result.previewUrl}`);
+  else console.log("  Önizleme bağlantısı daha önce oluşturuldu (bağlantılar bir kez gösterilir).");
+  console.log(`Sonraki adım: dosyaları düzenle, sonra  blocofy theme push ${rel} --draft --work ${result.work.id}`);
+  console.log(`  Yayın için insan onayı iste:  blocofy theme work request-approval ${result.work.id}`);
+  console.log(`technical: live theme ${result.liveAfter ?? "none"} read before and after; state in ${join(rel, ".blocofy", "init.json")}`);
+}
+
 const THEME_WORK_USAGE = "blocofy theme work start|status|resume|seal|request-approval|cancel … (see `blocofy --help`)";
 
 async function themeWork(rest) {
@@ -2868,6 +3344,7 @@ function commandKey(a, b) {
 // command → handler. Every failure exits through failAndExit (exit codes 1/2/3, --json envelope last).
 const COMMANDS = {
   login: login,
+  init: initCommand,
   contexts: contextsCommand,
   use: useCommand,
   logout: logoutCommand,
