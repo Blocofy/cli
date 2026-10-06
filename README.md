@@ -5,9 +5,10 @@ instant preview, and publish. The CLI does **not** build assets — generate the
 own tools (npm/Vite/Tailwind); the platform serves plain Liquid + static assets.
 
 ```bash
-npx @blocofy/cli login          # site URL + dev token (admin panel: Settings → Theme CLI tokens)
-cd path/to/theme
-npx @blocofy/cli theme dev       # http://localhost:3030 — local theme + live data, livereload
+npx @blocofy/cli login           # browser login: pick your site, approve (draft-only)
+npx @blocofy/cli init my-site    # a theme work of its own + its files + a preview link; live site unchanged
+cd my-site
+npx @blocofy/cli theme push --draft --work <wk_…>
 ```
 
 `login` saves the site under a named **context** (default: the site's slug) in
@@ -20,18 +21,44 @@ targets the right one — see [Contexts and project binding](#contexts-and-proje
 ### Login & contexts
 
 ```
-blocofy login [--context <name>] [--url <url>] [--token <bcf_…>] [--keychain]
+blocofy login [--context <name>] [--site <handle|slug>] [--api-url <url>] [--no-browser] [--insecure-storage]
 ```
-Verify a dev token against its site (`GET /api/dev/whoami`) and save it as a named context
-(default name: the site's slug). Nothing is saved if verification fails. Get a token from the
-admin panel → Settings → Theme CLI tokens.
+**Browser login (default, 0.16.0).** The CLI opens your system browser on the platform
+(Authorization Code + PKCE S256), you pick the site and approve; the browser comes back to a
+one-shot listener on `http://127.0.0.1:<port>/callback` (or `[::1]`; `localhost` is never used).
+The CLI checks `state` and the RFC 9207 `iss` against the platform's discovery metadata before
+it exchanges the code, and says "connected" only after `GET /api/v1/ping` confirms the site, the
+profile and the CLI audience. The login is **draft-only** ("Tema geliştirme", `theme-dev@1`): it
+can start and fill theme works, push to its own work's draft and create preview links, but it can
+never change the live site or publish — publishing is the panel's (or a human approval's) job.
+- Storage: the OS secure store — macOS Keychain, Windows DPAPI-protected file
+  (`%APPDATA%\blocofy\secrets.dpapi`), Linux Secret Service (`secret-tool`). With no OS store the
+  login is **refused**, never silently written to a plain file; `--insecure-storage` (or
+  `BLOCOFY_SECRET_STORE=file`) chooses `~/.blocofy/secrets.json` (0600) explicitly and is announced.
+- The access token lives 10 minutes and renews itself with a single-use refresh token, one
+  renewal at a time across every running `blocofy` (lock `~/.blocofy/.refresh-<context>.lock`,
+  `/token` timeout 10 s). A refused renewal (revoked, expired, reused) marks the context
+  `reauth_required`: run `blocofy login --context <name>` again.
+- `--site` refuses (and revokes) a login for any other site; `--no-browser` prints the URL only;
+  `--api-url` names the platform (default `https://app.blocofy.com`).
+- Needs a terminal. CI (`CI` set, no TTY) and SSH sessions never open a browser: use env
+  credentials or the advanced options below.
+
+```
+blocofy login --url <url> --token [--context <name>] [--keychain]      # advanced: pasted dev token
+```
+Verify a dev token (`bcf_…`, or a profiled `bcf2_…` — needs CLI 0.16.0+) against its site
+(`GET /api/dev/whoami`) and save it as a named context (default name: the site's slug). Nothing
+is saved if verification fails. `--token` without a value reads it from a hidden prompt;
+`--token <value>` still works but warns (`TOKEN_IN_ARGV`: argv is visible in `ps` and shell
+history). Get a token from the admin panel → Settings → Theme CLI tokens.
 - `--keychain` — keep the secret in the macOS keychain (or `BLOCOFY_SECRET_STORE=keychain`);
-  default is `~/.blocofy/secrets.json` (0600).
+  default is `~/.blocofy/secrets.json` (0600). The output names the store used.
 
 ```
 blocofy login --api-key [--context <name>] [--api-url <url>]
 ```
-Verify a v1 API key (`blcf_live_…`, `GET /api/v1/ping`) and add it to a context. The key is
+Verify a v1 API key (`blcf_live_…` or a profiled `blcf_k2_…`, `GET /api/v1/ping`) and add it to a context. The key is
 read from a **hidden prompt** — the flag takes no value, so it never lands in argv or shell
 history. If the context already has a dev token for another site, nothing is saved
 (`TARGET_CREDENTIAL_MISMATCH`).
@@ -41,8 +68,43 @@ history. If the context already has a dev token for another site, nothing is sav
 ```
 blocofy contexts [--json]          # list saved contexts (never prints secrets)
 blocofy use <name>                 # default context for status / target / pages check outside a project
-blocofy logout --context <name>    # remove a context and its secrets
+blocofy logout [--context <name>]  # remove a context and its secrets (default: the `use` context)
 ```
+`logout` reports two separate results. **Server** (browser logins only): `revoked` (the platform's
+RFC 7009 `/revoke` answered 200), `unreachable` / `refused` / `unavailable` (NOT revoked — the
+output names the panel page where you cut it: Settings → Connections and keys), or
+`not_applicable` (a pasted token/key: revoke it in the panel). **Local**: `cleared` | `failed`,
+done whatever the server said. Exit 0 only when both are done; otherwise exit 4.
+
+### New project: `blocofy init`
+
+```
+blocofy init [dir] [--site <handle|slug>] [--context <name>] [--api-url <url>] [--no-browser] [--insecure-storage]
+```
+Sets up a new project directory end to end, without touching the live site:
+1. Pre-checks, before any request: a missing or empty directory starts; a directory this CLI
+   initialised resumes; a non-empty directory that is not a project is refused
+   (`INIT_DIR_NOT_EMPTY`, exit 3, nothing written); a directory bound to another site is refused
+   (`INIT_SITE_MISMATCH`, exit 3); a project bound by `link`/`pull` is not taken over
+   (`INIT_ALREADY_BOUND`).
+2. The credential: `--context`, env credentials, the directory's saved context, or (on a terminal)
+   a browser login. Non-interactive runs never open a browser and need `--site`.
+3. Reads the live theme, starts a theme work (`POST /api/v1/theme-work`, idempotency key
+   `init:<key>` from `.blocofy/init.json` — written before the first request), downloads the
+   work's theme files, writes `.blocofy/project.json` (+ the additive `profile`) and
+   `.blocofy/local.json` (context + the work), creates a preview link for the work's home page,
+   and reads the live theme again.
+4. Success = the preview link exists **and** the live theme read back is the one read before:
+   "Taslak hazır. Canlı siten değişmedi." If the live theme changed meanwhile (not by init),
+   nothing is called a success: exit 5.
+
+`.blocofy/init.json` (git-ignored, no secret, no link) records the step reached
+(`started → work_created → files_pulled → pinned → previewed`). Run the same command again after a
+timeout, a crash or Ctrl-C: it reads the work back from the platform and continues — the same key
+always returns the same work, never a second one. Two `init`s in one directory at once: one runs,
+the other is refused (`INIT_IN_PROGRESS`). Do not delete `init.json` to "start over": use a new,
+empty directory.
+
 
 ### Project binding
 
@@ -544,7 +606,8 @@ untouched.
 | 1 | Usage / network / HTTP 5xx / a local check that refuses before any request (e.g. a `site migrate` conflict, a `pages migrate-layout` ambiguity). |
 | 2 | The server refused the request (HTTP 4xx) — its `{error}` JSON is printed. |
 | 3 | Target/binding refusal — nothing was read or written (see [Contexts and project binding](#contexts-and-project-binding)). |
-| 4 | `site apply` only: not finished within its bounded pass count. Every step already applied is safe — re-run the same command to resume. |
+| 4 | `site apply`: not finished within its bounded pass count. Every step already applied is safe — re-run the same command to resume. `logout`: the local login could not be removed, or the platform login was NOT revoked (cut it in the panel). |
+| 5 | `init`: the live theme changed while init ran (init never writes it) — not reported as a success. |
 
 `--json`: every failure prints `{"error":{"code","message","details"}}` as the **last** stderr
 line; the target block (`{"target":…}`) and any warning lines are printed on stderr before it.
@@ -560,6 +623,41 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
+- **0.16.0** (unreleased) — Browser login, `blocofy init`, honest `logout` (ADR-0014 wave P4).
+  Pairs with the platform release of the credential profiles (draft-only "Tema geliştirme" by
+  default). **Minimum platform:** the browser login needs a platform that publishes the CLI client
+  (`blocofy-cli`), RFC 9207 `iss`, `/revoke` and the `profile` / `audience` / `dev_endpoint` fields of
+  `GET /api/v1/ping`; an older platform is told apart and refused with "use `login --token`".
+  - **`blocofy login` opens the browser** (PKCE S256, loopback `127.0.0.1`/`[::1]` only, `state`
+    and `iss` checked, `resource=<origin>/api/v1`). Connected = the identity probe, not a config
+    write. Unattended (CI / no TTY) and SSH runs never open a browser. The pasted dev token stays as
+    the advanced path (`login --url <site> --token`, hidden prompt; a token in argv warns).
+  - **Secure storage**: OS store by default (Keychain / DPAPI / Secret Service); no store → refused;
+    the 0600 file only with `--insecure-storage` / `BLOCOFY_SECRET_STORE=file`. **Unverified on real
+    machines:** the Windows (DPAPI via PowerShell) and Linux (Secret Service via `secret-tool`) stores
+    are covered only by tests with a stand-in for those programs; macOS Keychain uses the existing,
+    field-tested adapter.
+  - **Draft-only logins default to their saved work**: for a browser login (or any draft-only profile)
+    `theme push` and `theme dev` write into the theme work saved by `init` / `theme work start`
+    (`.blocofy/local.json`, else `.blocofy/init.json`); `--work` / `--instance` still win. Without a
+    saved work they stop with a hint (`THEME_WORK_REQUIRED`, exit 3) before any request.
+  - **Refresh single-flight** across processes (lock with pid/hostname/acquired_at, ESRCH or 30 s
+    staleness, 10 s `/token` timeout, never retried); reuse/revocation → `reauth_required`. The
+    platform's explicit `error_description: "refresh_token_reused"` is honoured first; a 503 without
+    `Retry-After` is treated as spent only as a fallback for older platforms.
+  - **`init` preview**: uses the work-level `POST /api/v1/theme-work/{handle}/preview-links` when the
+    platform has it (an older platform's 404/405 falls back to finding the work theme's home page).
+  - **`blocofy logout`** reports the platform revocation and the local removal separately (exit 4
+    when either is not done); `--context` defaults to the `use` context.
+  - **`blocofy init [dir]`** (see above): idempotent theme-work start, secret-free
+    `.blocofy/init.json`, refuses dirty / other-site directories, resumes from every step, success
+    only with a preview and the live theme read back unchanged (exit 5 otherwise).
+  - **New platform refusals in plain Turkish**, printed before the usual `error [code]` line and
+    never retried: `live_effect_not_permitted`, `credential_reapproval_required` (due date +
+    re-approval link), `profile_unsupported`, `audience_mismatch`, `ai_draft`,
+    `work_copy_not_writable`.
+  - **Profiled credentials**: `bcf2_` dev tokens and `blcf_k2_` API keys are accepted (0.15 and
+    older refuse `bcf2_` tokens: upgrade the CLI before using one).
 - **0.15.0** (2026-10-05) — Theme space, theme work and human-approved
   publishing. Pairs with the platform release that replaces the 5-draft limit with a per-site theme
   space.
