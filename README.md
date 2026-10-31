@@ -623,7 +623,18 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
-- **0.16.0** (unreleased) — Browser login, `blocofy init`, honest `logout` (ADR-0014 wave P4).
+- **0.17.0** (2026-10-31) — `theme publish` tells you when the live site is not serving the files
+  you published.
+  - **`theme publish` reports an unrefreshed live site.** When the platform answers
+    `live_sealed: false`, the CLI prints the reason and the fix (`blocofy theme push --live --yes`)
+    and exits 4 (not complete) instead of reporting success. Platforms that do not send the field
+    behave as before.
+  - **`blocofy status` shows live file freshness** ("Live files: up to date", or which files are
+    stale, missing or extra on the live site).
+  - `theme publish` accepts `--yes` / `--confirm` (no prompt to skip; accepted so scripts that pass
+    it to every live command do not fail).
+  - `theme dev` no longer prints a preview URL containing `undefined&hr=` for a session without one.
+- **0.16.0** (2026-10-06) — Browser login, `blocofy init`, honest `logout` (ADR-0014 wave P4).
   Pairs with the platform release of the credential profiles (draft-only "Tema geliştirme" by
   default). **Minimum platform:** the browser login needs a platform that publishes the CLI client
   (`blocofy-cli`), RFC 9207 `iss`, `/revoke` and the `profile` / `audience` / `dev_endpoint` fields of
