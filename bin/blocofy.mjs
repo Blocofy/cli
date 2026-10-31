@@ -100,7 +100,8 @@ const KNOWN = {
   themePull: ["draft", "instance"],
   themePush: ["diff", "draft", "instance", "name", "live", "yes", "confirm", "dry-run", "validate", "idempotency-key", "prune", "work"],
   themeDev: ["port", "dry", "no-sync", "name", "instance"],
-  themePublish: ["instance"],
+  // `yes`/`confirm` are accepted (no-op: publish never prompts) so `--yes` works the same as on `theme push --live`.
+  themePublish: ["instance", "yes", "confirm"],
   themeRename: ["name", "dir"],
   themeWorkStart: ["intent", "idempotency-key"],
   themeWorkStatus: ["dir"],
@@ -2596,8 +2597,9 @@ async function themeDev(rest) {
   }
 
   const localUrl = `http://localhost:${port}`;
-  const previewUrl = session ? `${session.previewUrl}&hr=${port}` : null;
-  const editorUrl = session ? `${session.editorUrl}&hr=${port}` : null;
+  // A session without a URL (an older platform answer) must not become "undefined&hr=…".
+  const previewUrl = session?.previewUrl ? `${session.previewUrl}&hr=${port}` : null;
+  const editorUrl = session?.editorUrl ? `${session.editorUrl}&hr=${port}` : null;
 
   // Çözülen site'ı göster (session TOKEN'dan çözer) → hangi tenant'ı düzenlediğin belli olsun.
   const siteLine = session?.site ? `${siteLabel(session.site)} · ` : "";
@@ -2778,6 +2780,16 @@ async function themePublish(rest) {
   console.log(
     `✓ Theme ${result.published} is now LIVE${result.cloned ? " (pages cloned from the previous live theme)" : ""}.`,
   );
+  // The platform seals the new live theme's current files on publish and says whether it did. Not sealed = the
+  // live site may still serve the files this theme had at its last seal (an older app.js): exit 4 so scripts
+  // notice, and say how to seal again. An older platform sends no `live_sealed`: nothing changes.
+  if (result.live_sealed === false) {
+    console.error(
+      `Warning: the live site may still serve this theme's previous files (live files not refreshed: ${result.live_seal_reason ?? "unknown"}).\n` +
+        `Refresh them with:  blocofy theme push --live --yes`,
+    );
+    process.exitCode = 4;
+  }
 }
 
 // ── theme work ("çalışma"): a safe, private copy of the live theme, continued by its exact handle ──────────────
@@ -3242,6 +3254,17 @@ async function status(rest) {
       : `Live theme: none`,
   );
   console.log(`Health: ${s.health}`);
+  // What live actually serves vs. the stored theme files (platforms that report it).
+  const ls = s.live_source;
+  if (ls?.pinned === true && ls.in_sync === false) {
+    const paths = [...(ls.stale ?? []), ...(ls.missing ?? []), ...(ls.extra ?? [])];
+    console.error(`Live files: OUT OF DATE — the live site does not serve ${paths.length} stored file(s): ${paths.slice(0, 5).join(", ")}${paths.length > 5 ? ", …" : ""}`);
+    console.error("  Refresh them with:  blocofy theme push --live --yes");
+  } else if (ls?.pinned === true) {
+    console.log("Live files: up to date");
+  } else if (ls?.pinned === null) {
+    console.error("Live files: could not be checked right now");
+  }
   // CF-T9: no imperative one-line fix — which theme holds the pages, why, and safe (preview-first) next steps.
   for (const line of healthAdvice(s)) console.error(line);
   if (Array.isArray(s.drafts) && s.drafts.length > 0) {
