@@ -183,3 +183,32 @@ test("review M7: a generic server error that echoes the token is redacted, with 
     assert.match(r.stderr, /bad token \[redacted\]/);
   }
 });
+
+test("Özsüt: theme publish accepts --yes (like theme push --live); a publish whose live files were not refreshed exits 4 with the fix", async () => {
+  const dir = project();
+  const ok = await fakeSite({ "POST /api/dev/publish": { status: 200, body: { ok: true, published: "t2", cloned: false, live_sealed: true } } });
+  const r = await run(["theme", "publish", "--instance", "t2", "--yes"], { url: ok.url, cwd: dir });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /is now LIVE/);
+
+  const unsealed = await fakeSite({ "POST /api/dev/publish": { status: 200, body: { ok: true, published: "t2", cloned: false, live_sealed: false, live_seal_reason: "draft_rows" } } });
+  const u = await run(["theme", "publish", "--instance", "t2"], { url: unsealed.url, cwd: dir });
+  assert.equal(u.code, 4, u.stderr);
+  assert.match(u.stderr, /draft_rows/);
+  assert.match(u.stderr, /blocofy theme push --live --yes/);
+
+  const older = await fakeSite({ "POST /api/dev/publish": { status: 200, body: { ok: true, published: "t2", cloned: false } } });
+  assert.equal((await run(["theme", "publish", "--instance", "t2"], { url: older.url, cwd: dir })).code, 0, "an older platform without live_sealed changes nothing");
+});
+
+test("Özsüt: status says when the live site does not serve the stored theme files", async () => {
+  const dir = project();
+  const base = { site: { id: "s1", slug: "site" }, url: null, health: "ok", pages_on_live: 1, orphaned_pages: 0, live_theme_instance: { id: "t1", name: "Canlı", template_count: 3 }, pages_by_instance: [], drafts: [] };
+  const stale = await fakeSite({ "GET /api/dev/site": { status: 200, body: { ...base, live_source: { pinned: true, in_sync: false, stale: ["asset/app.js"], missing: [], extra: [] } } } });
+  const r = await run(["status"], { url: stale.url, cwd: dir });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /OUT OF DATE.*asset\/app\.js/);
+  assert.match(r.stderr, /blocofy theme push --live --yes/);
+  const fresh = await fakeSite({ "GET /api/dev/site": { status: 200, body: { ...base, live_source: { pinned: true, in_sync: true, stale: [], missing: [], extra: [] } } } });
+  assert.match((await run(["status"], { url: fresh.url, cwd: dir })).stdout, /Live files: up to date/);
+});
