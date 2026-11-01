@@ -5,8 +5,8 @@
  *
  * `blocofy login` stores your platform URL + dev token, then `blocofy theme dev`
  * starts a local server that proxies each request to the platform's
- * `/api/dev/render` endpoint (local theme files + live data) with file-watch
- * livereload. No monorepo required.
+ * `/api/dev/render` endpoint (local theme files + the draft's saved content,
+ * local draft browsing) with file-watch livereload. No monorepo required.
  */
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -219,18 +219,20 @@ Usage
       Show which site a command in [dir] would hit (verified), without writing anything.
 
   blocofy theme dev [dir] [--port <n>] [--no-sync] [--name <name>] [--instance <handle>]
-      Start a local dev server that renders your local theme files with the site's
-      live content. Press l to open it, q to quit. Edit a file and save → the view
-      reloads. Saves sync to a DRAFT theme only (never the live site). (dir defaults to cwd)
+      Start a local dev server that shows a DRAFT theme with your local theme files and
+      the draft's saved content; menus, pages, entries and languages stay on the local
+      address (never the live theme). Press l to open it, q to quit. Edit a file and save →
+      the view reloads. Saves sync to a DRAFT theme only (never the live site). Forms are not
+      sent from the local view. (dir defaults to cwd)
       The platform's remote preview and editor views for this command are retired; to
       share a draft page, create a preview link for it (v1 API / MCP create_preview_link).
       The target site is verified ONCE at start; a long session keeps that target (restart
       it after changing credentials, context or the project binding).
         --port <n>   local port (default 3030)
-        --no-sync    local preview only (skip draft sync)
+        --no-sync    skip draft sync; needs --instance <draft-handle> (no draft = no preview)
         --name <name>  name the draft when it is first created (ignored if it already exists)
-        --instance <handle>  sync into this draft (when the platform cannot tell which draft is
-                             the CLI draft it refuses and asks for this; never the live theme)
+        --instance <handle>  sync into and show this draft (when the platform cannot tell which
+                             draft is the CLI draft it refuses and asks for this; never the live theme)
 
   blocofy theme pull [dir] [--draft] [--instance <handle>]
       Download the live theme to disk. (dir defaults to cwd)
@@ -2577,7 +2579,7 @@ async function themeDev(rest) {
   // sync never writes the live theme, so the live theme's handle is refused here.
   const devInstance = typeof flags.instance === "string" ? flags.instance : savedInstance;
   if (devInstance && instanceMaybeLive(devInstance, target.identity?.liveThemeId ?? null)) {
-    console.error(`✗ ${devInstance} is (or could not be told apart from) the LIVE theme. 'theme dev' syncs to a draft only; pick a draft handle (\`blocofy status\`) or use --no-sync.`);
+    console.error(`✗ ${devInstance} is (or could not be told apart from) the LIVE theme. 'theme dev' shows and syncs a draft only; pick a draft handle (\`blocofy status\`).`);
     process.exit(2);
   }
 
@@ -2643,6 +2645,14 @@ async function themeDev(rest) {
     );
   } else {
     console.log(`  Watching ${themeDir} — ${fileCount} theme files\n`);
+  }
+
+  // Local draft browsing: no draft handle → the local view renders nothing (never the live theme).
+  if (noSync && !devInstance) {
+    console.warn(
+      "  ⚠ --no-sync without --instance: there is no draft to show, so the local view only explains that.\n" +
+        "    Pass the draft to preview: blocofy theme dev --no-sync --instance <draft-handle> (handles: blocofy status)\n",
+    );
   }
 
   if (flags.dry) {
