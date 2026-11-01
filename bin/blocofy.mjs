@@ -2596,7 +2596,8 @@ async function themeDev(rest) {
     }
   }
 
-  const localUrl = `http://localhost:${port}`;
+  // The URL the dev server actually binds (IPv4 loopback): `localhost` may resolve to ::1 first.
+  const localUrl = `http://127.0.0.1:${port}`;
   // A session without a URL (an older platform answer) must not become "undefined&hr=…".
   const previewUrl = session?.previewUrl ? `${session.previewUrl}&hr=${port}` : null;
   const editorUrl = session?.editorUrl ? `${session.editorUrl}&hr=${port}` : null;
@@ -2616,7 +2617,7 @@ async function themeDev(rest) {
     .filter(Boolean)
     .join("   ");
   console.log(`\n  Press:  ${keys}`);
-  console.log(`  Edit a theme file and save — every open view reloads automatically.\n`);
+  console.log(`  Edit a theme file and save — the local view reloads automatically.\n`);
 
   // Senkron kapsamı (#119 CLI bulgu #2): hangi dizinler taşınıyor / taşınmıyor —
   // "config/pages senkronlanıyor sandım" karışıklığını açıkça önler.
