@@ -189,6 +189,7 @@ test("404: status preserved, theme 404 HTML served with a diagnosis note; diagno
   const note = r.html.match(/<blocofy-dev-note[^>]*>/)[0];
   assert.match(note, /right:8px/);
   assert.doesNotMatch(note, /left:/);
+  assert.match(r.html, /@media \(max-width:640px\)\{blocofy-dev-note\{bottom:112px!important\}\}/, "above the wrapped banner on a phone");
   assertBrowseHeaders(r.headers, "404");
 });
 
