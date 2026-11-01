@@ -125,9 +125,9 @@ Show which site a command in `[dir]` would hit (verified), without writing anyth
 ```
 blocofy theme dev [dir] [--port <n>] [--no-sync] [--name <name>] [--instance <handle>]
 ```
-Start a local dev server that renders your local theme files with the site's live content.
-Press `l` to open it, `q` to quit. Edit a file and save → the view reloads. Saves sync to a
-**draft** theme only (never the live site). `dir` defaults to cwd. The platform's remote preview
+Start a local dev server that shows a **draft** theme: your local theme files with that draft's
+saved content (local draft browsing). Press `l` to open it, `q` to quit. Edit a file and save → the
+view reloads. Saves sync to a **draft** theme only (never the live site). `dir` defaults to cwd. The platform's remote preview
 and editor views for this command are retired; to share a draft page, create a preview link for
 it (v1 API `POST /themes/{id}/preview-links` or MCP `create_preview_link`; one page per link).
 The target site is verified once at start; a long session keeps that target (restart it after
@@ -136,10 +136,61 @@ The dev server answers this machine only: it listens on `http://127.0.0.1:<port>
 whose `Host` (or `Origin`, when sent) is not that address or `localhost:<port>`, and answers only
 `GET`/`HEAD` (anything else gets `405`). The reload channel is same-origin only.
 - `--port <n>` — local port (default 3030).
-- `--no-sync` — local preview only (skip draft sync).
+- `--no-sync` — do not sync; needs `--instance <draft-handle>` to have something to show. Without it
+  the local view only shows an error page (there is no implicit live preview).
 - `--name <name>` — name the draft when it is first created (ignored if it already exists).
-- `--instance <handle>` — sync into this draft. Needed when the platform cannot tell which draft is the
-  CLI draft (see "Which draft a draft command writes to" below); the live theme's handle is refused.
+- `--instance <handle>` — sync into and show this draft. Needed when the platform cannot tell which
+  draft is the CLI draft (see "Which draft a draft command writes to" below); the live theme's handle
+  is refused.
+
+**Local draft browsing.** The local view renders only a draft theme, never the live one:
+- Which draft: `--instance` (or the theme work saved by `init` / `theme work start`), otherwise the
+  draft the startup sync wrote to. With no draft the CLI does not ask the platform to render at all and
+  the page says "Tema hedefi hazırlanamadı" with the reason (sync failure, no handle returned,
+  `--no-sync` without `--instance`). Requests are never sent with a live theme.
+- What you see: your **local theme files** plus the draft's **saved** content (pages, entries,
+  settings); drafts and scheduled entries are visible, trashed pages and entries are not. The platform
+  adds the local preview band; the CLI adds only the reload script.
+- Navigation stays local: links, `area`s, form actions, `formaction`, `<meta http-equiv=refresh>` and
+  `<link rel=alternate>` that point at one of the site's own addresses (as the platform reports them,
+  also protocol-relative `//host/…`) are rewritten to `http://127.0.0.1:<port>`, keeping path, query and
+  hash. Relative links, other sites and other tenants are left alone. A `javascript:`, `data:` or
+  `vbscript:` URL, a URL with a user name/password, a malformed URL or one with a character reference
+  the CLI cannot decode is removed from those attributes (marked `data-blocofy-blocked="<attribute>"`).
+  Images, scripts, stylesheets, iframes and `<link rel=canonical>` are not touched (assets load from the
+  site's system host; canonical keeps the site's public address).
+- The query string reaches the theme (pagination, filters); the `#hash` stays in the browser.
+- A missing page is answered with HTTP 404 and the draft's own 404 page, plus a small note with the
+  reason. Redirects (for example to a language's canonical address) are not followed locally: the note
+  shows where the live site would redirect.
+- Platform refusals (`instance_is_live`, `instance_not_found`, `bad_search`, …) are shown as a page with
+  their code and HTTP status. A platform that does not speak this contract (version 2) gets the page
+  "Platform sürümü yerel taslak gezinmeyi desteklemiyor"; its HTML is never shown as your draft.
+- **Forms are not sent from the local view.** Every HTML answer carries the header
+  `Content-Security-Policy: form-action 'self'; connect-src 'self'; base-uri 'none'` (plus
+  `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`). Any form
+  submission can only reach the local server, which answers `405` with "Yerel önizlemede formlar
+  gönderilmez"; a `GET` search form becomes a local page request. `fetch`, XHR, `sendBeacon`, WebSocket
+  and `<a ping>` to the live site or third parties are blocked. A theme's own `<meta>` CSP applies on top
+  (the stricter rule wins).
+
+Known limits of local draft browsing:
+- Navigation done by JavaScript (`location.href = …`, `window.open`, the History API, inline `onclick`
+  handlers, a JS redirect) is not rewritten and can open the live site or another address.
+- Scripts, images, iframes and fonts are not restricted (so menus, sliders and embeds work): a theme or
+  third-party script can still load images or frames from other sites (a `GET` request, e.g. a
+  tracking pixel), and JavaScript can open another site in the top window or a new one. The CLI does
+  not claim the local view has no outside effects; it blocks form submissions and script network calls.
+- Features that call the live site from the browser (load-more by `fetch`, search-as-you-type, etc.)
+  do not work locally (`connect-src 'self'`).
+- `http://<site host>` links are matched only when they equal one of the site's addresses exactly
+  (normally `https://`), so an `http://` link to the site is left as is.
+- Absolute form actions are rewritten to `127.0.0.1`; open the view on `http://127.0.0.1:<port>` (the
+  printed address), on `localhost:<port>` such a form is refused by the browser.
+- The link rewrite reads HTML tags, comments and raw-text elements (`script`, `style`, `textarea`,
+  `title`, `noscript`, …) like a browser, but not the rarer escape rules inside `<script>` or SVG/MathML
+  `CDATA`; such text may be left unmapped. A `javascript:` link that a theme uses as a menu toggle loses
+  its `href` (its click handler still runs, but it is no longer keyboard-focusable).
 
 ```
 blocofy theme pull [dir] [--draft] [--instance <handle>]
@@ -626,6 +677,21 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
+- **Unreleased** — `theme dev` local draft browsing (needs a platform that speaks browse contract 2).
+  - The local view renders only a draft: `--instance`, the saved theme work or the draft the sync
+    wrote to. Without one it no longer falls back to the live theme: no render request is sent and the
+    page says why ("Tema hedefi hazırlanamadı"). `--no-sync` now needs `--instance`.
+  - Pages are requested with `mode: "browse"`, the raw query string and the local address; the answer
+    is accepted only when it is contract 2 for the same draft. An older platform's answer is shown as
+    "Platform sürümü yerel taslak gezinmeyi desteklemiyor", never as the draft. Platform refusals show
+    their code and keep their HTTP status; a 404 stays a 404.
+  - Links, form actions, `formaction`, meta refresh and `rel=alternate` links to the site's own
+    addresses (also `//host/…`) are rewritten to the local address; `javascript:`/`data:`/userinfo and
+    malformed URLs on those attributes are removed. Assets and canonical are left alone.
+  - Every HTML answer carries `Content-Security-Policy: form-action 'self'; connect-src 'self';
+    base-uri 'none'`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff` and
+    `Cache-Control: no-store`; a form submission gets a `405` page saying forms are not sent locally.
+    JavaScript-driven navigation and image/frame requests are not contained (see "Known limits").
 - **0.17.1** (2026-11-01) — Security fix: `theme dev` answers this machine only.
   - The local server listens on IPv4 loopback (`127.0.0.1`) instead of every network interface, and
     prints that address. There is no option to open it to the network.
@@ -920,9 +986,10 @@ Each retry prints a notice on stderr.
 ## How it works
 
 `theme dev` starts a local HTTP server. For each page request it reads your local theme
-files and sends them to the platform's dev-render endpoint (`/api/dev/render`). The platform
-renders them with the site's **live data** and returns HTML — so the CLI ships no rendering
-engine and you see exactly the production output.
+files and sends them, with the draft theme's handle, to the platform's dev-render endpoint
+(`/api/dev/render`, `mode: "browse"`). The platform renders them with that draft's **saved
+content** and returns HTML — so the CLI ships no rendering engine. The CLI maps the site's own
+links to the local address and adds the reload script.
 
 It also continuously syncs your local files to a **draft theme**, so the same work can be opened
 in the admin theme editor without affecting your published theme. Save a file and the local view

@@ -71,7 +71,15 @@ test("dev server: proxies page to /api/dev/render + livereload; asset from disk;
     req.on("end", () => {
       seen = { auth: req.headers.authorization, body: JSON.parse(body || "{}") };
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ html: `<body>page:${seen.body.path}</body>` }));
+      res.end(
+        JSON.stringify({
+          contract: 2,
+          status: 200,
+          html: `<body>page:${seen.body.path}</body>`,
+          target: { instance: seen.body.instance },
+          internalOrigins: [],
+        }),
+      );
     });
   });
   fake.listen(0);
@@ -79,7 +87,7 @@ test("dev server: proxies page to /api/dev/render + livereload; asset from disk;
   const fakePort = fake.address().port;
 
   const dir = themeFixture();
-  const dev = startDevServer({ dir, url: `http://localhost:${fakePort}`, token: "bcf_test", port: 0 });
+  const dev = startDevServer({ dir, url: `http://localhost:${fakePort}`, token: "bcf_test", port: 0, instance: "t7k2p9" });
   await once(dev.server, "listening");
   const port = dev.server.address().port;
   const baseUrl = `http://localhost:${port}`;
@@ -169,6 +177,7 @@ test("dev server: platform error → 4xx + error page (with livereload)", async 
     url: `http://localhost:${fake.address().port}`,
     token: "bcf_bad",
     port: 0,
+    instance: "t7k2p9",
   });
   await once(dev.server, "listening");
 
@@ -197,9 +206,10 @@ function fakePlatform(seen, { instanceId = "t7k2p9" } = {}) {
         return;
       }
       if (req.url.endsWith("/api/dev/render")) {
-        seen.push(JSON.parse(body || "{}"));
+        const sent = JSON.parse(body || "{}");
+        seen.push(sent);
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ html: "<body>draft</body>" }));
+        res.end(JSON.stringify({ contract: 2, status: 200, html: "<body>draft</body>", target: { instance: sent.instance }, internalOrigins: [] }));
         return;
       }
       res.writeHead(404);
@@ -230,8 +240,8 @@ async function renderOnce({ syncDraft, platform = {} }) {
     rmSync(dir, { recursive: true, force: true });
   });
   const res = await fetch(`http://localhost:${dev.server.address().port}/`);
-  await res.text();
-  return { seen, warnings };
+  const html = await res.text();
+  return { seen, warnings, status: res.status, html };
 }
 
 test("dev server: render isteği taslak instance handle'ını taşır", async () => {
@@ -245,15 +255,20 @@ test("dev server: preview bayrağı GÖNDERİLMEZ (platform chrome enjekte edilm
   assert.equal(seen[0].preview, undefined);
 });
 
-test("dev server: --no-sync → instance taşınmaz, canlı render", async () => {
-  const { seen } = await renderOnce({ syncDraft: false });
-  assert.equal(seen.length, 1);
-  assert.equal(seen[0].instance, undefined);
+test("dev server: --no-sync without --instance → no render request, local terminal error (never live)", async () => {
+  const { seen, status, html } = await renderOnce({ syncDraft: false });
+  assert.equal(seen.length, 0);
+  assert.equal(status, 503);
+  assert.match(html, /Tema hedefi hazırlanamadı/);
+  assert.match(html, /--no-sync/);
 });
 
-test("dev server: push yanıtında instanceId yoksa SESSİZ kalmaz, uyarır", async () => {
-  const { seen, warnings } = await renderOnce({ syncDraft: true, platform: { instanceId: null } });
-  assert.equal(seen[0].instance, undefined);
+test("dev server: push yanıtında instanceId yoksa SESSİZ kalmaz, uyarır ve render istemez", async () => {
+  const { seen, warnings, status, html } = await renderOnce({ syncDraft: true, platform: { instanceId: null } });
+  assert.equal(seen.length, 0, "no handle → zero render dispatch (no live fallback)");
+  assert.equal(status, 503);
+  assert.match(html, /Tema hedefi hazırlanamadı/);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /draft/i);
+  assert.doesNotMatch(warnings[0], /will render LIVE/);
 });

@@ -153,5 +153,7 @@ test("theme dev on a draft-only login syncs into the saved work's theme; --insta
   ({ home, proj } = setup({ local: null }));
   r = await run(home, ["theme", "dev", proj, "--dry", "--no-sync"]);
   assert.equal(r.code, 0, r.stderr);
+  // Local draft browsing: no draft handle → the local view never renders the live theme; said at startup.
+  assert.match(r.stdout + r.stderr, /--no-sync without --instance/);
   assert.deepEqual(writes(), []);
 });

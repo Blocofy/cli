@@ -30,8 +30,10 @@ async function fakePlatform() {
     req.on("data", (d) => (body += d));
     req.on("end", () => {
       calls.push({ method: req.method, url: req.url });
+      const sent = JSON.parse(body || "{}");
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ html: "<body>page</body>" }));
+      // Contract 2 (local draft browsing): the answer names the draft it rendered.
+      res.end(JSON.stringify({ contract: 2, status: 200, html: "<body>page</body>", target: { instance: sent.instance }, internalOrigins: [] }));
     });
   });
   fake.listen(0, "127.0.0.1");
@@ -42,7 +44,8 @@ async function fakePlatform() {
 async function devFixture() {
   const platform = await fakePlatform();
   const dir = themeFixture();
-  const dev = startDevServer({ dir, url: platform.url, token: TOKEN, port: 0 });
+  // A draft handle: without one the dev server never dispatches a render (local draft browsing, decision B).
+  const dev = startDevServer({ dir, url: platform.url, token: TOKEN, port: 0, instance: "t7k2p9" });
   await once(dev.server, "listening");
   const port = dev.server.address().port;
   after(() => {
