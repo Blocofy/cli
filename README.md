@@ -677,6 +677,10 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
+- **0.18.1** (2026-11-01) — `theme dev` polish: no "dev session unavailable … retired" warning on start
+  (a 410 from the retired remote preview is expected); the local 404 note no longer covers the
+  local-browse banner (bottom-right, above the banner on narrow screens); the "forms are not sent" page
+  links back to the form.
 - **0.18.0** (2026-11-01) — `theme dev` local draft browsing (needs a platform that speaks browse contract 2).
   - The local view renders only a draft: `--instance`, the saved theme work or the draft the sync
     wrote to. Without one it no longer falls back to the live theme: no render request is sent and the
