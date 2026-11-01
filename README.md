@@ -626,7 +626,7 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
-- **Unreleased** — `theme dev` answers this machine only.
+- **0.17.1** (2026-11-01) — Security fix: `theme dev` answers this machine only.
   - The local server listens on IPv4 loopback (`127.0.0.1`) instead of every network interface, and
     prints that address. There is no option to open it to the network.
   - A request whose `Host` is not `127.0.0.1:<port>` / `localhost:<port>`, or whose `Origin` is another
