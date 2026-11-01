@@ -108,8 +108,8 @@ test("dev server: proxies page to /api/dev/render + livereload; asset from disk;
   const ac = new AbortController();
   const sseRes = await fetch(`${baseUrl}${LIVERELOAD_PATH}`, { signal: ac.signal });
   assert.equal(sseRes.headers.get("content-type"), "text/event-stream");
-  // Cross-origin iframe'ler subscribe edebilsin.
-  assert.equal(sseRes.headers.get("access-control-allow-origin"), "*");
+  // Same-origin only: no wildcard CORS (test/dev-server-hardening.test.mjs).
+  assert.equal(sseRes.headers.get("access-control-allow-origin"), null);
   ac.abort();
 });
 

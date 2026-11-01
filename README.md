@@ -132,6 +132,9 @@ and editor views for this command are retired; to share a draft page, create a p
 it (v1 API `POST /themes/{id}/preview-links` or MCP `create_preview_link`; one page per link).
 The target site is verified once at start; a long session keeps that target (restart it after
 changing credentials, context or the project binding).
+The dev server answers this machine only: it listens on `http://127.0.0.1:<port>`, refuses a request
+whose `Host` (or `Origin`, when sent) is not that address or `localhost:<port>`, and answers only
+`GET`/`HEAD` (anything else gets `405`). The reload channel is same-origin only.
 - `--port <n>` — local port (default 3030).
 - `--no-sync` — local preview only (skip draft sync).
 - `--name <name>` — name the draft when it is first created (ignored if it already exists).
@@ -623,6 +626,15 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
+- **Unreleased** — `theme dev` answers this machine only.
+  - The local server listens on IPv4 loopback (`127.0.0.1`) instead of every network interface, and
+    prints that address. There is no option to open it to the network.
+  - A request whose `Host` is not `127.0.0.1:<port>` / `localhost:<port>`, or whose `Origin` is another
+    site, is refused before anything is read or rendered (DNS-rebinding and cross-site pages).
+  - Only `GET` and `HEAD` are answered; other methods get `405` with `Allow: GET, HEAD` and never reach
+    the platform. `HEAD` returns headers only and never spends a render.
+  - The reload channel no longer sends `Access-Control-Allow-Origin: *`; the local page still reloads on
+    save. Views on other origins no longer subscribe to it.
 - **0.17.0** (2026-10-31) — `theme publish` tells you when the live site is not serving the files
   you published.
   - **`theme publish` reports an unrefreshed live site.** When the platform answers
