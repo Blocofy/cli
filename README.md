@@ -690,7 +690,7 @@ Each retry prints a notice on stderr.
     malformed URLs on those attributes are removed. Assets and canonical are left alone.
   - Every HTML answer carries `Content-Security-Policy: form-action 'self'; connect-src 'self';
     base-uri 'none'`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff` and
-    `Cache-Control: no-store`; a form submission gets a `405` page saying forms are not sent locally.
+    `Cache-Control: no-store`; a form submission gets a `405` page saying forms are not sent locally, with a link back to the form.
     JavaScript-driven navigation and image/frame requests are not contained (see "Known limits").
 - **0.17.1** (2026-11-01) — Security fix: `theme dev` answers this machine only.
   - The local server listens on IPv4 loopback (`127.0.0.1`) instead of every network interface, and

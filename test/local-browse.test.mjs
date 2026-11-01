@@ -185,6 +185,11 @@ test("404: status preserved, theme 404 HTML served with a diagnosis note; diagno
   assert.match(r.html, /locale_redirect_not_emulated/);
   assert.match(r.html, /\/tr\/x&lt;script&gt;/, "location shown as escaped text");
   assert.equal(renders().length, 1, "the location is not requested");
+  // The platform's local-browse banner sits bottom-left; the note takes the opposite corner so both stay readable.
+  const note = r.html.match(/<blocofy-dev-note[^>]*>/)[0];
+  assert.match(note, /right:8px/);
+  assert.doesNotMatch(note, /left:/);
+  assert.match(r.html, /@media \(max-width:640px\)\{blocofy-dev-note\{bottom:112px!important\}\}/, "above the wrapped banner on a phone");
   assertBrowseHeaders(r.headers, "404");
 });
 
@@ -291,6 +296,7 @@ test("a form POST gets the 405 'forms are not sent' page with browse headers and
   assert.equal(res.headers.get("referrer-policy"), "no-referrer");
   assert.equal(res.headers.get("x-content-type-options"), "nosniff");
   assert.match(res.body, /Yerel önizlemede formlar gönderilmez/);
+  assert.match(res.body, /<a href="\/" onclick="history\.back\(\);return false">Forma geri dön<\/a>/, "a way back to the form");
   assert.equal(calls.length, 0);
 });
 

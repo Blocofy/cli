@@ -2591,10 +2591,13 @@ async function themeDev(rest) {
       const name = typeof flags.name === "string" ? flags.name : null;
       session = await fetchDevSession({ url: creds.url, token: creds.token, name, onRetry });
     } catch (error) {
-      console.warn(
-        `Warning: dev session unavailable (${error?.message || error}). ` +
-          `Live-domain and editor views are disabled; draft sync and local preview keep working.`,
-      );
+      // 410 = the platform retired the remote preview: expected, the local view replaces it — say nothing.
+      if (error?.status !== 410) {
+        console.warn(
+          `Warning: dev session unavailable (${error?.message || error}). ` +
+            `Live-domain and editor views are disabled; draft sync and local preview keep working.`,
+        );
+      }
     }
   }
 
