@@ -16,6 +16,23 @@ npx @blocofy/cli theme push --draft --work <wk_…>
 directory) then binds a project directory to that site so every command run inside it always
 targets the right one — see [Contexts and project binding](#contexts-and-project-binding).
 
+## Who should use which path
+
+Drafts are free; the live site changes through one door. Visitors see a change once the user has
+seen its preview and approved it. An agent (an AI assistant, a script acting for someone) works on a
+copy of the live theme and never writes the live theme directly.
+
+- **Agents, and anyone on the default browser login** (draft-only): start a work with `blocofy init`
+  (a new project) or `blocofy theme work start`, write into it with
+  `blocofy theme push --draft --work <wk_…>`, and share the preview link. When the user, after seeing
+  the preview, says to put it live, run `blocofy theme work request-approval <wk_…> --open --wait` and
+  give them the approval link: one click puts the work live. Say "live" once the work's status is
+  `published`.
+- **A small fix uses the same flow**: work, preview, approval link.
+- **`theme push --live` and `theme publish`** are for a person, or for a CI job running on a key the
+  site owner created for it by name (full profile, at most 90 days). An agent does not use them to put
+  a change live, and a browser login cannot use them.
+
 ## Commands
 
 ### Login & contexts
@@ -30,7 +47,8 @@ The CLI checks `state` and the RFC 9207 `iss` against the platform's discovery m
 it exchanges the code, and says "connected" only after `GET /api/v1/ping` confirms the site, the
 profile and the CLI audience. The login is **draft-only** ("Tema geliştirme", `theme-dev@1`): it
 can start and fill theme works, push to its own work's draft and create preview links, but it can
-never change the live site or publish — publishing is the panel's (or a human approval's) job.
+never change the live site or publish — publishing is the panel's (or a human approval's) job (see
+[Who should use which path](#who-should-use-which-path)).
 - Storage: the OS secure store — macOS Keychain, Windows DPAPI-protected file
   (`%APPDATA%\blocofy\secrets.dpapi`), Linux Secret Service (`secret-tool`). With no OS store the
   login is **refused**, never silently written to a plain file; `--insecure-storage` (or
@@ -208,12 +226,16 @@ blocofy theme push [dir] [--live] [--yes] [--instance <handle>] [--prune]
                     [--name <name>] [--dry-run | --validate] [--diff]
                     [--idempotency-key <k>]
 ```
-By **default** writes to a draft theme (create/update; no delete) — preview & publish it from
-the admin panel, never touching the live site. Publish it with `blocofy theme publish`.
+By **default** writes to a draft (create/update; no delete), never touching the live site. On a
+browser login (draft-only) that draft is the theme work saved by `init` / `theme work start` (see
+"Theme work" below); with a pasted dev token it is the CLI draft. A work goes live through
+`blocofy theme work request-approval`; a CLI draft is published by a person, from the admin panel or
+with `blocofy theme publish`.
 - `--live` — write to the LIVE site immediately (no preview). Asks for confirmation first;
-  non-interactive shells must add `--yes`.
+  non-interactive shells must add `--yes`. For a person or an owner-named CI key only; an agent puts
+  a change live with an approval link instead (see [Who should use which path](#who-should-use-which-path)).
 - `--draft` — explicit draft (same as the default; safe).
-- `--yes` — confirm a `--live` push without prompting (CI/agents).
+- `--yes` — confirm a `--live` push without prompting (CI).
 - `--instance <handle>` — push to a specific theme by its handle. The live theme's handle asks for
   the same confirmation as `--live` (non-interactive shells add `--yes`); so does any handle the CLI
   cannot tell apart from the live theme (the live theme is unknown, or a raw numeric id was given).
@@ -312,6 +334,9 @@ flag, publishes the draft that `theme dev` / `theme push --draft` writes into. T
 refuses to publish a theme that has no pages (it would 404); preview first. The site is the one
 `[dir]`'s project is bound to (`dir` defaults to cwd), so `blocofy theme push ./shop && blocofy
 theme publish ./shop` always publishes `./shop`'s site, whatever directory you run it from.
+For a person or an owner-named CI key only (full profile, at most 90 days). An agent does not use it:
+when the user wants a work live, it runs `theme work request-approval <wk_…> --open --wait` and gives
+them the approval link. A browser login cannot publish.
 - `--instance <handle>` — publish a specific theme. Without it the platform publishes only the
   site's CLI draft; any other theme (a site-state restore draft, a renamed or panel-copied theme) is
   refused with `publish_target_unconfirmed` (exit 2, nothing published) — name it with `--instance`.
@@ -320,9 +345,9 @@ theme publish ./shop` always publishes `./shop`'s site, whatever directory you r
 
 A **work** is a private, safe copy of the site's current live theme: you change it, visitors never
 see it, and a person approves its publication in the admin panel (the CLI never publishes a work).
-Work commands use the **v1 API key** (`blocofy login --api-key`, or `BLOCOFY_API_KEY` +
-`BLOCOFY_API_URL`): the work belongs to the key that started it. The dev token alone is refused
-(`LOGIN_REQUIRED`) before any request.
+Work commands use the **v1 API**: the browser login (`blocofy login`) covers it, or a v1 API key
+(`blocofy login --api-key`, or `BLOCOFY_API_KEY` + `BLOCOFY_API_URL`). The work belongs to the login
+or key that started it. A pasted dev token alone is refused (`LOGIN_REQUIRED`) before any request.
 
 ```
 blocofy theme work start [dir] [--intent "<text>"] [--idempotency-key <k>]
@@ -368,8 +393,9 @@ blocofy theme push [dir] --draft --work <wk_…>
 - `cancel` reads the work's `state_version` and sends it; the live site is untouched and the work's
   theme stays in the theme library.
 - `theme push --work <wk_…>` writes into that work's own draft theme (`--work` implies `--draft`; it
-  cannot be combined with `--live` or `--instance`). It needs **both** the dev token and the API key of
-  the same site, and refuses unless the work is open (`work_state_conflict`, nothing written).
+  cannot be combined with `--live` or `--instance`). It needs **both** the theme-file and the v1 API
+  access of the same site (a browser login has both; with pasted credentials, the dev token and the API
+  key), and refuses unless the work is open (`work_state_conflict`, nothing written).
 - Refusals print a plain Turkish explanation first, then the `error [code]` line (`--json`: the
   envelope only): `not_found`, `work_forbidden`, `work_state_conflict`, `work_stale`, `work_sealed`,
   `work_base_unavailable`, `quota_exceeded`, `capacity_unavailable`, `resource_busy`,
@@ -677,6 +703,11 @@ Each retry prints a notice on stderr.
 
 ## Changelog
 
+- **Unreleased — docs** — README and `--help`: one path for agents and people (ADR-0017). New
+  "Who should use which path" section; the browser login covers theme work commands; the default push
+  target is a draft (the saved work on a browser login); `theme push --live` / `theme publish` are for
+  a person or an owner-named CI key; an agent puts a work live with `theme work request-approval`
+  (`--yes` is "for CI"). No behaviour change.
 - **0.18.1** (2026-11-01) — `theme dev` polish: no "dev session unavailable … retired" warning on start
   (a 410 from the retired remote preview is expected); the local 404 note no longer covers the
   local-browse banner (bottom-right, above the banner on narrow screens); the "forms are not sent" page
@@ -997,7 +1028,8 @@ links to the local address and adds the reload script.
 
 It also continuously syncs your local files to a **draft theme**, so the same work can be opened
 in the admin theme editor without affecting your published theme. Save a file and the local view
-reloads. Publish the draft from the theme editor, or with `blocofy theme publish`, when you're ready.
+reloads. When it is ready, a person publishes it (theme editor, or `blocofy theme publish`); for an
+agent, see [Who should use which path](#who-should-use-which-path).
 
 Credentials live in `~/.blocofy/credentials.json` (contexts, no secrets) + either
 `~/.blocofy/secrets.json` (0600) or the macOS keychain — written by `blocofy login`, or the

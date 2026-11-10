@@ -244,13 +244,16 @@ Usage
                              panel theme card, or \`blocofy status\`)
 
   blocofy theme push [dir] [--live] [--yes] [--instance <handle>] [--prune]
-      By DEFAULT writes to a DRAFT theme (create/update; no delete) — preview & publish
-      it from the admin panel, never touching the live site. Publish it with
-      'blocofy theme publish'.
+      By DEFAULT writes to a DRAFT (create/update; no delete), never touching the live site:
+      on a browser login the saved theme work, otherwise the CLI draft. A work goes live via
+      'theme work request-approval'; a CLI draft is published by a person (admin panel or
+      'blocofy theme publish').
         --live       write to the LIVE site IMMEDIATELY (no preview). Asks for
                      confirmation first; non-interactive shells must add --yes.
+                     For a person or an owner-named CI key; an agent puts a work live
+                     with 'theme work request-approval' instead.
         --draft      explicit draft (same as the default; safe)
-        --yes        confirm a --live push without prompting (for CI / agents)
+        --yes        confirm a --live push without prompting (for CI)
         --instance <handle>  push to a specific theme by its handle. If the platform cannot
                              tell which draft is the CLI draft, a draft push refuses and asks
                              for this. The LIVE theme's handle asks for confirmation like --live
@@ -270,8 +273,8 @@ Usage
   blocofy theme work start [dir] [--intent "<text>"] [--idempotency-key <k>]   (new)
       Start a WORK: a private, safe copy of the site's CURRENT live theme to change and
       later hand over for publication. Visitors never see it. Prints its handle (wk_…) and
-      remembers it in .blocofy/local.json (git-ignored). Needs the v1 API key
-      (blocofy login --api-key); the work belongs to that key.
+      remembers it in .blocofy/local.json (git-ignored). Needs the v1 API: the browser login
+      (blocofy login) or a v1 API key (blocofy login --api-key); the work belongs to it.
         --intent "<text>"       a short label of the job (1-120 characters)
         --idempotency-key <k>   retry key: the same key returns the SAME work, never a second one.
                                 Without it a fresh key is generated and printed
@@ -309,6 +312,9 @@ Usage
       'theme push ./shop && theme publish ./shop' always publishes ./shop's site.
       With no flag, publishes the draft that 'theme dev' / 'theme push --draft' writes into.
       The server refuses to publish a theme that has no pages (it would 404); preview first.
+      For a person or an owner-named CI key. An agent puts a work live with
+      'theme work request-approval <wk_…> --open --wait' (one-click approval link) instead.
+      A browser login cannot publish.
         --instance <handle>  publish a specific theme (handle from the panel / status). Without it
                              the platform publishes only the site's CLI draft; any other theme
                              is refused (publish_target_unconfirmed) — name it with --instance
